@@ -226,6 +226,7 @@
             matches.push({
                 id: "rule-" + rule.id + "-" + (baseStart + match.index),
                 category: "rule",
+                origin: "rule",
                 ruleId: rule.id,
                 ruleName: rule.name,
                 ruleGroup: rule.group,

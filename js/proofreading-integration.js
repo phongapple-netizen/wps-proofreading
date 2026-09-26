@@ -192,7 +192,7 @@
             redundancy: "重复冗余",
             wording: "用词",
             consistency: "前后统一",
-            rule: "规则命中"
+            rule: "规则核对"
         };
         return labels[category] || "校对提示";
     }
@@ -224,7 +224,10 @@
                 actionable: issue.actionable !== false,
                 ruleName: issue.ruleName || "",
                 ruleSource: issue.ruleSource || "",
-                severity: issue.severity || ""
+                severity: issue.severity || "",
+                origin: issue.origin || issueOrigin(issue),
+                confirmedByAI: issue.confirmedByAI === true,
+                aiConflict: issue.aiConflict === true
             };
         }));
     }
@@ -393,24 +396,149 @@
         }, 0);
     }
 
-    function mergeMappedIssues(list) {
-        var sorted = (list || []).slice().sort(function (left, right) {
-            return left.start - right.start ||
-                (Number(right.priority) || 0) - (Number(left.priority) || 0) ||
-                left.end - right.end;
+    function issueOrigin(issue) {
+        return issue && issue.origin ? String(issue.origin) :
+            (issue && issue.category === "rule" ? "rule" : "ai");
+    }
+
+    function overlapsIssues(left, right) {
+        return left.start < right.end && right.start < left.end;
+    }
+
+    function mergeReasons(primary, secondary, suffix) {
+        var parts = [];
+        [primary, secondary, suffix].forEach(function (value) {
+            var item = text(value).trim();
+            if (item && parts.indexOf(item) < 0) parts.push(item);
         });
+        return parts.join("；");
+    }
+
+    function combineRuleAndAi(ruleIssue, aiIssue) {
+        var sameSuggestion = ruleIssue.suggestion === aiIssue.suggestion;
+        var ruleIsReminder = ruleIssue.actionable === false;
+        var combined;
+
+        if (ruleIsReminder) {
+            combined = Object.assign({}, aiIssue, {
+                origin: "rule+ai",
+                ruleName: ruleIssue.ruleName || "",
+                ruleSource: ruleIssue.ruleSource || "",
+                severity: ruleIssue.severity || "",
+                priority: Math.max(Number(ruleIssue.priority) || 0, Number(aiIssue.priority) || 0),
+                needsReview: true,
+                confirmedByAI: true,
+                reason: mergeReasons(ruleIssue.reason, aiIssue.reason, "本地规则提供核对线索，AI 结合上下文给出了具体建议。")
+            });
+            return combined;
+        }
+
+        if (sameSuggestion) {
+            combined = Object.assign({}, ruleIssue, {
+                category: aiIssue.category || ruleIssue.category,
+                origin: "rule+ai",
+                confirmedByAI: true,
+                confidence: Math.max(Number(ruleIssue.confidence) || 0, Number(aiIssue.confidence) || 0),
+                reason: mergeReasons(ruleIssue.reason, aiIssue.reason, "本地规则与 AI 判断一致。")
+            });
+            return combined;
+        }
+
+        return Object.assign({}, ruleIssue, {
+            origin: "rule+ai",
+            aiConflict: true,
+            needsReview: true,
+            reason: mergeReasons(ruleIssue.reason, aiIssue.reason, "本地规则与 AI 建议不一致，已保留规则建议并要求人工确认。")
+        });
+    }
+
+    function mergeMappedIssues(list) {
+        var input = (list || []).slice().filter(function (issue) {
+            return issue && Number.isFinite(Number(issue.start)) && Number.isFinite(Number(issue.end));
+        }).map(function (issue) {
+            return Object.assign({ origin: issueOrigin(issue) }, issue);
+        }).sort(function (left, right) {
+            return left.start - right.start ||
+                left.end - right.end ||
+                (Number(right.priority) || 0) - (Number(left.priority) || 0);
+        });
+
         var kept = [];
-        var lastEnd = -1;
-        sorted.forEach(function (issue) {
-            if (issue.start >= lastEnd) {
-                kept.push(issue);
-                lastEnd = issue.end;
+        input.forEach(function (issue) {
+            var overlapIndex = -1;
+            for (var index = kept.length - 1; index >= 0; index -= 1) {
+                if (kept[index].end <= issue.start) break;
+                if (overlapsIssues(kept[index], issue)) {
+                    overlapIndex = index;
+                    break;
+                }
             }
+            if (overlapIndex < 0) {
+                kept.push(issue);
+                return;
+            }
+
+            var existing = kept[overlapIndex];
+            var existingOrigin = issueOrigin(existing);
+            var incomingOrigin = issueOrigin(issue);
+            var sameOriginal = existing.original === issue.original &&
+                existing.start === issue.start && existing.end === issue.end;
+
+            if (sameOriginal && existingOrigin !== incomingOrigin &&
+                (existingOrigin.indexOf("rule") >= 0 || incomingOrigin.indexOf("rule") >= 0)) {
+                var ruleIssue = existingOrigin.indexOf("rule") >= 0 ? existing : issue;
+                var aiIssue = existingOrigin.indexOf("rule") >= 0 ? issue : existing;
+                kept[overlapIndex] = combineRuleAndAi(ruleIssue, aiIssue);
+                return;
+            }
+
+            var existingRule = existingOrigin.indexOf("rule") >= 0;
+            var incomingRule = incomingOrigin.indexOf("rule") >= 0;
+            var existingPriority = Number(existing.priority) || 0;
+            var incomingPriority = Number(issue.priority) || 0;
+
+            if (incomingRule && !existingRule) {
+                kept[overlapIndex] = issue;
+                return;
+            }
+            if (existingRule && !incomingRule) {
+                return;
+            }
+            if (incomingPriority > existingPriority) {
+                kept[overlapIndex] = issue;
+            }
+        });
+
+        kept.sort(function (left, right) {
+            return left.start - right.start || left.end - right.end;
         });
         kept.forEach(function (issue, index) {
             issue.id = "issue-" + (index + 1) + "-" + issue.start;
         });
         return kept;
+    }
+
+    function batchRuleContext(batch, localRuleIssues, selectionStart) {
+        var base = Number(selectionStart) || 0;
+        var paragraphs = batch || [];
+        var matches = (localRuleIssues || []).filter(function (issue) {
+            return paragraphs.some(function (paragraph) {
+                var start = base + paragraph.offset;
+                var end = start + text(paragraph.text).length;
+                return issue.start < end && issue.end > start;
+            });
+        });
+
+        return matches.slice(0, 20).map(function (issue) {
+            return {
+                original: issue.original,
+                suggestion: issue.actionable === false ? "" : issue.suggestion,
+                ruleName: issue.ruleName || "",
+                source: issue.ruleSource || "",
+                confirmed: issue.needsReview !== true && issue.actionable !== false,
+                review: issue.needsReview === true || issue.actionable === false
+            };
+        });
     }
 
     function providerDisplayName(provider) {
@@ -465,6 +593,13 @@
                 ? root.WpsRulesCenter.evaluate(snapshot.selectedText, snapshot.start)
                 : [];
             collected = collected.concat(localRuleIssues);
+            currentSnapshot = snapshot;
+            currentIssues = mergeMappedIssues(collected);
+            viewIssues();
+            setStatus(localRuleIssues.length
+                ? "本地规则扫描完成，发现 " + localRuleIssues.length + " 项；AI 正在继续校对并核对规则结果…"
+                : "本地规则扫描完成，未发现规则问题；AI 正在继续校对…", "working");
+            reportProgress(2, "规则扫描完成 · AI 校对准备中");
 
             var paragraphs = root.WpsProofreadingCore.splitIntoParagraphs(snapshot.selectedText);
             if (!paragraphs.length) {
@@ -490,7 +625,10 @@
                     abortError.name = "AbortError";
                     throw abortError;
                 }
-                var prompt = root.WpsProofreadingCore.buildPrompt(batches[index], { deep: deep });
+                var prompt = root.WpsProofreadingCore.buildPrompt(batches[index], {
+                    deep: deep,
+                    ruleContext: batchRuleContext(batches[index], localRuleIssues, snapshot.start)
+                });
                 var response = await requestProofreadingModel(options, prompt);
                 if (!currentDocumentMatches(snapshot)) {
                     currentSnapshot = null;
@@ -501,7 +639,13 @@
                 }
                 var parsed = root.WpsProofreadingCore.parseIssues(response);
                 collected = collected.concat(
-                    root.WpsProofreadingCore.mapIssuesToRanges(batches[index], parsed, snapshot.start));
+                    root.WpsProofreadingCore.mapIssuesToRanges(
+                        batches[index], parsed, snapshot.start).map(function (issue) {
+                            return Object.assign({ origin: "ai" }, issue);
+                        }));
+                currentIssues = mergeMappedIssues(collected);
+                currentSnapshot = snapshot;
+                viewIssues();
                 completedFirstPassCharacters += batchCharacterCount(batches[index]);
                 var firstPassPercent = totalFirstPassCharacters > 0
                     ? Math.round((completedFirstPassCharacters / totalFirstPassCharacters) *
@@ -537,7 +681,12 @@
                     var consistencyParsed = root.WpsProofreadingCore.parseConsistencyIssues(consistencyResponse);
                     collected = collected.concat(
                         root.WpsProofreadingCore.mapIssuesToRanges(
-                            paragraphs, consistencyParsed, snapshot.start));
+                            paragraphs, consistencyParsed, snapshot.start).map(function (issue) {
+                                return Object.assign({ origin: "ai" }, issue);
+                            }));
+                    currentIssues = mergeMappedIssues(collected);
+                    currentSnapshot = snapshot;
+                    viewIssues();
                     consistencyCompleted = true;
                     reportProgress(100, "全文一致性复核完成");
                 } catch (consistencyError) {

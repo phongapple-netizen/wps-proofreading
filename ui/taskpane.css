@@ -439,6 +439,27 @@ h2 {
     font-weight: 600;
 }
 
+.badge-source,
+.badge-conflict {
+    padding: 1px 7px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.badge-source {
+    border: 1px solid #bfd5ff;
+    background: #f1f6ff;
+    color: var(--accent-dark);
+}
+
+.badge-conflict {
+    border: 1px solid #f0c987;
+    background: #fff7e8;
+    color: var(--warning);
+}
+
+
 .issue-diff {
     margin: 8px 0 0;
     white-space: pre-wrap;

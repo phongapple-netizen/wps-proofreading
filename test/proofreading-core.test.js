@@ -72,6 +72,28 @@ test("deep enhancement appends stricter instructions and default prompt stays un
     assert.equal(normal === core.buildPrompt(paragraphs, { deep: false }), true);
 });
 
+test("AI prompt receives local rule context without changing the plain prompt", () => {
+    const paragraphs = [{ paragraphIndex: 1, text: "请使用旧名称。" }];
+    const plain = core.buildPrompt(paragraphs, { deep: false });
+    const aware = core.buildPrompt(paragraphs, {
+        deep: false,
+        ruleContext: [{
+            original: "旧名称",
+            suggestion: "新名称",
+            ruleName: "单位名称规范",
+            source: "单位规范",
+            confirmed: true,
+            review: false
+        }]
+    });
+
+    assert.equal(plain.includes("本地规则上下文"), false);
+    assert.match(aware, /本地规则引擎已经在本批文字中命中/);
+    assert.match(aware, /单位名称规范/);
+    assert.match(aware, /confirmed=true/);
+    assert.match(aware, /禁止重复报告/);
+});
+
 test("request failures do not echo endpoint credentials or response bodies", async () => {
     await assert.rejects(
         core.requestModel({ provider: "openai", endpoint: "https://model.example/v1/chat/completions", model: "m", apiKey: "top-secret" }, "p", async () => {

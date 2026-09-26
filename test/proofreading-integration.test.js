@@ -528,6 +528,9 @@ test("local rules run before AI and safe rule findings can be one-click fixed", 
 
     const result = await harness.window.runProofreading();
     assert.equal(result.accepted, true);
+    assert.equal(harness.statuses.some((item) => /本地规则扫描完成/.test(item.text)), true);
+    assert.equal(JSON.stringify(harness.requests[0].body).includes("本地规则上下文"), true);
+    assert.equal(JSON.stringify(harness.requests[0].body).includes("单位名称规范"), true);
 
     const issues = harness.window.getWpsProofreadingState().issues;
     assert.equal(issues.length, 1);
@@ -572,7 +575,7 @@ test("reminder-only rules can be located and ignored but never written", async (
     assert.equal(harness.window.getWpsProofreadingState().issues[0].status, "ignored");
 });
 
-test("a higher-priority local rule wins over an overlapping model suggestion", async () => {
+test("conflicting rule and AI suggestions become one review-only finding", async () => {
     const harness = createHarness({
         selectedText: "旧名称需要统一。",
         issues: [{
@@ -600,4 +603,80 @@ test("a higher-priority local rule wins over an overlapping model suggestion", a
     assert.equal(issues.length, 1);
     assert.equal(issues[0].category, "rule");
     assert.equal(issues[0].suggestion, "规则建议");
+    assert.equal(issues[0].origin, "rule+ai");
+    assert.equal(issues[0].aiConflict, true);
+    assert.equal(issues[0].needsReview, true);
+
+    const batch = harness.window.applyAllProofreadingIssues();
+    assert.equal(batch.applied, 0);
+    assert.equal(batch.skipped, 1);
+});
+
+test("matching rule and AI suggestions are merged and classified by the AI issue type", async () => {
+    const harness = createHarness({
+        selectedText: "请使用旧名称开展工作。",
+        issues: [{
+            category: "wording",
+            paragraphIndex: 1,
+            original: "旧名称",
+            suggestion: "新名称",
+            reason: "名称应统一",
+            confidence: 0.98,
+            needsReview: false
+        }],
+        rules: [{
+            id: "same-rule",
+            name: "单位名称规范",
+            type: "replace",
+            pattern: "旧名称",
+            replacement: "新名称",
+            autoFix: true,
+            priority: 100,
+            source: "单位规范"
+        }]
+    });
+
+    await harness.window.runProofreading();
+    const issue = harness.window.getWpsProofreadingState().issues[0];
+
+    assert.equal(harness.window.getWpsProofreadingState().issues.length, 1);
+    assert.equal(issue.category, "wording");
+    assert.equal(issue.origin, "rule+ai");
+    assert.equal(issue.confirmedByAI, true);
+    assert.equal(issue.aiConflict, undefined);
+    assert.match(issue.reason, /本地规则与 AI 判断一致/);
+});
+
+test("a reminder rule and an AI suggestion are combined into one contextual review finding", async () => {
+    const harness = createHarness({
+        selectedText: "这里使用高空作业表述。",
+        issues: [{
+            category: "wording",
+            paragraphIndex: 1,
+            original: "高空作业",
+            suggestion: "高处作业",
+            reason: "专业材料通常使用高处作业",
+            confidence: 0.95,
+            needsReview: false
+        }],
+        rules: [{
+            id: "height-term",
+            name: "高空作业术语核对",
+            type: "reminder",
+            pattern: "高空作业",
+            replacement: "高处作业",
+            source: "专业术语"
+        }]
+    });
+
+    await harness.window.runProofreading();
+    const issue = harness.window.getWpsProofreadingState().issues[0];
+
+    assert.equal(harness.window.getWpsProofreadingState().issues.length, 1);
+    assert.equal(issue.category, "wording");
+    assert.equal(issue.origin, "rule+ai");
+    assert.equal(issue.suggestion, "高处作业");
+    assert.equal(issue.actionable === false, false);
+    assert.equal(issue.needsReview, true);
+    assert.equal(issue.ruleName, "高空作业术语核对");
 });

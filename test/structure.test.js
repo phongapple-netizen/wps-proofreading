@@ -96,7 +96,7 @@ test('ribbon callback opens one task pane and stores its id', () => {
 test('top toolbar and rules center expose the expected controls', () => {
   const html = read('ui/taskpane.html');
   assert.match(html, /<div class="toolbar">/);
-  assert.match(html, /<h1 class="toolbar-title">AI 校对<\/h1>/);
+  assert.match(html, /<h1 class="toolbar-title">智能校对<\/h1>/);
   assert.match(html, /id="rules-toggle"/);
   assert.match(html, /id="settings-toggle"/);
   assert.match(html, /<div id="settings-popover" class="settings-popover" hidden>/);
@@ -139,6 +139,9 @@ test('top toolbar and rules center expose the expected controls', () => {
   assert.match(read('js/proofreading-core.js'), /function batchParagraphs/);
   assert.match(read('js/proofreading-core.js'), /function validateDocument/);
   assert.match(read('js/proofreading-integration.js'), /WpsRulesCenter\.evaluate/);
+  assert.match(read('js/proofreading-integration.js'), /batchRuleContext/);
+  assert.match(read('js/proofreading-integration.js'), /rule\+ai/);
+  assert.match(read('js/proofreading-core.js'), /本地规则上下文/);
   assert.match(read('js/rules-center.js'), /function importPack/);
   assert.match(read('js/rules-center.js'), /function exportPack/);
   assert.match(read('js/rules-ui.js'), /testCurrentDocument/);
