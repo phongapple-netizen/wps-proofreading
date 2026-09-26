@@ -170,7 +170,8 @@
             severity: String(value.severity || ""),
             origin: String(value.origin || "ai"),
             confirmedByAI: value.confirmedByAI === true,
-            aiConflict: value.aiConflict === true
+            aiConflict: value.aiConflict === true,
+            reviewRuleId: String(value.reviewRuleId || "")
         };
     }
 
@@ -399,6 +400,11 @@
                 sourceBadge.className = issue.aiConflict ? "badge-conflict" : "badge-source";
                 sourceBadge.textContent = issue.aiConflict ? "规则与 AI 意见不同" : "规则 + AI";
                 badges.appendChild(sourceBadge);
+            } else if (issue.origin === "ai-review") {
+                var reviewBadge = root.document.createElement("span");
+                reviewBadge.className = "badge-source";
+                reviewBadge.textContent = "AI核查规则";
+                badges.appendChild(reviewBadge);
             } else if (issue.origin === "rule") {
                 var ruleBadge = root.document.createElement("span");
                 ruleBadge.className = "badge-source";
@@ -449,8 +455,8 @@
                 card.appendChild(diff);
             }
 
-            if ((issue.origin === "rule" || issue.origin === "rule+ai") &&
-                (issue.ruleName || issue.ruleSource)) {
+            if ((issue.origin === "rule" || issue.origin === "rule+ai" ||
+                issue.origin === "ai-review") && (issue.ruleName || issue.ruleSource)) {
                 var ruleMeta = root.document.createElement("p");
                 ruleMeta.className = "issue-state";
                 ruleMeta.textContent = (issue.ruleName ? "规则：" + issue.ruleName : "自定义规则") +

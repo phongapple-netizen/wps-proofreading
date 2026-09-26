@@ -140,28 +140,32 @@
       "name": "报告中夹带请示事项提醒",
       "enabled": true,
       "group": "文种与行文",
-      "type": "reminder",
+      "type": "ai_review",
       "pattern": "妥否，请批示",
       "replacement": "",
       "severity": "high",
       "autoFix": false,
       "priority": 90,
       "source": "《党政机关公文处理工作条例》第十五条",
-      "notes": "条例规定，请示应当一文一事，不得在报告等非请示性公文中夹带请示事项。若当前文种为报告，应重点复核。"
+      "notes": "先以“妥否，请批示”为触发点，再由 AI 结合文种和上下文判断是否构成报告夹带请示事项。",
+      "matchMode": "literal",
+      "instruction": "结合文稿标题、文种和上下文判断这句话是否出现在报告等非请示性公文中。只有能够从当前提供内容确认属于非请示性公文且确实夹带请求审批、批示事项时才报告；如果是请示、引用原文或上下文不足，不要报错。"
     },
     {
       "id": "gov-request-one-item",
       "name": "请示“一文一事”提醒",
       "enabled": true,
       "group": "文种与行文",
-      "type": "reminder",
+      "type": "ai_review",
       "pattern": "请示如下",
       "replacement": "",
       "severity": "medium",
       "autoFix": false,
       "priority": 40,
       "source": "《党政机关公文处理工作条例》第十五条",
-      "notes": "请示应当一文一事。本规则仅提示核对，不判断文中是否实际包含多个事项。"
+      "notes": "“一文一事”必须结合具体请示事项判断，关键词只用于触发 AI 核查。",
+      "matchMode": "literal",
+      "instruction": "结合当前段落和相邻上下文判断请示是否明显包含两个或以上相互独立、可分别处理的请示事项。只有证据明确时才报告；仅出现“请示如下”或存在多个措施、理由，不等于违反一文一事。"
     },
     {
       "id": "gov-short-name-first-use",

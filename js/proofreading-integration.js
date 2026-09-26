@@ -227,7 +227,8 @@
                 severity: issue.severity || "",
                 origin: issue.origin || issueOrigin(issue),
                 confirmedByAI: issue.confirmedByAI === true,
-                aiConflict: issue.aiConflict === true
+                aiConflict: issue.aiConflict === true,
+                reviewRuleId: issue.reviewRuleId || ""
             };
         }));
     }
@@ -541,6 +542,66 @@
         });
     }
 
+    function batchAiReviewContext(batch, candidates, selectionStart) {
+        var base = Number(selectionStart) || 0;
+        var paragraphs = batch || [];
+        var results = [];
+        var usedCharacters = 0;
+        var maxCharacters = 6000;
+
+        (candidates || []).forEach(function (candidate) {
+            if (results.length >= 20 || usedCharacters >= maxCharacters) return;
+            paragraphs.forEach(function (paragraph) {
+                if (results.length >= 20 || usedCharacters >= maxCharacters) return;
+                var start = base + paragraph.offset;
+                var end = start + text(paragraph.text).length;
+                if (candidate.start < start || candidate.end > end) return;
+                var entry = {
+                    ruleId: candidate.ruleId,
+                    ruleName: text(candidate.ruleName).slice(0, 120),
+                    paragraphIndex: paragraph.paragraphIndex,
+                    trigger: text(candidate.trigger).slice(0, 300),
+                    preferredSuggestion: text(candidate.preferredSuggestion).slice(0, 300),
+                    instruction: text(candidate.instruction).slice(0, 700),
+                    source: text(candidate.ruleSource).slice(0, 160),
+                    severity: candidate.severity || "medium"
+                };
+                var size = JSON.stringify(entry).length;
+                if (usedCharacters + size > maxCharacters && results.length) return;
+                results.push(entry);
+                usedCharacters += size;
+            });
+        });
+
+        return results;
+    }
+
+    function annotateAiReviewIssues(issues, candidates) {
+        return (issues || []).map(function (issue) {
+            var candidate = issue && issue.reviewRuleId
+                ? (candidates || []).find(function (item) {
+                    return item && item.ruleId === issue.reviewRuleId &&
+                        issue.start < item.end && item.start < issue.end;
+                })
+                : null;
+            if (!candidate) return Object.assign({ origin: "ai" }, issue);
+            return Object.assign({}, issue, {
+                origin: "ai-review",
+                ruleName: candidate.ruleName || "",
+                ruleSource: candidate.ruleSource || "",
+                severity: candidate.severity || "",
+                priority: Number(candidate.priority) || 0,
+                needsReview: true,
+                actionable: true,
+                reason: mergeReasons(
+                    issue.reason,
+                    candidate.instruction,
+                    "该建议由 AI 核查规则结合上下文确认，需人工复核后再应用。"
+                )
+            });
+        });
+    }
+
     function providerDisplayName(provider) {
         return provider === "opencode" ? "OpenCode" :
             provider === "ollama" ? "Ollama" : "兼容接口";
@@ -592,14 +653,23 @@
                 typeof root.WpsRulesCenter.evaluate === "function"
                 ? root.WpsRulesCenter.evaluate(snapshot.selectedText, snapshot.start)
                 : [];
+            var aiReviewCandidates = root.WpsRulesCenter &&
+                typeof root.WpsRulesCenter.collectAiReviewCandidates === "function"
+                ? root.WpsRulesCenter.collectAiReviewCandidates(snapshot.selectedText, snapshot.start)
+                : [];
             collected = collected.concat(localRuleIssues);
             currentSnapshot = snapshot;
             currentIssues = mergeMappedIssues(collected);
             viewIssues();
-            setStatus(localRuleIssues.length
-                ? "本地规则扫描完成，发现 " + localRuleIssues.length + " 项；AI 正在继续校对并核对规则结果…"
-                : "本地规则扫描完成，未发现规则问题；AI 正在继续校对…", "working");
-            reportProgress(2, "规则扫描完成 · AI 校对准备中");
+            var scanParts = [];
+            if (localRuleIssues.length) scanParts.push("确定性规则 " + localRuleIssues.length + " 项");
+            if (aiReviewCandidates.length) scanParts.push("AI核查点 " + aiReviewCandidates.length + " 处");
+            setStatus(scanParts.length
+                ? "规则扫描完成：" + scanParts.join("，") + "；AI 正在结合上下文继续校对…"
+                : "规则扫描完成，未发现规则命中；AI 正在继续校对…", "working");
+            reportProgress(2, aiReviewCandidates.length
+                ? "规则扫描完成 · " + aiReviewCandidates.length + " 处待 AI 核查"
+                : "规则扫描完成 · AI 校对准备中");
 
             var paragraphs = root.WpsProofreadingCore.splitIntoParagraphs(snapshot.selectedText);
             if (!paragraphs.length) {
@@ -625,9 +695,12 @@
                     abortError.name = "AbortError";
                     throw abortError;
                 }
+                var currentAiReviewContext = batchAiReviewContext(
+                    batches[index], aiReviewCandidates, snapshot.start);
                 var prompt = root.WpsProofreadingCore.buildPrompt(batches[index], {
                     deep: deep,
-                    ruleContext: batchRuleContext(batches[index], localRuleIssues, snapshot.start)
+                    ruleContext: batchRuleContext(batches[index], localRuleIssues, snapshot.start),
+                    aiReviewContext: currentAiReviewContext
                 });
                 var response = await requestProofreadingModel(options, prompt);
                 if (!currentDocumentMatches(snapshot)) {
@@ -638,11 +711,10 @@
                     throw new Error("校对期间" + scopeLabel + "内容已变化，结果已丢弃。请重新校对。");
                 }
                 var parsed = root.WpsProofreadingCore.parseIssues(response);
+                var mappedFirstPass = root.WpsProofreadingCore.mapIssuesToRanges(
+                    batches[index], parsed, snapshot.start);
                 collected = collected.concat(
-                    root.WpsProofreadingCore.mapIssuesToRanges(
-                        batches[index], parsed, snapshot.start).map(function (issue) {
-                            return Object.assign({ origin: "ai" }, issue);
-                        }));
+                    annotateAiReviewIssues(mappedFirstPass, aiReviewCandidates));
                 currentIssues = mergeMappedIssues(collected);
                 currentSnapshot = snapshot;
                 viewIssues();

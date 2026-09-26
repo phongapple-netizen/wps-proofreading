@@ -108,6 +108,7 @@
                             <option value="replace">固定替换</option>
                             <option value="regex">正则表达式</option>
                             <option value="reminder">仅提醒</option>
+                            <option value="ai_review">AI核查</option>
                         </select>
                     </div>
                 </div>
@@ -116,13 +117,27 @@
                 <textarea id="rule-pattern" class="field-control rule-textarea" rows="2"
                           placeholder="要查找的文字；正则类型可填写表达式"></textarea>
 
+                <div id="rule-ai-review-options" hidden>
+                    <label class="field-label" for="rule-match-mode">AI核查触发方式</label>
+                    <select id="rule-match-mode" class="field-control">
+                        <option value="literal">关键词/固定文字</option>
+                        <option value="regex">正则表达式</option>
+                    </select>
+
+                    <label class="field-label" for="rule-instruction">AI核查要求</label>
+                    <textarea id="rule-instruction" class="field-control rule-textarea" rows="4"
+                              maxlength="1200"
+                              placeholder="告诉 AI 应结合上下文核查什么；只有确认存在问题时才返回建议。"></textarea>
+                    <p class="field-note">AI核查规则只生成候选核查点，不会直接判错，也不会进入一键修正。</p>
+                </div>
+
                 <div id="rule-regex-options" hidden>
                     <label class="field-label" for="rule-flags">正则标志</label>
                     <input id="rule-flags" class="field-control" type="text" maxlength="8"
                            placeholder="例如 i 或 im；无需填写 g">
                 </div>
 
-                <label class="field-label" for="rule-replacement">建议写法</label>
+                <label id="rule-replacement-label" class="field-label" for="rule-replacement">建议写法</label>
                 <textarea id="rule-replacement" class="field-control rule-textarea" rows="2"
                           placeholder="仅提醒规则可留空"></textarea>
 
@@ -186,7 +201,7 @@
                         <option value="redundancy">重复冗余</option>
                         <option value="wording">用词</option>
                         <option value="consistency">前后统一</option>
-                        <option value="rule">规则命中</option>
+                        <option value="rule">规则核对</option>
                     </select>
                 </div>
             </div>

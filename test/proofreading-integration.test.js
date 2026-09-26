@@ -528,7 +528,7 @@ test("local rules run before AI and safe rule findings can be one-click fixed", 
 
     const result = await harness.window.runProofreading();
     assert.equal(result.accepted, true);
-    assert.equal(harness.statuses.some((item) => /本地规则扫描完成/.test(item.text)), true);
+    assert.equal(harness.statuses.some((item) => /规则扫描完成/.test(item.text)), true);
     assert.equal(JSON.stringify(harness.requests[0].body).includes("本地规则上下文"), true);
     assert.equal(JSON.stringify(harness.requests[0].body).includes("单位名称规范"), true);
 
@@ -679,4 +679,78 @@ test("a reminder rule and an AI suggestion are combined into one contextual revi
     assert.equal(issue.actionable === false, false);
     assert.equal(issue.needsReview, true);
     assert.equal(issue.ruleName, "高空作业术语核对");
+});
+
+
+test("AI review rules stay invisible when the model decides the trigger is valid in context", async () => {
+    const harness = createHarness({
+        selectedText: "引用原文写道：高空作业是历史文件中的称谓。",
+        issues: [],
+        rules: [{
+            id: "height-context",
+            name: "高空作业术语核查",
+            type: "ai_review",
+            pattern: "高空作业",
+            matchMode: "literal",
+            replacement: "高处作业",
+            instruction: "若为历史原文引用不要修改；只有规范性专业表述才建议使用高处作业。",
+            source: "专业术语",
+            priority: 90
+        }]
+    });
+
+    const result = await harness.window.runProofreading();
+    assert.equal(result.accepted, true);
+    assert.equal(harness.window.getWpsProofreadingState().issues.length, 0);
+    assert.equal(JSON.stringify(harness.requests[0].body).includes("AI核查规则"), true);
+    assert.equal(JSON.stringify(harness.requests[0].body).includes("height-context"), true);
+    assert.equal(harness.statuses.some((item) => /AI核查点 1 处/.test(item.text)), true);
+});
+
+test("AI-confirmed review rules become one review-only finding with rule provenance", async () => {
+    const harness = createHarness({
+        selectedText: "检查发现企业存在高空作业管理不到位问题。",
+        issues: [{
+            category: "wording",
+            paragraphIndex: 1,
+            original: "高空作业",
+            suggestion: "高处作业",
+            reason: "当前属于安全生产监管语境，应使用规范术语。",
+            confidence: 0.97,
+            needsReview: false,
+            reviewRuleId: "height-context"
+        }],
+        rules: [{
+            id: "height-context",
+            name: "高空作业术语核查",
+            type: "ai_review",
+            pattern: "高空作业",
+            matchMode: "literal",
+            replacement: "高处作业",
+            instruction: "安全生产监管语境通常使用高处作业；引用原文时不要机械修改。",
+            source: "专业术语",
+            severity: "medium",
+            priority: 90
+        }]
+    });
+
+    await harness.window.runProofreading();
+    const issues = harness.window.getWpsProofreadingState().issues;
+    assert.equal(issues.length, 1);
+    assert.equal(issues[0].origin, "ai-review");
+    assert.equal(issues[0].ruleName, "高空作业术语核查");
+    assert.equal(issues[0].ruleSource, "专业术语");
+    assert.equal(issues[0].suggestion, "高处作业");
+    assert.equal(issues[0].needsReview, true);
+    assert.equal(issues[0].actionable, true);
+
+    const before = harness.readDocument();
+    const batch = harness.window.applyAllProofreadingIssues();
+    assert.equal(batch.applied, 0);
+    assert.equal(batch.skipped, 1);
+    assert.equal(harness.readDocument(), before);
+
+    assert.equal(harness.window.applyProofreadingIssue(issues[0].id), true);
+    assert.equal(harness.readDocument(), harness.prefix +
+        "检查发现企业存在高处作业管理不到位问题。" + harness.suffix);
 });
