@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "packs": [
+    {
+      "id": "chinese-writing-basic",
+      "name": "中文及公文基础规范",
+      "file": "chinese-writing-basic.json",
+      "description": "标点、日期、常见用词和基础层次序号；以低误报为优先。"
+    },
+    {
+      "id": "party-government-document",
+      "name": "党政机关公文规则",
+      "file": "party-government-document.json",
+      "description": "GB/T 9704—2012、公文处理工作条例相关的格式和行文提醒。"
+    },
+    {
+      "id": "work-safety",
+      "name": "安全生产专业规则",
+      "file": "work-safety.json",
+      "description": "安全生产法定术语、责任体系、有限空间、标准时效等专业规则。"
+    }
+  ]
+}

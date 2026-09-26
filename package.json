@@ -1,0 +1,21 @@
+{
+  "name": "wps-text-proofreading",
+  "version": "0.2.0",
+  "private": true,
+  "description": "WPS 文字原生智能文本校对加载项",
+  "addonType": "wps",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "debug": "node scripts/dev-server.js --port 3891",
+    "debug:server": "node scripts/dev-server.js --port 3891",
+    "build": "wpsjs build",
+    "publish": "wpsjs publish"
+  },
+  "devDependencies": {
+    "wps-jsapi": "1.0.5",
+    "wpsjs": "2.2.3"
+  },
+  "overrides": {
+    "tmp": "0.2.7"
+  }
+}

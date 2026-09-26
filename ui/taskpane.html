@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>WPS 智能文本校对</title>
+    <link rel="stylesheet" href="./taskpane.css">
+</head>
+<body>
+    <main class="page-shell">
+        <div class="toolbar">
+            <h1 class="toolbar-title">AI 校对</h1>
+            <label class="toolbar-deep" for="deep-enhance">
+                <input id="deep-enhance" type="checkbox">
+                <span>深度增强</span>
+            </label>
+            <button id="rules-toggle" class="button button-quiet" type="button"
+                    aria-expanded="false" aria-controls="rules-center">规则</button>
+            <button id="settings-toggle" class="button button-quiet" type="button"
+                    aria-expanded="false" aria-controls="settings-popover">设置</button>
+
+            <div id="settings-popover" class="settings-popover" hidden>
+                <div class="settings-popover-head">
+                    <span id="model-summary" class="field-note">尚未配置模型。</span>
+                    <span id="connection-status" class="connection-status">尚未检测</span>
+                </div>
+
+                <div class="settings-body">
+                    <label class="field-label" for="model-provider">服务类型</label>
+                    <select id="model-provider" class="field-control">
+                        <option value="ollama">Ollama 本地模型</option>
+                        <option value="opencode" selected>OpenCode</option>
+                        <option value="openai">OpenAI 兼容接口</option>
+                    </select>
+
+                    <label id="model-endpoint-label" class="field-label" for="model-endpoint">OpenCode 服务地址</label>
+                    <input id="model-endpoint" class="field-control" type="url" value="http://127.0.0.1:4096"
+                           placeholder="http://127.0.0.1:4096" autocomplete="off" spellcheck="false">
+
+                    <label id="model-name-label" class="field-label" for="model-name">OpenCode 模型</label>
+                    <input id="model-name" class="field-control" type="text"
+                           placeholder="检测服务后选择 provider/model" autocomplete="off" spellcheck="false">
+                    <label class="field-label" for="model-suggestions">从已检测模型中选择</label>
+                    <select id="model-suggestions" class="field-control">
+                        <option value="">（先点“检测并读取模型”）</option>
+                    </select>
+
+                    <div id="model-api-key-row">
+                        <label id="model-api-key-label" class="field-label" for="model-api-key">OpenCode 服务密码（可选）</label>
+                        <input id="model-api-key" class="field-control" type="password" autocomplete="new-password"
+                               placeholder="仅在服务启用密码时填写；不会保存">
+                    </div>
+
+                    <div class="connection-row">
+                        <button id="refresh-models" class="button button-secondary" type="button">检测并读取模型</button>
+                    </div>
+                    <p id="provider-help" class="field-note">先启动 OpenCode 服务，再读取当前项目可用的模型。</p>
+                    <p class="field-note">服务类型和模型名保存在本机，OpenCode 与 Ollama 本机地址也可保存；API 密钥和服务密码不会保存。</p>
+                </div>
+            </div>
+        </div>
+
+        <section id="rules-center" class="panel rules-center" hidden aria-labelledby="rules-heading">
+            <div class="rules-head">
+                <div>
+                    <h2 id="rules-heading">规则中心</h2>
+                    <p class="field-note">确定性规则先在本地执行，不消耗模型 Token。</p>
+                </div>
+                <button id="rules-close" class="button button-quiet" type="button">关闭</button>
+            </div>
+
+            <div class="builtin-pack-row">
+                <label class="field-label builtin-pack-label" for="builtin-rule-pack">内置规则包</label>
+                <div class="builtin-pack-controls">
+                    <select id="builtin-rule-pack" class="field-control">
+                        <option value="">正在读取规则包…</option>
+                    </select>
+                    <button id="builtin-rule-install" class="button button-secondary rules-small-button" type="button" disabled>安装</button>
+                </div>
+                <p id="builtin-rule-description" class="field-note">可直接安装随插件提供的规则包，也可以继续导入自定义 JSON。</p>
+            </div>
+
+            <div class="rules-toolbar">
+                <button id="rule-new" class="button button-primary" type="button">+ 新建规则</button>
+                <button id="rule-test-document" class="button button-secondary rules-small-button" type="button">测试当前文档</button>
+                <button id="rule-import" class="button button-secondary rules-small-button" type="button">导入</button>
+                <button id="rule-export" class="button button-secondary rules-small-button" type="button">导出</button>
+                <input id="rule-import-file" type="file" accept="application/json,.json" hidden>
+            </div>
+            <div id="rules-status" class="status status-idle">尚未测试规则。</div>
+            <div id="rules-empty" class="empty-state">还没有自定义规则。可以新建，也可以导入 JSON 规则包。</div>
+            <div id="rules-list" class="rules-list" hidden></div>
+
+            <form id="rule-editor" class="rule-editor" hidden>
+                <input id="rule-id" type="hidden">
+
+                <label class="field-label" for="rule-name">规则名称</label>
+                <input id="rule-name" class="field-control" type="text" maxlength="120" placeholder="例如：单位名称规范">
+
+                <div class="rules-grid">
+                    <div>
+                        <label class="field-label" for="rule-group">分组</label>
+                        <input id="rule-group" class="field-control" type="text" maxlength="80" value="我的规则">
+                    </div>
+                    <div>
+                        <label class="field-label" for="rule-type">规则类型</label>
+                        <select id="rule-type" class="field-control">
+                            <option value="replace">固定替换</option>
+                            <option value="regex">正则表达式</option>
+                            <option value="reminder">仅提醒</option>
+                        </select>
+                    </div>
+                </div>
+
+                <label class="field-label" for="rule-pattern">匹配内容</label>
+                <textarea id="rule-pattern" class="field-control rule-textarea" rows="2"
+                          placeholder="要查找的文字；正则类型可填写表达式"></textarea>
+
+                <div id="rule-regex-options" hidden>
+                    <label class="field-label" for="rule-flags">正则标志</label>
+                    <input id="rule-flags" class="field-control" type="text" maxlength="8"
+                           placeholder="例如 i 或 im；无需填写 g">
+                </div>
+
+                <label class="field-label" for="rule-replacement">建议写法</label>
+                <textarea id="rule-replacement" class="field-control rule-textarea" rows="2"
+                          placeholder="仅提醒规则可留空"></textarea>
+
+                <div class="rules-grid">
+                    <div>
+                        <label class="field-label" for="rule-severity">风险级别</label>
+                        <select id="rule-severity" class="field-control">
+                            <option value="low">低</option>
+                            <option value="medium" selected>中</option>
+                            <option value="high">高</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="field-label" for="rule-priority">优先级</label>
+                        <input id="rule-priority" class="field-control" type="number" min="0" max="1000" value="50">
+                    </div>
+                </div>
+
+                <label class="rules-check">
+                    <input id="rule-auto-fix" type="checkbox">
+                    <span>允许“一键修正”自动应用（仅确定性规则建议开启）</span>
+                </label>
+
+                <label class="field-label" for="rule-source">规则来源</label>
+                <input id="rule-source" class="field-control" type="text" maxlength="160"
+                       value="用户自定义" placeholder="国家标准 / 单位规范 / 用户自定义">
+
+                <label class="field-label" for="rule-notes">说明/依据</label>
+                <textarea id="rule-notes" class="field-control rule-textarea" rows="3"
+                          maxlength="500" placeholder="为什么需要这条规则，或对应依据"></textarea>
+
+                <div class="rule-editor-actions">
+                    <button id="rule-save" class="button button-primary" type="submit">保存规则</button>
+                    <button id="rule-cancel" class="button button-secondary rules-small-button" type="button">取消</button>
+                    <button id="rule-delete" class="button button-danger rules-small-button" type="button" hidden>删除</button>
+                </div>
+            </form>
+        </section>
+
+        <section class="panel run-panel">
+            <div class="run-actions">
+                <button id="run-proofreading" class="button button-primary" type="button">开始校对</button>
+                <button id="cancel-proofreading" class="button button-danger" type="button" hidden disabled>取消</button>
+            </div>
+            <div id="proofreading-progress" class="progress" hidden>
+                <div class="progress-track"><div id="progress-fill" class="progress-fill"></div></div>
+                <span id="progress-label" class="progress-label"></span>
+            </div>
+        </section>
+
+        <section class="panel" aria-labelledby="result-heading">
+            <div class="section-heading result-heading-row">
+                <h2 id="result-heading">校对结果</h2>
+                <div class="result-tools">
+                    <label class="sr-only" for="issue-filter">筛选问题类型</label>
+                    <select id="issue-filter" class="filter-control">
+                        <option value="all">全部类型</option>
+                        <option value="typo">错别字</option>
+                        <option value="punctuation">标点</option>
+                        <option value="grammar">语法</option>
+                        <option value="redundancy">重复冗余</option>
+                        <option value="wording">用词</option>
+                        <option value="consistency">前后统一</option>
+                        <option value="rule">规则命中</option>
+                    </select>
+                </div>
+            </div>
+            <div class="tab-bar" role="tablist">
+                <button id="tab-issues" class="tab is-active" type="button" role="tab" aria-selected="true">
+                    错误更正 <span id="result-count" class="count-badge">0</span>
+                </button>
+                <button id="tab-history" class="tab" type="button" role="tab" aria-selected="false">修改记录</button>
+            </div>
+            <div id="proofreading-status" class="status status-idle" role="status" aria-live="polite">等待开始</div>
+            <div id="empty-state" class="empty-state">校对结果会显示在这里。</div>
+            <div id="proofreading-issues" class="issue-list" hidden></div>
+            <div id="history-empty" class="empty-state" hidden>本次会话还没有处理记录。</div>
+            <div id="proofreading-history" class="history-list" hidden></div>
+            <div class="result-footer">
+                <button id="apply-all" class="button button-primary" type="button" disabled>一键修正</button>
+                <button id="rerun-proofreading" class="button button-secondary" type="button">重新校对</button>
+            </div>
+        </section>
+
+        <p class="footer-note">每次校对按段落分批发送待校对的文字（每批约 2500 字），由所选模型服务处理。应用前会再次核对原文，文档已变化时不会写入。</p>
+    </main>
+
+    <script type="text/javascript" src="../js/wps-api.js"></script>
+    <script type="text/javascript" src="../js/settings-store.js"></script>
+    <script type="text/javascript" src="../js/rules-center.js"></script>
+    <script type="text/javascript" src="../js/proofreading-core.js"></script>
+    <script type="text/javascript" src="../js/opencode-client.js"></script>
+    <script type="text/javascript" src="../js/model-catalog.js"></script>
+    <script type="text/javascript" src="../js/proofreading-integration.js"></script>
+    <script type="text/javascript" src="../js/taskpane.js"></script>
+    <script type="text/javascript" src="../js/rules-ui.js"></script>
+</body>
+</html>

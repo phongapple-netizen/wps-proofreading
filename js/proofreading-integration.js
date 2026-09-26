@@ -1,0 +1,820 @@
+(function (root) {
+    "use strict";
+
+    var PROVIDER_DEFAULTS = {
+        ollama: { endpoint: "http://127.0.0.1:11434", model: "" },
+        opencode: { endpoint: "http://127.0.0.1:4096", model: "opencode/mimo-v2.6-flash-free" },
+        openai: { endpoint: "", model: "" }
+    };
+    var currentSnapshot = null;
+    var currentIssues = [];
+    var currentController = null;
+    var busy = false;
+    var runCounter = 0;
+
+    function byId(id) {
+        return root.document && root.document.getElementById
+            ? root.document.getElementById(id)
+            : null;
+    }
+
+    function text(value) {
+        return String(value == null ? "" : value);
+    }
+
+    function setStatus(message, tone) {
+        if (typeof root.setProofreadingStatus === "function") {
+            root.setProofreadingStatus({ text: message, tone: tone || "idle" });
+        }
+    }
+
+    function setConnectionStatus(message, tone) {
+        if (typeof root.setModelConnectionStatus === "function") {
+            root.setModelConnectionStatus(message, tone || "idle");
+        }
+    }
+
+    function setBusy(value) {
+        busy = value === true;
+        if (typeof root.setProofreadingBusy === "function") {
+            root.setProofreadingBusy(busy);
+            return;
+        }
+        var runButton = byId("run-proofreading");
+        var cancelButton = byId("cancel-proofreading");
+        if (runButton) runButton.disabled = busy;
+        if (cancelButton) {
+            cancelButton.hidden = !busy;
+            cancelButton.disabled = !busy;
+        }
+    }
+
+    function app() {
+        return root.WpsNativeDocument && root.WpsNativeDocument.getApplication
+            ? root.WpsNativeDocument.getApplication()
+            : null;
+    }
+
+    function activeDocument(application) {
+        try {
+            return application && application.ActiveDocument ? application.ActiveDocument : null;
+        } catch (error) {
+            return null;
+        }
+    }
+
+    function documentKey(document) {
+        try {
+            return text(document.FullName || document.Name);
+        } catch (error) {
+            return "";
+        }
+    }
+
+    function getSelectionRange(application, document) {
+        try {
+            var selection = application && application.Selection
+                ? application.Selection
+                : (document && document.Application ? document.Application.Selection : null);
+            return selection && selection.Range ? selection.Range : null;
+        } catch (error) {
+            return null;
+        }
+    }
+
+    function captureSnapshot() {
+        var application = app();
+        var document = activeDocument(application);
+        if (!document) throw new Error("无法读取当前 WPS 文档。");
+        var range = getSelectionRange(application, document);
+
+        var selectedText = "";
+        var start;
+        var end;
+        var prefixText = "";
+        try {
+            if (range) {
+                selectedText = text(range.Text);
+                start = Number(range.Start);
+                end = Number(range.End);
+                prefixText = text(document.Range(0, start).Text);
+            }
+        } catch (error) {
+            selectedText = "";
+        }
+
+        if (selectedText.trim()) {
+            selectedText = root.WpsProofreadingCore.validateSelection(selectedText);
+            if (!Number.isFinite(start) || !Number.isFinite(end) || end - start !== selectedText.length) {
+                throw new Error("WPS 选区位置与文本长度不一致，请重新选择后重试。");
+            }
+            return {
+                mode: "selection",
+                documentKey: documentKey(document),
+                start: start,
+                end: end,
+                selectedText: selectedText,
+                prefixText: prefixText
+            };
+        }
+
+        var content;
+        var fullText;
+        try {
+            content = document.Content;
+            fullText = text(content && content.Text);
+            start = Number(content && content.Start);
+        } catch (error) {
+            throw new Error("WPS 文档接口暂不可用，无法读取全文，请重新选择文字后重试。");
+        }
+        fullText = root.WpsProofreadingCore.validateDocument(fullText);
+        if (!Number.isFinite(start)) start = 0;
+        end = start + fullText.length;
+        try {
+            prefixText = start > 0 ? text(document.Range(0, start).Text) : "";
+        } catch (error) {
+            prefixText = "";
+        }
+
+        return {
+            mode: "full",
+            documentKey: documentKey(document),
+            start: start,
+            end: end,
+            selectedText: fullText,
+            prefixText: prefixText
+        };
+    }
+
+    function currentDocumentMatches(snapshot) {
+        if (!snapshot) return false;
+        var application = app();
+        var document = activeDocument(application);
+        if (!document || documentKey(document) !== snapshot.documentKey) return false;
+        try {
+            return text(document.Range(0, snapshot.start).Text) === snapshot.prefixText &&
+                text(document.Range(snapshot.start, snapshot.end).Text) === snapshot.selectedText;
+        } catch (error) {
+            return false;
+        }
+    }
+
+    function modelOptions() {
+        var settings = currentSettings();
+        var profile = settings.profiles && settings.profiles[settings.provider]
+            ? settings.profiles[settings.provider]
+            : PROVIDER_DEFAULTS[settings.provider];
+        var api = settingsStore();
+        var runtime = api && typeof api.loadRuntimeEndpoint === "function"
+            ? api.loadRuntimeEndpoint(settings.provider)
+            : null;
+        var endpoint = runtime && runtime.provider === settings.provider
+            ? runtime.endpoint
+            : (profile ? profile.endpoint : "");
+        return {
+            provider: settings.provider,
+            endpoint: endpoint || "",
+            model: profile ? profile.model : "",
+            apiKey: api && typeof api.loadPassword === "function" ? api.loadPassword(settings.provider) : "",
+            signal: currentController ? currentController.signal : undefined
+        };
+    }
+
+    function isDeepMode() {
+        return currentSettings().deep === true;
+    }
+
+    function categoryLabel(category) {
+        var labels = {
+            typo: "错别字",
+            punctuation: "标点",
+            grammar: "语法",
+            redundancy: "重复冗余",
+            wording: "用词",
+            consistency: "前后统一",
+            rule: "规则命中"
+        };
+        return labels[category] || "校对提示";
+    }
+
+    function issueStateLabel(issue) {
+        return issue.status === "accepted" ? "已应用" :
+            issue.status === "ignored" ? "已忽略" :
+                issue.status === "stale" ? "原文已变化，需重查" :
+                    issue.needsReview ? "建议人工确认" : "待确认";
+    }
+
+    function viewIssues() {
+        if (typeof root.setProofreadingIssues !== "function") return;
+        root.setProofreadingIssues(currentIssues.map(function (issue) {
+            return {
+                id: issue.id,
+                runId: runCounter,
+                category: issue.category,
+                categoryLabel: categoryLabel(issue.category),
+                title: categoryLabel(issue.category) + (issue.needsReview ? " · 请复核" : ""),
+                original: issue.original,
+                reason: issue.reason,
+                stateLabel: issueStateLabel(issue),
+                confidence: issue.confidence,
+                message: (issue.reason ? "原因：" + issue.reason + "\n" : "") + "状态：" + issueStateLabel(issue),
+                suggestion: issue.suggestion,
+                status: issue.status,
+                needsReview: issue.needsReview,
+                actionable: issue.actionable !== false,
+                ruleName: issue.ruleName || "",
+                ruleSource: issue.ruleSource || "",
+                severity: issue.severity || ""
+            };
+        }));
+    }
+
+    function recordAction(action, issue) {
+        if (typeof root.pushProofreadingRecord !== "function") return;
+        root.pushProofreadingRecord({
+            id: issue.id,
+            runId: runCounter,
+            category: issue.category,
+            categoryLabel: categoryLabel(issue.category),
+            original: issue.original,
+            suggestion: issue.suggestion,
+            reason: issue.reason,
+            action: action
+        });
+    }
+
+    function settingsStore() {
+        return root.WpsSettingsStore || null;
+    }
+
+    function currentSettings() {
+        var api = settingsStore();
+        if (api && typeof api.loadSettings === "function") {
+            return api.loadSettings() || api.defaultSettings();
+        }
+        return { provider: "opencode", deep: false, profiles: PROVIDER_DEFAULTS };
+    }
+
+    function modelSummaryText() {
+        var options = modelOptions();
+        var labels = { ollama: "Ollama", opencode: "OpenCode", openai: "兼容接口" };
+        var parts = [labels[options.provider] || options.provider];
+        if (options.endpoint) parts.push(options.endpoint);
+        if (options.model) parts.push(options.model);
+        if (isDeepMode()) parts.push("深度增强");
+        return parts.join(" · ");
+    }
+
+    function renderModelSummary() {
+        var summary = byId("model-summary");
+        if (summary) summary.textContent = modelSummaryText();
+        var catalog = settingsStore() && typeof settingsStore().loadCatalog === "function"
+            ? settingsStore().loadCatalog()
+            : null;
+        if (catalog) {
+            setConnectionStatus(
+                (catalog.detail || "已检测") + " · " + catalog.models.length + " 个模型",
+                catalog.tone || "success"
+            );
+        } else {
+            setConnectionStatus("尚未检测", "idle");
+        }
+    }
+
+    var lastKnownStoreState = "";
+
+    function storeStateKey() {
+        var api = settingsStore();
+        if (!api) return "";
+        try {
+            var settings = api.loadSettings() || api.defaultSettings();
+            return JSON.stringify([
+                settings,
+                api.loadRuntimeEndpoint(settings.provider),
+                api.loadCatalog()
+            ]);
+        } catch (error) {
+            return "";
+        }
+    }
+
+    function syncFromStore() {
+        var key = storeStateKey();
+        if (key === lastKnownStoreState) return false;
+        lastKnownStoreState = key;
+        renderModelSummary();
+        if (typeof root.syncSettingsForm === "function") root.syncSettingsForm();
+        return true;
+    }
+
+    function initConfiguration() {
+        syncFromStore();
+        if (root.document && typeof root.setInterval === "function") {
+            root.setInterval(syncFromStore, 1000);
+        }
+    }
+
+    function saveCatalogResult(provider, result, tone) {
+        var api = settingsStore();
+        if (!api || typeof api.saveCatalog !== "function") return;
+        api.saveCatalog({
+            provider: provider,
+            models: result.models || [],
+            defaultModel: result.defaultModel || "",
+            detail: result.detail || "",
+            tone: tone
+        });
+    }
+
+    async function refreshProviderModels() {
+        setConnectionStatus("正在检测…", "working");
+        var options = modelOptions();
+        var api = settingsStore();
+        try {
+            if (!root.WpsModelCatalog) throw new Error("模型检测模块没有加载。");
+            var result = await root.WpsModelCatalog.detect(options, root.fetch);
+            saveCatalogResult(result.provider, result, result.models.length ? "success" : "error");
+            if (result.models.length && result.defaultModel && api && typeof api.updateSettings === "function") {
+                var profile = currentSettings().profiles[result.provider] || { model: "" };
+                if (!profile.model || result.models.indexOf(profile.model) < 0) {
+                    api.updateSettings({ provider: result.provider, profile: { model: result.defaultModel } });
+                }
+            }
+            syncFromStore();
+            if (!result.models.length) {
+                setStatus("模型服务可以访问，但没有返回可用模型。请先在服务端配置模型。", "warning");
+                return { models: [], defaultModel: "" };
+            }
+            setStatus("模型服务检测成功，已读取 " + result.models.length + " 个模型。", "success");
+            return { models: result.models, defaultModel: result.defaultModel };
+        } catch (error) {
+            var existing = api && typeof api.loadCatalog === "function" ? api.loadCatalog() : null;
+            saveCatalogResult(options.provider, {
+                models: existing ? existing.models : [],
+                defaultModel: existing ? existing.defaultModel : "",
+                detail: "连接失败"
+            }, "error");
+            syncFromStore();
+            setStatus(error && error.message
+                ? error.message
+                : "模型服务检测失败。请确认服务已启动并允许加载项跨域访问。", "error");
+            return { models: [], defaultModel: "", error: true };
+        }
+    }
+
+    function makeAbortController() {
+        var Constructor = root.AbortController;
+        if (!Constructor && typeof AbortController !== "undefined") Constructor = AbortController;
+        return typeof Constructor === "function" ? new Constructor() : null;
+    }
+
+    async function requestProofreadingModel(options, prompt) {
+        if (options.provider === "opencode") {
+            if (!root.WpsOpenCodeClient) throw new Error("OpenCode 客户端模块没有加载。");
+            return root.WpsOpenCodeClient.request({
+                endpoint: options.endpoint,
+                model: options.model,
+                password: options.apiKey,
+                signal: options.signal
+            }, prompt, root.fetch);
+        }
+        return root.WpsProofreadingCore.requestModel(options, prompt);
+    }
+
+    function reportProgress(percent, label) {
+        if (typeof root.setProofreadingProgress === "function") {
+            root.setProofreadingProgress(percent, label || "");
+        }
+    }
+
+    function batchCharacterCount(batch) {
+        return (batch || []).reduce(function (total, paragraph) {
+            return total + text(paragraph && paragraph.text).length;
+        }, 0);
+    }
+
+    function mergeMappedIssues(list) {
+        var sorted = (list || []).slice().sort(function (left, right) {
+            return left.start - right.start ||
+                (Number(right.priority) || 0) - (Number(left.priority) || 0) ||
+                left.end - right.end;
+        });
+        var kept = [];
+        var lastEnd = -1;
+        sorted.forEach(function (issue) {
+            if (issue.start >= lastEnd) {
+                kept.push(issue);
+                lastEnd = issue.end;
+            }
+        });
+        kept.forEach(function (issue, index) {
+            issue.id = "issue-" + (index + 1) + "-" + issue.start;
+        });
+        return kept;
+    }
+
+    function providerDisplayName(provider) {
+        return provider === "opencode" ? "OpenCode" :
+            provider === "ollama" ? "Ollama" : "兼容接口";
+    }
+
+    function confirmFullDocument(snapshot, options) {
+        if (!snapshot || snapshot.mode !== "full") return true;
+        if (typeof root.confirm !== "function") return false;
+        var target = providerDisplayName(options.provider);
+        if (options.model) target += "（" + options.model + "）";
+        return root.confirm(
+            "当前未选择文字，将校对全文，共 " + snapshot.selectedText.length +
+            " 个字符。\n\n待校对文本将发送给 " + target + "。是否继续？"
+        ) === true;
+    }
+
+    async function runProofreading() {
+        if (busy) return { accepted: false, reason: "busy" };
+        currentController = makeAbortController();
+        setBusy(true);
+        currentSnapshot = null;
+        currentIssues = [];
+        runCounter += 1;
+        viewIssues();
+        if (typeof root.clearProofreadingIssues === "function") root.clearProofreadingIssues();
+
+        var snapshot = null;
+        var collected = [];
+        var discarded = false;
+        var api = settingsStore();
+        var requestProvider = "";
+        try {
+            snapshot = captureSnapshot();
+            var options = modelOptions();
+            requestProvider = options.provider;
+            var providerLabel = providerDisplayName(options.provider);
+            var scopeLabel = snapshot.mode === "full" ? "全文" : "选区";
+            if (snapshot.mode === "full" && !confirmFullDocument(snapshot, options)) {
+                setStatus(typeof root.confirm === "function"
+                    ? "已取消全文校对，文档内容没有发送。"
+                    : "当前环境无法显示全文发送确认。请先选择要校对的文字后重试。", "warning");
+                return { accepted: false, reason: "full-document-not-confirmed" };
+            }
+            setStatus("正在通过 " + providerLabel + " 校对" + scopeLabel +
+                "（按段落分批发送，只发送待校对的文字）…", "working");
+            reportProgress(0, "已读取" + scopeLabel);
+
+            var localRuleIssues = root.WpsRulesCenter &&
+                typeof root.WpsRulesCenter.evaluate === "function"
+                ? root.WpsRulesCenter.evaluate(snapshot.selectedText, snapshot.start)
+                : [];
+            collected = collected.concat(localRuleIssues);
+
+            var paragraphs = root.WpsProofreadingCore.splitIntoParagraphs(snapshot.selectedText);
+            if (!paragraphs.length) {
+                throw new Error(scopeLabel + "中没有可校对的正文文字。");
+            }
+            var batches = root.WpsProofreadingCore.batchParagraphs(
+                paragraphs, root.WpsProofreadingCore.defaultBatchCharacters);
+            var deep = isDeepMode();
+            var consistencyIndex = root.WpsProofreadingCore.buildConsistencyIndex(paragraphs);
+            var runConsistencyPass = batches.length > 1 &&
+                root.WpsProofreadingCore.hasCrossParagraphConsistency(consistencyIndex);
+            var firstPassProgressCeiling = runConsistencyPass ? 85 : 100;
+            var totalFirstPassCharacters = batches.reduce(function (total, batch) {
+                return total + batchCharacterCount(batch);
+            }, 0);
+            var completedFirstPassCharacters = 0;
+            var consistencyCompleted = false;
+            var consistencyWarning = "";
+
+            for (var index = 0; index < batches.length; index += 1) {
+                if (currentController && currentController.signal && currentController.signal.aborted) {
+                    var abortError = new Error("已取消校对。");
+                    abortError.name = "AbortError";
+                    throw abortError;
+                }
+                var prompt = root.WpsProofreadingCore.buildPrompt(batches[index], { deep: deep });
+                var response = await requestProofreadingModel(options, prompt);
+                if (!currentDocumentMatches(snapshot)) {
+                    currentSnapshot = null;
+                    currentIssues = [];
+                    discarded = true;
+                    viewIssues();
+                    throw new Error("校对期间" + scopeLabel + "内容已变化，结果已丢弃。请重新校对。");
+                }
+                var parsed = root.WpsProofreadingCore.parseIssues(response);
+                collected = collected.concat(
+                    root.WpsProofreadingCore.mapIssuesToRanges(batches[index], parsed, snapshot.start));
+                completedFirstPassCharacters += batchCharacterCount(batches[index]);
+                var firstPassPercent = totalFirstPassCharacters > 0
+                    ? Math.round((completedFirstPassCharacters / totalFirstPassCharacters) *
+                        firstPassProgressCeiling)
+                    : firstPassProgressCeiling;
+                var batchLabel = "正文校对";
+                if (batches.length > 1) {
+                    batchLabel += " · 第 " + (index + 1) + "/" + batches.length + " 批";
+                }
+                batchLabel += " · 已处理 " + completedFirstPassCharacters +
+                    "/" + totalFirstPassCharacters + " 字";
+                reportProgress(firstPassPercent, batchLabel);
+            }
+
+            if (runConsistencyPass) {
+                if (currentController && currentController.signal && currentController.signal.aborted) {
+                    var consistencyAbortError = new Error("已取消校对。");
+                    consistencyAbortError.name = "AbortError";
+                    throw consistencyAbortError;
+                }
+                setStatus("第一遍逐段校对已完成，正在进行跨段落一致性复核…", "working");
+                reportProgress(firstPassProgressCeiling, "正文校对完成 · 全文一致性复核中");
+                try {
+                    var consistencyPrompt = root.WpsProofreadingCore.buildConsistencyPrompt(consistencyIndex);
+                    var consistencyResponse = await requestProofreadingModel(options, consistencyPrompt);
+                    if (!currentDocumentMatches(snapshot)) {
+                        currentSnapshot = null;
+                        currentIssues = [];
+                        discarded = true;
+                        viewIssues();
+                        throw new Error("一致性复核期间" + scopeLabel + "内容已变化，结果已丢弃。请重新校对。");
+                    }
+                    var consistencyParsed = root.WpsProofreadingCore.parseConsistencyIssues(consistencyResponse);
+                    collected = collected.concat(
+                        root.WpsProofreadingCore.mapIssuesToRanges(
+                            paragraphs, consistencyParsed, snapshot.start));
+                    consistencyCompleted = true;
+                    reportProgress(100, "全文一致性复核完成");
+                } catch (consistencyError) {
+                    if ((currentController && currentController.signal && currentController.signal.aborted) ||
+                        (consistencyError && consistencyError.name === "AbortError") ||
+                        discarded) {
+                        throw consistencyError;
+                    }
+                    consistencyWarning = consistencyError && consistencyError.message
+                        ? consistencyError.message
+                        : "一致性复核未完成。";
+                    reportProgress(100, "正文校对完成 · 一致性复核未完成");
+                }
+            }
+
+            currentIssues = mergeMappedIssues(collected);
+            currentSnapshot = snapshot;
+            viewIssues();
+            reportProgress(100, "完成");
+            var consistencyText = runConsistencyPass
+                ? (consistencyCompleted
+                    ? "；已完成跨段落一致性复核"
+                    : "；逐段校对已完成，但一致性复核未完成")
+                : "";
+            var finalTone = consistencyWarning ? "warning" : "success";
+            setStatus(currentIssues.length
+                ? "校对完成，共发现 " + currentIssues.length + " 项（" +
+                    batches.length + " 批" + consistencyText + "）。可先定位，再选择应用或忽略。" +
+                    (consistencyWarning ? " " + consistencyWarning : "")
+                : "校对完成，没有发现可精确定位的问题" + consistencyText + "。" +
+                    (consistencyWarning ? " " + consistencyWarning : ""), finalTone);
+            return {
+                accepted: true,
+                issues: currentIssues.length,
+                batches: batches.length,
+                consistencyAttempted: runConsistencyPass,
+                consistencyCompleted: consistencyCompleted,
+                consistencyWarning: consistencyWarning
+            };
+        } catch (error) {
+            var cancelled = currentController && currentController.signal && currentController.signal.aborted;
+            var partial = collected.length > 0 && !discarded && snapshot;
+            if (partial) {
+                currentIssues = mergeMappedIssues(collected);
+                currentSnapshot = snapshot;
+                viewIssues();
+            }
+            reportProgress(0, "");
+            if (cancelled || (error && error.name === "AbortError")) {
+                setStatus(partial
+                    ? "已取消校对；已完成的部分结果仍可定位和应用，文档没有修改。"
+                    : "已取消校对，文档没有修改。", "warning");
+                return { accepted: false, reason: "cancelled" };
+            }
+            setStatus(partial
+                ? "校对中断：" + (error && error.message ? error.message : "请重试。") +
+                    "已完成的部分结果仍可使用。"
+                : (error && error.message ? error.message : "校对失败，请重试。"), "error");
+            return { accepted: false, reason: "error" };
+        } finally {
+            currentController = null;
+            setBusy(false);
+            if (api && typeof api.clearPassword === "function") {
+                var providerToClear = requestProvider || currentSettings().provider;
+                api.clearPassword(providerToClear);
+                var keyField = byId("model-api-key");
+                if (keyField && currentSettings().provider === providerToClear) {
+                    keyField.value = "";
+                }
+            }
+        }
+    }
+
+    function cancelProofreading() {
+        if (!busy || !currentController) {
+            setStatus("当前没有正在进行的校对。", "warning");
+            return false;
+        }
+        currentController.abort();
+        setStatus("正在取消校对…", "warning");
+        return true;
+    }
+
+    function findPendingIssue(issueId) {
+        return currentIssues.find(function (candidate) {
+            return candidate.id === String(issueId);
+        });
+    }
+
+    function markAllPendingStale(message) {
+        currentIssues = currentIssues.map(function (candidate) {
+            return candidate.status === "pending"
+                ? Object.assign({}, candidate, { status: "stale" })
+                : candidate;
+        });
+        viewIssues();
+        setStatus(message, "warning");
+    }
+
+    function locateProofreadingIssue(issueId) {
+        var issue = findPendingIssue(issueId);
+        if (!issue || issue.status !== "pending") {
+            setStatus("这条建议已处理或已失效，请重新校对。", "warning");
+            return false;
+        }
+        if (!currentDocumentMatches(currentSnapshot)) {
+            markAllPendingStale("选区内容已变化，无法定位旧结果。请重新校对。");
+            return false;
+        }
+        try {
+            var document = activeDocument(app());
+            var range = document.Range(issue.start, issue.end);
+            if (text(range.Text) !== issue.original || typeof range.Select !== "function") {
+                throw new Error("range-unavailable");
+            }
+            range.Select();
+            setStatus("已在文档中定位这条问题。", "success");
+            return true;
+        } catch (error) {
+            issue.status = "stale";
+            viewIssues();
+            setStatus("WPS 未能定位这条原文，请重新校对。", "warning");
+            return false;
+        }
+    }
+
+    function ignoreProofreadingIssue(issueId) {
+        var issue = findPendingIssue(issueId);
+        if (!issue || issue.status !== "pending") {
+            setStatus("这条建议已处理或已失效。", "warning");
+            return false;
+        }
+        issue.status = "ignored";
+        recordAction("ignored", issue);
+        viewIssues();
+        setStatus("已忽略这条建议，文档没有修改。", "success");
+        return true;
+    }
+
+    function applyOneIssue(issue) {
+        var document = activeDocument(app());
+        var range = document.Range(issue.start, issue.end);
+        if (text(range.Text) !== issue.original) {
+            issue.status = "stale";
+            viewIssues();
+            return { ok: false, reason: "changed" };
+        }
+
+        range.Text = issue.suggestion;
+        recordAction("applied", issue);
+        currentIssues = root.WpsProofreadingCore.shiftIssuesAfterReplacement(
+            currentIssues,
+            issue.id,
+            issue.start,
+            issue.end,
+            issue.suggestion.length
+        );
+        currentSnapshot.selectedText = currentSnapshot.selectedText.slice(0, issue.start - currentSnapshot.start) +
+            issue.suggestion + currentSnapshot.selectedText.slice(issue.end - currentSnapshot.start);
+        currentSnapshot.end += issue.suggestion.length - issue.original.length;
+        viewIssues();
+        return { ok: true };
+    }
+
+    function applyProofreadingIssue(issueId) {
+        var issue = findPendingIssue(issueId);
+        if (!issue || issue.status !== "pending") {
+            setStatus("这条建议已处理或已失效，请重新校对。", "warning");
+            return false;
+        }
+        if (issue.actionable === false) {
+            setStatus("这条规则仅用于提醒，没有可自动写入的建议。", "warning");
+            return false;
+        }
+        if (!currentDocumentMatches(currentSnapshot)) {
+            markAllPendingStale("选区内容已变化，未写入任何建议。请重新校对。");
+            return false;
+        }
+
+        try {
+            var result = applyOneIssue(issue);
+            if (!result.ok) {
+                setStatus("原文已变化，未应用这条建议。请重新校对。", "warning");
+                return false;
+            }
+            setStatus("已应用一条建议。其余建议已重新定位，并会在应用前再次核对。", "success");
+            return true;
+        } catch (error) {
+            setStatus("WPS 未能应用这条建议；文档内容未确认改变，请重新校对。", "error");
+            return false;
+        }
+    }
+
+    function isAutoFixableIssue(issue) {
+        return issue && issue.status === "pending" &&
+            issue.actionable !== false &&
+            issue.needsReview !== true &&
+            Number.isFinite(Number(issue.confidence)) &&
+            Number(issue.confidence) >= 0.9;
+    }
+
+    function applyAllProofreadingIssues() {
+        var pending = currentIssues.filter(function (candidate) {
+            return candidate.status === "pending";
+        });
+        var pendingIds = pending.filter(isAutoFixableIssue).map(function (candidate) {
+            return candidate.id;
+        });
+        var skipped = pending.length - pendingIds.length;
+
+        if (!pending.length) {
+            setStatus("当前没有可修正的建议。", "warning");
+            return { applied: 0, failed: 0, skipped: 0 };
+        }
+        if (!pendingIds.length) {
+            setStatus("当前建议均需人工确认或置信度不足 90%，不会一键写入。", "warning");
+            return { applied: 0, failed: 0, skipped: skipped };
+        }
+        if (!currentDocumentMatches(currentSnapshot)) {
+            markAllPendingStale("选区内容已变化，未写入任何建议。请重新校对。");
+            return { applied: 0, failed: pendingIds.length, skipped: skipped, stale: true };
+        }
+
+        var applied = 0;
+        var failed = 0;
+        for (var index = 0; index < pendingIds.length; index += 1) {
+            var issue = findPendingIssue(pendingIds[index]);
+            if (!issue || !isAutoFixableIssue(issue)) continue;
+            var result;
+            try {
+                result = applyOneIssue(issue);
+            } catch (error) {
+                result = { ok: false, reason: "error" };
+            }
+            if (result.ok) {
+                applied += 1;
+            } else {
+                failed += 1;
+                if (result.reason === "error") {
+                    setStatus("WPS 未能写入剩余建议，已停止批量修正；已修正 " + applied + " 条。", "error");
+                    return { applied: applied, failed: failed, skipped: skipped };
+                }
+                markAllPendingStale("原文已变化，剩余建议未写入。已修正 " + applied + " 条，请重新校对。");
+                return { applied: applied, failed: failed, skipped: skipped, stale: true };
+            }
+        }
+
+        var suffix = skipped
+            ? "；另有 " + skipped + " 条需人工确认或置信度不足 90% 的建议未自动修改。"
+            : "。";
+        setStatus(applied
+            ? "已一键修正 " + applied + " 条高置信度建议，并在写入前逐条核对了原文" + suffix
+            : "没有可安全自动写入的建议。", applied ? "success" : "warning");
+        return { applied: applied, failed: failed, skipped: skipped };
+    }
+
+    root.runProofreading = runProofreading;
+    root.cancelProofreading = cancelProofreading;
+    root.refreshProviderModels = refreshProviderModels;
+    root.locateProofreadingIssue = locateProofreadingIssue;
+    root.ignoreProofreadingIssue = ignoreProofreadingIssue;
+    root.applyProofreadingIssue = applyProofreadingIssue;
+    root.applyAllProofreadingIssues = applyAllProofreadingIssues;
+    root.getWpsProofreadingState = function () {
+        return {
+            snapshot: currentSnapshot,
+            issues: currentIssues.slice(),
+            busy: busy,
+            provider: currentSettings().provider
+        };
+    };
+
+    if (root.document) {
+        if (root.document.readyState === "loading") {
+            root.document.addEventListener("DOMContentLoaded", initConfiguration);
+        } else {
+            initConfiguration();
+        }
+    }
+})(typeof window !== "undefined" ? window : globalThis);
