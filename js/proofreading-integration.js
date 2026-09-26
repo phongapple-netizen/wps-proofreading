@@ -546,26 +546,34 @@
         var base = Number(selectionStart) || 0;
         var paragraphs = batch || [];
         var results = [];
+        var usedCharacters = 0;
+        var maxCharacters = 6000;
 
         (candidates || []).forEach(function (candidate) {
+            if (results.length >= 20 || usedCharacters >= maxCharacters) return;
             paragraphs.forEach(function (paragraph) {
+                if (results.length >= 20 || usedCharacters >= maxCharacters) return;
                 var start = base + paragraph.offset;
                 var end = start + text(paragraph.text).length;
                 if (candidate.start >= end || candidate.end <= start) return;
-                results.push({
+                var entry = {
                     ruleId: candidate.ruleId,
-                    ruleName: candidate.ruleName || "",
+                    ruleName: text(candidate.ruleName).slice(0, 120),
                     paragraphIndex: paragraph.paragraphIndex,
-                    trigger: candidate.trigger || "",
-                    preferredSuggestion: candidate.preferredSuggestion || "",
-                    instruction: candidate.instruction || "",
-                    source: candidate.ruleSource || "",
+                    trigger: text(candidate.trigger).slice(0, 300),
+                    preferredSuggestion: text(candidate.preferredSuggestion).slice(0, 300),
+                    instruction: text(candidate.instruction).slice(0, 700),
+                    source: text(candidate.ruleSource).slice(0, 160),
                     severity: candidate.severity || "medium"
-                });
+                };
+                var size = JSON.stringify(entry).length;
+                if (usedCharacters + size > maxCharacters && results.length) return;
+                results.push(entry);
+                usedCharacters += size;
             });
         });
 
-        return results.slice(0, 20);
+        return results;
     }
 
     function annotateAiReviewIssues(issues, candidates) {
