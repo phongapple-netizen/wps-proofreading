@@ -656,6 +656,86 @@ test("consistency-pass failure keeps completed first-pass findings", async () =>
     assert.equal(harness.status.tone, "warning");
 });
 
+test("long text with no conflicting variants skips the second model pass", async () => {
+    const selectedText = Array(200).fill("市安委办负责统筹普通工作内容。").join("\n");
+    const harness = createHarness({ selectedText, issues: [] });
+
+    const result = await harness.window.runProofreading();
+
+    assert.equal(result.accepted, true);
+    assert.equal(result.batches > 1, true);
+    assert.equal(result.consistencyAttempted, false);
+    assert.equal(harness.requests.length, result.batches);
+    assert.equal(harness.requests.some((request) =>
+        JSON.stringify(request.body).includes("第二遍跨段落一致性复核")), false);
+});
+
+test("many global candidates are reviewed in batches without losing distant groups", async () => {
+    const names = "甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥";
+    const lines = [];
+    for (const name of names) lines.push(`${name.repeat(5)}项目定于9月26日启动。`);
+    for (const name of names) lines.push(`${name.repeat(5)}项目定于9月27日启动。`);
+    const harness = createHarness({ selectedText: lines.join("\n"), issues: [] });
+
+    const result = await harness.window.runProofreading();
+    const prompts = harness.requests.map((request) =>
+        request.body && request.body.messages && request.body.messages[0].content || "");
+    const consistencyPrompts = prompts.filter((prompt) =>
+        prompt.includes("第二遍跨段落一致性复核"));
+
+    assert.equal(result.accepted, true);
+    assert.equal(result.consistencyCompleted, true);
+    assert.equal(consistencyPrompts.length > 1, true);
+    assert.equal(harness.requests.length, result.batches + consistencyPrompts.length);
+    assert.equal(consistencyPrompts.some((prompt) =>
+        prompt.includes("paragraphIndex\":1") && prompt.includes("paragraphIndex\":23")), true);
+    assert.equal(consistencyPrompts.some((prompt) =>
+        prompt.includes("paragraphIndex\":22") && prompt.includes("paragraphIndex\":44")), true);
+    assert.equal(consistencyPrompts.every((prompt) =>
+        !prompt.includes("普通正文")), true);
+});
+
+test("a document edit during global consistency review discards old findings", async () => {
+    const selectedText = "市安委办负责统筹，有错字。\n市安委会办公室负责协调。";
+    let requestCount = 0;
+    let harness;
+    harness = createHarness({
+        selectedText,
+        waitForRequest: () => {
+            requestCount += 1;
+            if (requestCount === 2) {
+                harness.changeDocument(harness.prefix +
+                    selectedText.replace("负责协调", "负责处理") + harness.suffix);
+            }
+        },
+        issuesForRequest: ({ body }) => {
+            const prompt = body && body.messages && body.messages[0].content || "";
+            if (prompt.includes("第二遍跨段落一致性复核")) {
+                return [{
+                    category: "consistency", paragraphIndex: 2,
+                    original: "市安委会办公室", suggestion: "市安委办",
+                    reason: "请核实", confidence: 0.9, needsReview: false
+                }];
+            }
+            return [{
+                category: "typo", paragraphIndex: 1, original: "错字",
+                suggestion: "错别字", reason: "错字", confidence: 0.98, needsReview: false
+            }];
+        }
+    });
+
+    const result = await harness.window.runProofreading();
+
+    assert.equal(requestCount, 2);
+    assert.equal(result.accepted, false);
+    assert.equal(harness.window.getWpsProofreadingState().issues.length, 0);
+    assert.equal(harness.renderedIssues.length, 0);
+    assert.match(harness.status.text, /结果已丢弃/);
+    assert.equal(harness.window.applyAllProofreadingIssues().applied, 0);
+    assert.equal(harness.readDocument(), harness.prefix +
+        selectedText.replace("负责协调", "负责处理") + harness.suffix);
+});
+
 
 test("semantic local rules run before AI and require individual confirmation", async () => {
     const harness = createHarness({

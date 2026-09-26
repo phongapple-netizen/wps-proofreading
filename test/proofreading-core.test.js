@@ -241,3 +241,122 @@ test("consistency windows retain candidates beyond the first prompt limit", () =
     assert.equal(windows.flatMap((window) => window.entries).length, 80);
     assert.equal(windows.some((window) => window.truncated), false);
 });
+
+test("global candidates connect organization variants from paragraphs 1 and 80", () => {
+    const paragraphs = core.splitIntoParagraphs([
+        "市安委办负责统筹。",
+        ...Array(78).fill("一、普通工作安排"),
+        "市安委会办公室负责协调。"
+    ].join("\n"));
+    const oldWindows = core.buildConsistencyIndexes(paragraphs, 700);
+    assert.equal(oldWindows.length > 1, true);
+    assert.equal(oldWindows[0].entries.some((entry) => entry.paragraphIndex === 1), true);
+    assert.equal(oldWindows.at(-1).entries.some((entry) => entry.paragraphIndex === 80), true);
+    const candidates = core.buildGlobalConsistencyCandidates(paragraphs);
+    const organization = candidates.find((candidate) => candidate.type === "organization");
+
+    assert.ok(organization);
+    assert.deepEqual(organization.variants.map((variant) => variant.text),
+        ["市安委办", "市安委会办公室"]);
+    assert.deepEqual(organization.variants.map((variant) => variant.paragraphs), [[1], [80]]);
+    const prompt = core.buildConsistencyPrompt(
+        core.batchGlobalConsistencyCandidates(candidates)[0]);
+    assert.match(prompt, /全文一致性候选组/);
+    assert.match(prompt, /市安委办/);
+    assert.match(prompt, /市安委会办公室/);
+    assert.equal(prompt.includes("普通工作安排"), false);
+});
+
+test("identical organization names and distinct government offices do not create candidates", () => {
+    const repeated = core.splitIntoParagraphs(Array(80).fill("市安委办负责统筹。").join("\n"));
+    assert.deepEqual(core.buildGlobalConsistencyCandidates(repeated), []);
+    assert.deepEqual(core.batchGlobalConsistencyCandidates(
+        core.buildGlobalConsistencyCandidates(repeated)), []);
+    const separate = core.splitIntoParagraphs("市政府负责统筹。\n市政府办公室负责协调。");
+    assert.equal(core.buildGlobalConsistencyCandidates(separate).some((item) =>
+        item.type === "organization"), false);
+});
+
+test("equivalent converted quantities are not treated as conflicting values", () => {
+    const equal = core.splitIntoParagraphs(
+        "项目装机容量为2GW。\n项目装机容量为2000MW。");
+    assert.equal(core.buildGlobalConsistencyCandidates(equal).some((item) =>
+        item.type === "quantity"), false);
+
+    const different = core.splitIntoParagraphs(
+        "项目总投资40.06万元。\n项目总投资40.6万元。");
+    const quantity = core.buildGlobalConsistencyCandidates(different).find((item) =>
+        item.type === "quantity");
+    assert.ok(quantity);
+    assert.deepEqual(quantity.variants.map((variant) => variant.text),
+        ["40.06万元", "40.6万元"]);
+});
+
+test("dates for the same matter produce a candidate but different matters stay separate", () => {
+    const paragraphs = core.splitIntoParagraphs(
+        "发布会定于9月26日举行。\n发布会定于9月27日举行。\n验收工作定于9月28日完成。");
+    const dates = core.buildGlobalConsistencyCandidates(paragraphs).filter((item) =>
+        item.type === "date");
+    assert.equal(dates.length, 1);
+    assert.deepEqual(dates[0].variants.map((variant) => variant.text),
+        ["9月26日", "9月27日"]);
+});
+
+test("policy titles, percentages and heading names become review candidates", () => {
+    const paragraphs = core.splitIntoParagraphs([
+        "《安全生产工作方案》已发布。",
+        "《安全生产专项工作方案》已发布。",
+        "项目完成率为35%。",
+        "项目完成率为36%。",
+        "一、安全生产专项行动",
+        "二、安全生产行动"
+    ].join("\n"));
+    const types = core.buildGlobalConsistencyCandidates(paragraphs)
+        .map((candidate) => candidate.type);
+    assert.equal(types.includes("policy"), true);
+    assert.equal(types.includes("percentage"), true);
+    assert.equal(types.includes("matter"), true);
+});
+
+test("policy omissions and unquoted action names can be compared globally", () => {
+    const policy = core.buildGlobalConsistencyCandidates(core.splitIntoParagraphs(
+        "《安全生产工作方案》已发布。\n《安生产工作方案》已发布。"));
+    assert.equal(policy.some((candidate) => candidate.type === "policy"), true);
+
+    const mixedPolicy = core.buildGlobalConsistencyCandidates(core.splitIntoParagraphs(
+        "安全生产工作方案已发布。\n《安全生产专项工作方案》已发布。"));
+    assert.equal(mixedPolicy.some((candidate) => candidate.type === "policy"), true);
+
+    const matter = core.buildGlobalConsistencyCandidates(core.splitIntoParagraphs(
+        "开展春季安全生产专项行动。\n启动春季安全生产行动。"));
+    assert.equal(matter.some((candidate) => candidate.type === "matter"), true);
+});
+
+test("global candidate batches preserve every group while bounding each request", () => {
+    const names = "甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥";
+    const lines = [];
+    for (const name of names) lines.push(`${name.repeat(5)}项目定于9月26日启动。`);
+    for (const name of names) lines.push(`${name.repeat(5)}项目定于9月27日启动。`);
+    const candidates = core.buildGlobalConsistencyCandidates(
+        core.splitIntoParagraphs(lines.join("\n")));
+    const batches = core.batchGlobalConsistencyCandidates(candidates, 700, 3);
+
+    assert.equal(candidates.length, names.length);
+    assert.equal(batches.length > 1, true);
+    assert.equal(batches.flatMap((batch) => batch.candidates).length, candidates.length);
+    assert.equal(batches.every((batch) => batch.candidates.length <= 3), true);
+    assert.equal(batches.every((batch) => JSON.stringify(batch.candidates).length <= 700), true);
+    const last = batches.flatMap((batch) => batch.candidates).at(-1);
+    assert.deepEqual(last.variants.map((variant) => variant.paragraphs), [[22], [44]]);
+});
+
+test("consistency findings must point to a supplied excerpt", () => {
+    const candidates = core.buildGlobalConsistencyCandidates(core.splitIntoParagraphs(
+        "市安委办负责统筹。\n普通正文。\n市安委会办公室负责协调。"));
+    const batch = core.batchGlobalConsistencyCandidates(candidates)[0];
+    const findings = [
+        { paragraphIndex: 3, original: "市安委会办公室" },
+        { paragraphIndex: 2, original: "普通正文" }
+    ];
+    assert.deepEqual(core.filterConsistencyIssuesToCandidates(findings, batch), [findings[0]]);
+});
