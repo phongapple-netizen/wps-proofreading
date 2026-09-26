@@ -167,7 +167,10 @@
             actionable: value.actionable !== false,
             ruleName: String(value.ruleName || ""),
             ruleSource: String(value.ruleSource || ""),
-            severity: String(value.severity || "")
+            severity: String(value.severity || ""),
+            origin: String(value.origin || "ai"),
+            confirmedByAI: value.confirmedByAI === true,
+            aiConflict: value.aiConflict === true
         };
     }
 
@@ -391,6 +394,17 @@
             chip.className = "chip chip-" + (issue.category || "general");
             chip.textContent = issue.categoryLabel;
             badges.appendChild(chip);
+            if (issue.origin === "rule+ai") {
+                var sourceBadge = root.document.createElement("span");
+                sourceBadge.className = issue.aiConflict ? "badge-conflict" : "badge-source";
+                sourceBadge.textContent = issue.aiConflict ? "规则与 AI 意见不同" : "规则 + AI";
+                badges.appendChild(sourceBadge);
+            } else if (issue.origin === "rule") {
+                var ruleBadge = root.document.createElement("span");
+                ruleBadge.className = "badge-source";
+                ruleBadge.textContent = "本地规则";
+                badges.appendChild(ruleBadge);
+            }
             if (issue.needsReview) {
                 var deepBadge = root.document.createElement("span");
                 deepBadge.className = "badge-deep";
@@ -435,7 +449,8 @@
                 card.appendChild(diff);
             }
 
-            if (issue.category === "rule" && (issue.ruleName || issue.ruleSource)) {
+            if ((issue.origin === "rule" || issue.origin === "rule+ai") &&
+                (issue.ruleName || issue.ruleSource)) {
                 var ruleMeta = root.document.createElement("p");
                 ruleMeta.className = "issue-state";
                 ruleMeta.textContent = (issue.ruleName ? "规则：" + issue.ruleName : "自定义规则") +
