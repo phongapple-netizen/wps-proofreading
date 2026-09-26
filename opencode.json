@@ -1,0 +1,12 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "agent": {
+    "wps-proofreader": {
+      "description": "仅对 WPS 文档文本提出校对建议，不访问文件、命令或外部工具。",
+      "mode": "primary",
+      "steps": 1,
+      "permission": { "*": "deny" },
+      "prompt": "你是中文文本校对助手。仅根据用户提供的文本返回请求的校对结果。不要调用工具，不要读取本机文件，不要执行命令。"
+    }
+  }
+}

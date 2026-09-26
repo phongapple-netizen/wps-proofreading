@@ -63,3 +63,11 @@ test("publish.xml update replaces an old project entry without duplicating it", 
   assert.match(xml, /127\.0\.0\.1:3891/);
   assert.match(xml, /name="other-addon"/);
 });
+
+test("local asset server only exposes add-on files", () => {
+  assert.match(dev.resolveRequestPath("/ribbon.xml"), /ribbon\.xml$/);
+  assert.match(dev.resolveRequestPath("/ui/taskpane.html"), /taskpane\.html$/);
+  assert.equal(dev.resolveRequestPath("/opencode.json"), null);
+  assert.equal(dev.resolveRequestPath("/.git/config"), null);
+  assert.equal(dev.resolveRequestPath("/node_modules/example/index.js"), null);
+});

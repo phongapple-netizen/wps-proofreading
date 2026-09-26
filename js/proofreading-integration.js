@@ -221,6 +221,7 @@
                 suggestion: issue.suggestion,
                 status: issue.status,
                 needsReview: issue.needsReview,
+                autoFixable: issue.autoFixable === true,
                 actionable: issue.actionable !== false,
                 ruleName: issue.ruleName || "",
                 ruleSource: issue.ruleSource || "",
@@ -631,12 +632,12 @@
         var snapshot = null;
         var collected = [];
         var discarded = false;
-        var api = settingsStore();
-        var requestProvider = "";
         try {
+            if (root.WpsRulesReady && typeof root.WpsRulesReady.then === "function") {
+                await root.WpsRulesReady;
+            }
             snapshot = captureSnapshot();
             var options = modelOptions();
-            requestProvider = options.provider;
             var providerLabel = providerDisplayName(options.provider);
             var scopeLabel = snapshot.mode === "full" ? "全文" : "选区";
             if (snapshot.mode === "full" && !confirmFullDocument(snapshot, options)) {
@@ -678,9 +679,10 @@
             var batches = root.WpsProofreadingCore.batchParagraphs(
                 paragraphs, root.WpsProofreadingCore.defaultBatchCharacters);
             var deep = isDeepMode();
-            var consistencyIndex = root.WpsProofreadingCore.buildConsistencyIndex(paragraphs);
-            var runConsistencyPass = batches.length > 1 &&
-                root.WpsProofreadingCore.hasCrossParagraphConsistency(consistencyIndex);
+            var consistencyIndexes = root.WpsProofreadingCore.buildConsistencyIndexes(paragraphs);
+            var runConsistencyPass = batches.length > 1 && consistencyIndexes.some(function (item) {
+                return root.WpsProofreadingCore.hasCrossParagraphConsistency(item);
+            });
             var firstPassProgressCeiling = runConsistencyPass ? 85 : 100;
             var totalFirstPassCharacters = batches.reduce(function (total, batch) {
                 return total + batchCharacterCount(batch);
@@ -741,25 +743,35 @@
                 setStatus("第一遍逐段校对已完成，正在进行跨段落一致性复核…", "working");
                 reportProgress(firstPassProgressCeiling, "正文校对完成 · 全文一致性复核中");
                 try {
-                    var consistencyPrompt = root.WpsProofreadingCore.buildConsistencyPrompt(consistencyIndex);
-                    var consistencyResponse = await requestProofreadingModel(options, consistencyPrompt);
-                    if (!currentDocumentMatches(snapshot)) {
-                        currentSnapshot = null;
-                        currentIssues = [];
-                        discarded = true;
+                    for (var windowIndex = 0; windowIndex < consistencyIndexes.length; windowIndex += 1) {
+                        var consistencyIndex = consistencyIndexes[windowIndex];
+                        if (!root.WpsProofreadingCore.hasCrossParagraphConsistency(consistencyIndex)) continue;
+                        var consistencyPrompt = root.WpsProofreadingCore.buildConsistencyPrompt(consistencyIndex);
+                        var consistencyResponse = await requestProofreadingModel(options, consistencyPrompt);
+                        if (!currentDocumentMatches(snapshot)) {
+                            currentSnapshot = null;
+                            currentIssues = [];
+                            discarded = true;
+                            viewIssues();
+                            throw new Error("一致性复核期间" + scopeLabel + "内容已变化，结果已丢弃。请重新校对。");
+                        }
+                        var consistencyParsed = root.WpsProofreadingCore.parseConsistencyIssues(consistencyResponse);
+                        collected = collected.concat(
+                            root.WpsProofreadingCore.mapIssuesToRanges(
+                                paragraphs, consistencyParsed, snapshot.start).map(function (issue) {
+                                    return Object.assign({ origin: "ai" }, issue);
+                                }));
+                        currentIssues = mergeMappedIssues(collected);
+                        currentSnapshot = snapshot;
                         viewIssues();
-                        throw new Error("一致性复核期间" + scopeLabel + "内容已变化，结果已丢弃。请重新校对。");
+                        reportProgress(firstPassProgressCeiling + Math.round(
+                            ((windowIndex + 1) / consistencyIndexes.length) * (100 - firstPassProgressCeiling)),
+                            "一致性复核 · 第 " + (windowIndex + 1) + "/" + consistencyIndexes.length + " 窗");
                     }
-                    var consistencyParsed = root.WpsProofreadingCore.parseConsistencyIssues(consistencyResponse);
-                    collected = collected.concat(
-                        root.WpsProofreadingCore.mapIssuesToRanges(
-                            paragraphs, consistencyParsed, snapshot.start).map(function (issue) {
-                                return Object.assign({ origin: "ai" }, issue);
-                            }));
-                    currentIssues = mergeMappedIssues(collected);
-                    currentSnapshot = snapshot;
-                    viewIssues();
                     consistencyCompleted = true;
+                    if (consistencyIndexes.length > 1) {
+                        consistencyWarning = "已覆盖全部一致性候选段落；不同窗口之间的差异仍需人工复核。";
+                    }
                     reportProgress(100, "全文一致性复核完成");
                 } catch (consistencyError) {
                     if ((currentController && currentController.signal && currentController.signal.aborted) ||
@@ -780,7 +792,9 @@
             reportProgress(100, "完成");
             var consistencyText = runConsistencyPass
                 ? (consistencyCompleted
-                    ? "；已完成跨段落一致性复核"
+                    ? (consistencyIndexes.length > 1
+                        ? "；已分窗复核全部一致性候选段落"
+                        : "；已完成跨段落一致性复核")
                     : "；逐段校对已完成，但一致性复核未完成")
                 : "";
             var finalTone = consistencyWarning ? "warning" : "success";
@@ -821,14 +835,6 @@
         } finally {
             currentController = null;
             setBusy(false);
-            if (api && typeof api.clearPassword === "function") {
-                var providerToClear = requestProvider || currentSettings().provider;
-                api.clearPassword(providerToClear);
-                var keyField = byId("model-api-key");
-                if (keyField && currentSettings().provider === providerToClear) {
-                    keyField.value = "";
-                }
-            }
         }
     }
 
@@ -886,6 +892,10 @@
     }
 
     function ignoreProofreadingIssue(issueId) {
+        if (busy) {
+            setStatus("校对进行中，请等待完成或先取消。", "warning");
+            return false;
+        }
         var issue = findPendingIssue(issueId);
         if (!issue || issue.status !== "pending") {
             setStatus("这条建议已处理或已失效。", "warning");
@@ -898,7 +908,7 @@
         return true;
     }
 
-    function applyOneIssue(issue) {
+    function applyOneIssue(issue, deferRender) {
         var document = activeDocument(app());
         var range = document.Range(issue.start, issue.end);
         if (text(range.Text) !== issue.original) {
@@ -919,11 +929,15 @@
         currentSnapshot.selectedText = currentSnapshot.selectedText.slice(0, issue.start - currentSnapshot.start) +
             issue.suggestion + currentSnapshot.selectedText.slice(issue.end - currentSnapshot.start);
         currentSnapshot.end += issue.suggestion.length - issue.original.length;
-        viewIssues();
+        if (!deferRender) viewIssues();
         return { ok: true };
     }
 
     function applyProofreadingIssue(issueId) {
+        if (busy) {
+            setStatus("校对进行中，请等待完成或先取消。", "warning");
+            return false;
+        }
         var issue = findPendingIssue(issueId);
         if (!issue || issue.status !== "pending") {
             setStatus("这条建议已处理或已失效，请重新校对。", "warning");
@@ -954,6 +968,7 @@
 
     function isAutoFixableIssue(issue) {
         return issue && issue.status === "pending" &&
+            issue.autoFixable === true &&
             issue.actionable !== false &&
             issue.needsReview !== true &&
             Number.isFinite(Number(issue.confidence)) &&
@@ -961,6 +976,10 @@
     }
 
     function applyAllProofreadingIssues() {
+        if (busy) {
+            setStatus("校对进行中，请等待完成或先取消。", "warning");
+            return { applied: 0, failed: 0, skipped: currentIssues.length };
+        }
         var pending = currentIssues.filter(function (candidate) {
             return candidate.status === "pending";
         });
@@ -974,7 +993,7 @@
             return { applied: 0, failed: 0, skipped: 0 };
         }
         if (!pendingIds.length) {
-            setStatus("当前建议均需人工确认或置信度不足 90%，不会一键写入。", "warning");
+            setStatus("当前没有符合安全格式规则的一键修正项，请逐条确认。", "warning");
             return { applied: 0, failed: 0, skipped: skipped };
         }
         if (!currentDocumentMatches(currentSnapshot)) {
@@ -989,7 +1008,7 @@
             if (!issue || !isAutoFixableIssue(issue)) continue;
             var result;
             try {
-                result = applyOneIssue(issue);
+                result = applyOneIssue(issue, true);
             } catch (error) {
                 result = { ok: false, reason: "error" };
             }
@@ -998,6 +1017,7 @@
             } else {
                 failed += 1;
                 if (result.reason === "error") {
+                    viewIssues();
                     setStatus("WPS 未能写入剩余建议，已停止批量修正；已修正 " + applied + " 条。", "error");
                     return { applied: applied, failed: failed, skipped: skipped };
                 }
@@ -1006,11 +1026,12 @@
             }
         }
 
+        viewIssues();
         var suffix = skipped
-            ? "；另有 " + skipped + " 条需人工确认或置信度不足 90% 的建议未自动修改。"
+            ? "；另有 " + skipped + " 条建议未自动修改，请逐条确认。"
             : "。";
         setStatus(applied
-            ? "已一键修正 " + applied + " 条高置信度建议，并在写入前逐条核对了原文" + suffix
+            ? "已一键修正 " + applied + " 条安全格式建议，并在写入前逐条核对了原文" + suffix
             : "没有可安全自动写入的建议。", applied ? "success" : "warning");
         return { applied: applied, failed: failed, skipped: skipped };
     }

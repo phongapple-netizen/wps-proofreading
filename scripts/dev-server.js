@@ -147,6 +147,12 @@ function resolveRequestPath(requestUrl) {
         return null;
     }
     if (pathname === "/") pathname = "/index.html";
+    const publicRoot = pathname.split("/")[1];
+    const publicFiles = new Set(["index.html", "main.js", "ribbon.xml", "package.json"]);
+    const publicDirectories = new Set(["ui", "js", "rules"]);
+    if (!publicFiles.has(publicRoot) && !publicDirectories.has(publicRoot)) return null;
+    if (pathname.split("/").some((part) => part.startsWith("."))) return null;
+    if (!/\.(?:html|css|js|json|xml)$/i.test(pathname)) return null;
     const target = path.resolve(projectRoot, "." + pathname.replace(/\//g, path.sep));
     if (target !== projectRoot && !target.startsWith(projectRoot + path.sep)) return null;
     return target;
@@ -154,6 +160,11 @@ function resolveRequestPath(requestUrl) {
 
 function createServer() {
     return http.createServer((request, response) => {
+        if (request.headers.host !== host + ":" + port) {
+            response.writeHead(403, { "Content-Type": "text/plain; charset=utf-8" });
+            response.end("Forbidden");
+            return;
+        }
         if (request.method !== "GET" && request.method !== "HEAD") {
             response.writeHead(405, { "Content-Type": "text/plain; charset=utf-8" });
             response.end("Method Not Allowed");
@@ -175,8 +186,7 @@ function createServer() {
             }
             response.writeHead(200, {
                 "Content-Type": mimeTypes[path.extname(target).toLowerCase()] || "application/octet-stream",
-                "Cache-Control": "no-store",
-                "Access-Control-Allow-Origin": "*"
+                "Cache-Control": "no-store"
             });
             if (request.method === "HEAD") {
                 response.end();
@@ -222,7 +232,7 @@ function platformLabel() {
 
 function start() {
     try {
-        const publishPaths = registerPlugin();
+        const publishPaths = process.argv.includes("--no-register") ? [] : registerPlugin();
         const server = createServer();
         server.on("error", (error) => {
             if (error && error.code === "EADDRINUSE") {

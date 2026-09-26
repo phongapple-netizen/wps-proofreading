@@ -36,7 +36,7 @@
       "pattern": "安全生产事故",
       "replacement": "生产安全事故",
       "severity": "medium",
-      "autoFix": true,
+      "autoFix": false,
       "priority": 120,
       "source": "《中华人民共和国安全生产法》",
       "notes": "法律使用“生产安全事故”表述；本规则处理常见倒置写法“安全生产事故”。"
@@ -50,7 +50,7 @@
       "pattern": "管行业必须管安全、管业务必须管安全、管生产必须管安全",
       "replacement": "管行业必须管安全、管业务必须管安全、管生产经营必须管安全",
       "severity": "high",
-      "autoFix": true,
+      "autoFix": false,
       "priority": 130,
       "source": "安全生产“三个必须”原则",
       "notes": "规范表述为“管行业必须管安全、管业务必须管安全、管生产经营必须管安全”。"
@@ -80,7 +80,7 @@
       "pattern": "先检测、再通风、后作业",
       "replacement": "先通风、再检测、后作业",
       "severity": "high",
-      "autoFix": true,
+      "autoFix": false,
       "priority": 150,
       "source": "《工贸企业重大事故隐患判定标准》第十三条",
       "notes": "存在中毒风险的有限空间作业应执行“先通风、再检测、后作业”要求。"
@@ -94,7 +94,7 @@
       "pattern": "先通风、后检测、再作业",
       "replacement": "先通风、再检测、后作业",
       "severity": "high",
-      "autoFix": true,
+      "autoFix": false,
       "priority": 150,
       "source": "《工贸企业重大事故隐患判定标准》第十三条",
       "notes": "规范顺序为“先通风、再检测、后作业”。"

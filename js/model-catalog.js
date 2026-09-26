@@ -19,13 +19,33 @@
         return headers;
     }
 
+    function withTimeout(promise, message, onTimeout) {
+        return new Promise(function (resolve, reject) {
+            var timer = setTimeout(function () {
+                if (onTimeout) onTimeout();
+                reject(new Error(message));
+            }, 10000);
+            Promise.resolve(promise).then(function (value) {
+                clearTimeout(timer);
+                resolve(value);
+            }, function (error) {
+                clearTimeout(timer);
+                reject(error);
+            });
+        });
+    }
+
     async function fetchJson(url, options, failureMessage, fetchImpl) {
         var fetcher = fetchImpl || root.fetch;
         if (typeof fetcher !== "function") throw new Error("当前 WPS 内核不支持网络请求。");
         var response;
+        var controller = typeof AbortController === "function" ? new AbortController() : null;
         try {
-            response = await fetcher(url, options || {});
+            response = await withTimeout(fetcher(url, Object.assign({}, options || {}, {
+                signal: controller ? controller.signal : options && options.signal
+            })), "模型列表请求超时。", function () { if (controller) controller.abort(); });
         } catch (error) {
+            if (error && /超时/.test(error.message)) throw error;
             throw new Error(failureMessage);
         }
         if (!response || !response.ok) {
@@ -33,8 +53,11 @@
             throw new Error(failureMessage + status);
         }
         try {
-            return await response.json();
+            return await withTimeout(response.json(), "模型列表响应超时。", function () {
+                if (controller) controller.abort();
+            });
         } catch (error) {
+            if (error && /超时/.test(error.message)) throw error;
             throw new Error("模型服务返回了无法识别的响应。");
         }
     }

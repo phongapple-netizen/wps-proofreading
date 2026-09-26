@@ -4,6 +4,14 @@
     var STORAGE_KEY = "wps_text_proofreading_rules_v1";
     var SCHEMA_VERSION = 1;
     var MAX_RULES = 1000;
+    var SAFE_AUTOFIX = {
+        "basic-space-before-cn-punct": ["[ \\t]+([，。；：！？])", "$1"],
+        "basic-duplicate-comma": ["，{2,}", "，"],
+        "basic-duplicate-period": ["。{2,}", "。"],
+        "basic-duplicate-semicolon": ["；{2,}", "；"],
+        "basic-ascii-comma-between-hanzi": ["([\\u4e00-\\u9fff]),([\\u4e00-\\u9fff])", "$1，$2"],
+        "basic-ascii-colon-between-hanzi": ["([\\u4e00-\\u9fff]):([\\u4e00-\\u9fff])", "$1：$2"]
+    };
     var idCounter = 0;
 
     function text(value) {
@@ -47,11 +55,20 @@
             }
             return {
                 version: SCHEMA_VERSION,
-                rules: parsed.rules.slice(0, MAX_RULES).map(normalizeRule).filter(Boolean)
+                rules: parsed.rules.slice(0, MAX_RULES).map(safelyReadRule).filter(Boolean)
             };
         } catch (error) {
             return { version: SCHEMA_VERSION, rules: [] };
         }
+    }
+
+    function hasStoredRules() {
+        var storage = getStorage();
+        if (!storage) return false;
+        try {
+            var saved = storage.getItem(STORAGE_KEY);
+            return saved !== null && saved !== "";
+        } catch (error) { return false; }
     }
 
     function writeState(state) {
@@ -62,7 +79,7 @@
                 version: SCHEMA_VERSION,
                 rules: (state && Array.isArray(state.rules) ? state.rules : [])
                     .slice(0, MAX_RULES)
-                    .map(normalizeRule)
+                    .map(safelyReadRule)
                     .filter(Boolean)
             }));
             return true;
@@ -140,6 +157,14 @@
         var usesRegex = rule.type === "regex" ||
             (rule.type === "ai_review" && rule.matchMode === "regex");
         if (!usesRegex) return rule;
+        // Quantifying a group with another variable-width expression can freeze
+        // WPS's synchronous JavaScript thread on a short malicious input.
+        if (/\\[1-9]|\([^)]*\)(?:[+*]|\{\d+(?:,\d*)?\})/.test(rule.pattern)) {
+            throw new Error("规则「" + (rule.name || rule.pattern) + "」包含可能导致卡顿的正则结构。");
+        }
+        if (/\$[`']/.test(rule.replacement)) {
+            throw new Error("规则替换内容不能引用整段匹配前后的文本。");
+        }
         try {
             var regex = new RegExp(rule.pattern, rule.flags + "g");
             var probe = regex.exec("");
@@ -149,6 +174,13 @@
                 "」的正则表达式无效，或可能匹配空字符串。");
         }
         return rule;
+    }
+
+    function safelyReadRule(candidate) {
+        var rule = normalizeRule(candidate);
+        if (!rule) return null;
+        try { return validateRule(rule); }
+        catch (error) { return null; }
     }
 
     function saveRule(candidate) {
@@ -196,13 +228,20 @@
         return text(value).replace(/[.*+?^$\{\}()|[\]\\]/g, "\\$&");
     }
 
-    function replacementForRegex(rule, matchText) {
-        try {
-            var regex = new RegExp(rule.pattern, rule.flags);
-            return matchText.replace(regex, rule.replacement);
-        } catch (error) {
-            return rule.replacement;
-        }
+    function replacementForRegex(rule, match) {
+        return rule.replacement.replace(/\$(\$|&|\d{1,2})/g, function (token, reference) {
+            if (reference === "$") return "$";
+            if (reference === "&") return match[0];
+            var index = Number(reference);
+            return index > 0 && index < match.length
+                ? text(match[index]) : token;
+        });
+    }
+
+    function safeAutoFix(rule) {
+        var signature = SAFE_AUTOFIX[rule.id];
+        return Boolean(rule.autoFix && rule.type === "regex" && !rule.flags &&
+            signature && rule.pattern === signature[0] && rule.replacement === signature[1]);
     }
 
     function candidatesForRule(rule, value, baseStart) {
@@ -226,7 +265,7 @@
             }
             var original = match[0];
             var suggestion = rule.type === "regex"
-                ? replacementForRegex(rule, original)
+                ? replacementForRegex(rule, match)
                 : rule.replacement;
             var actionable = suggestion !== "" || rule.type !== "reminder";
             if (rule.type === "reminder" && !rule.replacement) {
@@ -250,7 +289,8 @@
                 reason: rule.notes || ("命中规则「" + rule.name + "」" +
                     (rule.source ? "；来源：" + rule.source : "")),
                 confidence: 1,
-                needsReview: rule.type === "reminder" || rule.autoFix !== true,
+                needsReview: rule.type === "reminder" || !safeAutoFix(rule),
+                autoFixable: safeAutoFix(rule),
                 actionable: actionable,
                 start: baseStart + match.index,
                 end: baseStart + match.index + original.length,
@@ -464,6 +504,8 @@
         schemaVersion: SCHEMA_VERSION,
         maxRules: MAX_RULES,
         getRules: getRules,
+        hasStoredRules: hasStoredRules,
+        isSafeAutoFix: function (candidate) { return safeAutoFix(normalizeRule(candidate)); },
         saveRule: saveRule,
         removeRule: removeRule,
         setRuleEnabled: setRuleEnabled,

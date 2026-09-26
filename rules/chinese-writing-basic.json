@@ -122,7 +122,7 @@
       "flags": "",
       "replacement": "$1月$2日",
       "severity": "medium",
-      "autoFix": true,
+      "autoFix": false,
       "priority": 95,
       "source": "正式文稿日期规范",
       "notes": "正式公文日期一般写“月、日”，避免口语化“号”；规则仅匹配“X月X号”，避免误伤“3号线”等。"
@@ -136,7 +136,7 @@
       "pattern": "截止目前",
       "replacement": "截至目前",
       "severity": "medium",
-      "autoFix": true,
+      "autoFix": false,
       "priority": 95,
       "source": "现代汉语时间介词用法",
       "notes": "表示时间界限到当前时点时，一般使用“截至目前”。"

@@ -9,6 +9,8 @@ const coreSource = fs.readFileSync(path.join(projectRoot, "js/proofreading-core.
 const storeSource = fs.readFileSync(path.join(projectRoot, "js/settings-store.js"), "utf8");
 const rulesSource = fs.readFileSync(path.join(projectRoot, "js/rules-center.js"), "utf8");
 const integrationSource = fs.readFileSync(path.join(projectRoot, "js/proofreading-integration.js"), "utf8");
+const basicRules = JSON.parse(fs.readFileSync(path.join(projectRoot, "rules/chinese-writing-basic.json"), "utf8")).rules;
+function basicRule(id) { return basicRules.find((rule) => rule.id === id); }
 
 const SETTINGS_KEY = "wps_text_proofreading_model_settings_v1";
 const RUNTIME_ENDPOINT_KEY = "wps_text_proofreading_runtime_endpoint_v1";
@@ -101,6 +103,7 @@ function createHarness(options = {}) {
         fetch: async (url, requestOptions) => {
             const body = requestOptions && requestOptions.body ? JSON.parse(requestOptions.body) : null;
             requests.push({ url, options: requestOptions, body });
+            if (typeof options.waitForRequest === "function") await options.waitForRequest();
             const requestIndex = requests.length - 1;
             const responseIssues = typeof options.issuesForRequest === "function"
                 ? options.issuesForRequest({ url, options: requestOptions, body, requestIndex })
@@ -239,12 +242,11 @@ test("credential-like endpoint data is rejected by the settings store", () => {
     assert.equal(harness.runtimeEndpoint.includes("private-value"), false);
 });
 
-test("one-click fix applies every pending suggestion after verifying each original", async () => {
+test("one-click fix applies only fixed low-risk punctuation rules", async () => {
     const harness = createHarness({
-        issues: [
-            { category: "typo", paragraphIndex: 1, original: "错字", suggestion: "错别字", reason: "用词错误", confidence: 0.95, needsReview: false },
-            { category: "wording", paragraphIndex: 1, original: "本段", suggestion: "该段", reason: "用词重复", confidence: 0.9, needsReview: false }
-        ]
+        selectedText: "本段,有错字。。",
+        issues: [],
+        rules: [basicRule("basic-ascii-comma-between-hanzi"), basicRule("basic-duplicate-period")]
     });
     await harness.window.runProofreading();
     assert.equal(harness.window.getWpsProofreadingState().issues.length, 2);
@@ -252,37 +254,41 @@ test("one-click fix applies every pending suggestion after verifying each origin
     const result = harness.window.applyAllProofreadingIssues();
     assert.equal(result.applied, 2);
     assert.equal(result.failed, 0);
-    assert.equal(harness.readDocument(), harness.prefix + "该段有错别字。" + harness.suffix);
+    assert.equal(harness.readDocument(), harness.prefix + "本段，有错字。" + harness.suffix);
     assert.equal(harness.window.getWpsProofreadingState().issues.every((issue) => issue.status === "accepted"), true);
     assert.equal(harness.records.filter((record) => record.action === "applied").length, 2);
     assert.equal(harness.status.text.includes("已一键修正 2 条"), true);
 });
 
-test("one-click fix skips review-only and low-confidence suggestions", async () => {
+test("one-click fix skips every AI suggestion regardless of confidence", async () => {
     const harness = createHarness({
-        selectedText: "本段有错字，也有可疑表述。",
+        selectedText: "本段,有错字，也有可疑表述，另有建议。",
+        rules: [basicRule("basic-ascii-comma-between-hanzi")],
         issues: [
             { category: "typo", paragraphIndex: 1, original: "错字", suggestion: "错别字", reason: "明确错字", confidence: 0.98, needsReview: false },
             { category: "wording", paragraphIndex: 1, original: "可疑表述", suggestion: "建议表述", reason: "需要人工判断语境", confidence: 0.99, needsReview: true },
-            { category: "grammar", paragraphIndex: 1, original: "本段", suggestion: "该段", reason: "置信度不足", confidence: 0.72, needsReview: false }
+            { category: "grammar", paragraphIndex: 1, original: "另有建议", suggestion: "另有方案", reason: "置信度不足", confidence: 0.72, needsReview: false }
         ]
     });
     await harness.window.runProofreading();
 
     const result = harness.window.applyAllProofreadingIssues();
     assert.equal(result.applied, 1);
-    assert.equal(result.skipped, 2);
-    assert.equal(harness.readDocument(), harness.prefix + "本段有错别字，也有可疑表述。" + harness.suffix);
+    assert.equal(result.skipped, 3);
+    assert.equal(harness.readDocument(), harness.prefix + "本段，有错字，也有可疑表述，另有建议。" + harness.suffix);
 
     const issues = harness.window.getWpsProofreadingState().issues;
-    assert.equal(issues.find((issue) => issue.original === "错字").status, "accepted");
+    assert.equal(issues.find((issue) => issue.original === "错字").status, "pending");
     assert.equal(issues.find((issue) => issue.original === "可疑表述").status, "pending");
-    assert.equal(issues.find((issue) => issue.original === "本段").status, "pending");
-    assert.match(harness.status.text, /另有 2 条/);
+    assert.equal(issues.find((issue) => issue.original === "另有建议").status, "pending");
+    assert.match(harness.status.text, /另有 3 条/);
 });
 
 test("one-click fix stops without writing when the document changed first", async () => {
-    const harness = createHarness();
+    const harness = createHarness({
+        selectedText: "本段,有错字。", issues: [],
+        rules: [basicRule("basic-ascii-comma-between-hanzi")]
+    });
     await harness.window.runProofreading();
     const edited = harness.prefix + "本段已人工改过。" + harness.suffix;
     harness.changeDocument(edited);
@@ -291,6 +297,33 @@ test("one-click fix stops without writing when the document changed first", asyn
     assert.equal(result.applied, 0);
     assert.equal(harness.readDocument(), edited);
     assert.equal(harness.window.getWpsProofreadingState().issues.every((issue) => issue.status === "stale"), true);
+});
+
+test("issues cannot be applied or ignored while an AI batch is pending", async () => {
+    let release;
+    const waiting = new Promise((resolve) => { release = resolve; });
+    const harness = createHarness({
+        selectedText: "本段,有错字。", issues: [],
+        rules: [basicRule("basic-ascii-comma-between-hanzi")],
+        waitForRequest: () => waiting
+    });
+    const running = harness.window.runProofreading();
+    try {
+        for (let attempt = 0; attempt < 10 && !harness.requests.length; attempt += 1) {
+            await new Promise((resolve) => setImmediate(resolve));
+        }
+        assert.equal(harness.busy, true);
+        const issue = harness.window.getWpsProofreadingState().issues[0];
+        assert.ok(issue);
+        assert.equal(harness.window.applyProofreadingIssue(issue.id), false);
+        assert.equal(harness.window.ignoreProofreadingIssue(issue.id), false);
+        assert.equal(harness.window.applyAllProofreadingIssues().applied, 0);
+        assert.equal(harness.readDocument(), harness.prefix + harness.selectedText + harness.suffix);
+    } finally {
+        release();
+        await running;
+    }
+    assert.equal(harness.window.applyAllProofreadingIssues().applied, 1);
 });
 
 test("ignoring a finding records history without touching the document", async () => {
@@ -509,7 +542,7 @@ test("consistency-pass failure keeps completed first-pass findings", async () =>
 });
 
 
-test("local rules run before AI and safe rule findings can be one-click fixed", async () => {
+test("semantic local rules run before AI and require individual confirmation", async () => {
     const harness = createHarness({
         selectedText: "请使用旧名称开展工作。",
         issues: [],
@@ -535,11 +568,12 @@ test("local rules run before AI and safe rule findings can be one-click fixed", 
     const issues = harness.window.getWpsProofreadingState().issues;
     assert.equal(issues.length, 1);
     assert.equal(issues[0].category, "rule");
-    assert.equal(issues[0].needsReview, false);
+    assert.equal(issues[0].needsReview, true);
     assert.equal(issues[0].actionable, true);
 
     const applied = harness.window.applyAllProofreadingIssues();
-    assert.equal(applied.applied, 1);
+    assert.equal(applied.applied, 0);
+    assert.equal(harness.window.applyProofreadingIssue(issues[0].id), true);
     assert.equal(harness.readDocument(), harness.prefix + "请使用新名称开展工作。" + harness.suffix);
 });
 

@@ -62,6 +62,7 @@
             cancelButton.disabled = !state.busy;
         }
         if (!state.busy) setProofreadingProgress(0, "");
+        renderIssues();
         return state.busy;
     }
 
@@ -164,6 +165,7 @@
                 : String(value.replacement || ""),
             status: String(value.status || "pending"),
             needsReview: value.needsReview === true,
+            autoFixable: value.autoFixable === true,
             actionable: value.actionable !== false,
             ruleName: String(value.ruleName || ""),
             ruleSource: String(value.ruleSource || ""),
@@ -183,6 +185,7 @@
 
     function isAutoFixable(issue) {
         return issue && issue.status === "pending" &&
+            issue.autoFixable === true &&
             issue.actionable !== false &&
             issue.needsReview !== true &&
             typeof issue.confidence === "number" &&
@@ -200,7 +203,7 @@
         if (applyAllButton) {
             applyAllButton.disabled = state.busy || autoFixableCount() === 0;
             applyAllButton.title = pendingCount() > autoFixableCount()
-                ? "仅自动修正高置信度、无需人工复核的建议"
+                ? "仅自动修正内置低风险标点格式规则"
                 : "";
         }
     }
@@ -429,9 +432,9 @@
                 "",
                 issue,
                 "applyProofreadingIssue",
-                !pending || issue.actionable === false
+                state.busy || !pending || issue.actionable === false
             ));
-            actions.appendChild(actionButton("忽略", "issue-action-secondary", issue, "ignoreProofreadingIssue", !pending));
+            actions.appendChild(actionButton("忽略", "issue-action-secondary", issue, "ignoreProofreadingIssue", state.busy || !pending));
             header.appendChild(actions);
             card.appendChild(header);
 

@@ -66,7 +66,8 @@ test("literal, regex and reminder rules produce safe local findings", () => {
 
     const literal = issues.find((issue) => issue.ruleId === "literal");
     assert.equal(literal.suggestion, "新名称");
-    assert.equal(literal.needsReview, false);
+    assert.equal(literal.needsReview, true);
+    assert.equal(literal.autoFixable, false);
     assert.equal(literal.actionable, true);
     assert.equal(literal.start, 10);
 
@@ -79,6 +80,35 @@ test("literal, regex and reminder rules produce safe local findings", () => {
     assert.equal(reminder.actionable, false);
     assert.equal(reminder.needsReview, true);
     assert.equal(reminder.suggestion, reminder.original);
+});
+
+test("first-run marker survives an intentional clear", () => {
+    const { api } = createHarness();
+    assert.equal(api.hasStoredRules(), false);
+    api.saveRule({ id: "sample", pattern: "甲", replacement: "乙" });
+    assert.equal(api.hasStoredRules(), true);
+    api.clearRules();
+    assert.equal(api.hasStoredRules(), true);
+    assert.equal(api.getRules().length, 0);
+});
+
+test("regex lookahead keeps the original context and nested quantified groups are rejected", () => {
+    const { api } = createHarness();
+    api.saveRule({ id: "lookahead", type: "regex", pattern: "甲(?=乙)", replacement: "丙" });
+    const issues = api.evaluate("甲乙", 0);
+    assert.equal(issues.length, 1);
+    assert.equal(issues[0].suggestion, "丙");
+    assert.throws(() => api.saveRule({
+        id: "unsafe", type: "regex", pattern: "(a+)+$", replacement: "x"
+    }), /卡顿/);
+});
+
+test("previously stored unsafe regex rules are ignored on load", () => {
+    const { api, storage } = createHarness();
+    storage.set(api.STORAGE_KEY, JSON.stringify({ rules: [{
+        id: "old-unsafe", type: "regex", pattern: "(a+)+$", replacement: "x"
+    }] }));
+    assert.equal(api.getRules().length, 0);
 });
 
 test("higher-priority overlapping rules win deterministically", () => {

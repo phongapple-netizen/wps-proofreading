@@ -3,6 +3,9 @@
 
     var DEFAULT_ENDPOINT = "http://127.0.0.1:4096";
     var BASIC_USERNAME = "opencode";
+    var REQUEST_TIMEOUT_MS = 180000;
+    var HEALTH_TIMEOUT_MS = 10000;
+    var CLEANUP_TIMEOUT_MS = 2000;
 
     function text(value) {
         return String(value == null ? "" : value);
@@ -101,19 +104,56 @@
         return Number.isFinite(status) && status > 0 ? "（HTTP " + status + "）" : "";
     }
 
-    async function safeFetch(fetcher, url, init, signal, operation) {
+    function withDeadline(task, signal, timeoutMs, operation) {
+        return new Promise(function (resolve, reject) {
+            if (signal && signal.aborted) return reject(createCancelledError());
+            var settled = false;
+            var controller = typeof AbortController === "function" ? new AbortController() : null;
+            var timer;
+            function finish(error, value) {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                if (signal && typeof signal.removeEventListener === "function") {
+                    signal.removeEventListener("abort", cancel);
+                }
+                if (error) reject(error);
+                else resolve(value);
+            }
+            function cancel() {
+                if (controller) controller.abort();
+                finish(createCancelledError());
+            }
+            if (signal && typeof signal.addEventListener === "function") {
+                signal.addEventListener("abort", cancel, { once: true });
+            }
+            timer = setTimeout(function () {
+                if (controller) controller.abort();
+                finish(createError(operation + "超时，请重试。", "TIMEOUT"));
+            }, timeoutMs);
+            Promise.resolve().then(function () {
+                if (settled) return;
+                return task(controller ? controller.signal : signal);
+            }).then(function (value) { finish(null, value); }, function (error) { finish(error); });
+        });
+    }
+
+    async function safeFetch(fetcher, url, init, signal, operation, timeoutMs) {
         if (signal && signal.aborted) throw createCancelledError();
         try {
-            var response = await fetcher(url, init);
+            var response = await withDeadline(function (deadlineSignal) {
+                return fetcher(url, Object.assign({}, init, { signal: deadlineSignal }));
+            }, signal, timeoutMs || REQUEST_TIMEOUT_MS, operation);
             if (signal && signal.aborted) throw createCancelledError();
             return response;
         } catch (error) {
             if (isAbortError(error, signal)) throw createCancelledError();
+            if (error && error.code === "TIMEOUT") throw error;
             throw createError(operation + "失败，请检查 OpenCode 服务是否已启动及跨域设置。", "NETWORK_ERROR");
         }
     }
 
-    async function responseJson(response, operation) {
+    async function responseJson(response, operation, signal, timeoutMs) {
         if (!responseIsOk(response)) {
             throw createError(operation + "失败" + statusText(response) + "。", "HTTP_ERROR");
         }
@@ -121,8 +161,10 @@
             throw createError(operation + "返回格式无效。", "INVALID_RESPONSE");
         }
         try {
-            return await response.json();
+            return await withDeadline(function () { return response.json(); }, signal,
+                timeoutMs || REQUEST_TIMEOUT_MS, operation);
         } catch (error) {
+            if (error && (error.code === "TIMEOUT" || error.code === "ABORTED")) throw error;
             throw createError(operation + "返回格式无效。", "INVALID_RESPONSE");
         }
     }
@@ -151,9 +193,9 @@
             urlFor(endpoint, "/global/health"),
             requestInit(options, "GET", undefined, true),
             signal,
-            "连接 OpenCode 服务"
+            "连接 OpenCode 服务", HEALTH_TIMEOUT_MS
         );
-        var payload = await responseJson(response, "OpenCode 健康检查");
+        var payload = await responseJson(response, "OpenCode 健康检查", signal, HEALTH_TIMEOUT_MS);
         return {
             ok: true,
             healthy: payload && payload.healthy === false ? false : true,
@@ -309,9 +351,9 @@
             urlFor(endpoint, "/config/providers"),
             requestInit(options, "GET", undefined, true),
             signal,
-            "获取 OpenCode 模型"
+            "获取 OpenCode 模型", HEALTH_TIMEOUT_MS
         );
-        return parseModels(await responseJson(response, "OpenCode 模型列表"));
+        return parseModels(await responseJson(response, "OpenCode 模型列表", signal, HEALTH_TIMEOUT_MS));
     }
 
     function parseModelName(modelName) {
@@ -342,13 +384,15 @@
         // local server, and both operations are best effort.
         if (shouldAbort) {
             try {
-                await fetcher(urlFor(endpoint, sessionPath(sessionId, "/abort")), requestInit(options, "POST", {}, false));
+                await safeFetch(fetcher, urlFor(endpoint, sessionPath(sessionId, "/abort")),
+                    requestInit(options, "POST", {}, false), null, "终止 OpenCode 会话", CLEANUP_TIMEOUT_MS);
             } catch (error) {
                 // The original request error is more useful than cleanup errors.
             }
         }
         try {
-            await fetcher(urlFor(endpoint, sessionPath(sessionId, "")), requestInit(options, "DELETE", undefined, false));
+            await safeFetch(fetcher, urlFor(endpoint, sessionPath(sessionId, "")),
+                requestInit(options, "DELETE", undefined, false), null, "清理 OpenCode 会话", CLEANUP_TIMEOUT_MS);
         } catch (error) {
             // Session cleanup must not hide the model response or cancellation.
         }
@@ -382,13 +426,14 @@
                 signal,
                 "创建 OpenCode 会话"
             );
-            var sessionPayload = await responseJson(sessionResponse, "创建 OpenCode 会话");
+            var sessionPayload = await responseJson(sessionResponse, "创建 OpenCode 会话", signal);
             sessionId = sessionPayload && typeof sessionPayload.id === "string" ? sessionPayload.id : "";
             if (!sessionId) throw createError("OpenCode 没有返回有效的会话编号。", "INVALID_SESSION");
 
             var body = {
                 model: model,
-                tools: {},
+                agent: "wps-proofreader",
+                tools: { "*": false },
                 parts: [{ type: "text", text: promptText }]
             };
             if (typeof options.systemPrompt === "string" && options.systemPrompt.trim()) {
@@ -401,7 +446,7 @@
                 signal,
                 "发送 OpenCode 校对请求"
             );
-            var messagePayload = await responseJson(messageResponse, "OpenCode 校对请求");
+            var messagePayload = await responseJson(messageResponse, "OpenCode 校对请求", signal);
             var result = extractTextParts(messagePayload);
             if (!result.trim()) throw createError("OpenCode 没有返回文本内容。", "EMPTY_RESPONSE");
             completed = true;

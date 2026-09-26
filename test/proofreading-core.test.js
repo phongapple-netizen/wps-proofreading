@@ -230,3 +230,14 @@ test("consistency index is compact and consistency findings are always review-on
     assert.equal(parsed[0].category, "consistency");
     assert.equal(parsed[0].needsReview, true);
 });
+
+test("consistency windows retain candidates beyond the first prompt limit", () => {
+    const paragraphs = Array.from({ length: 80 }, (_, index) => ({
+        paragraphIndex: index + 1,
+        text: "第一章 机构名称" + index
+    }));
+    const windows = core.buildConsistencyIndexes(paragraphs, 700);
+    assert.equal(windows.length > 1, true);
+    assert.equal(windows.flatMap((window) => window.entries).length, 80);
+    assert.equal(windows.some((window) => window.truncated), false);
+});

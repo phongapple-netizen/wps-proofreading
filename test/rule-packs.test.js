@@ -85,7 +85,7 @@ test("base pack catches a formal date written with 号", () => {
     assert.ok(date);
     assert.equal(date.original, "9月26号");
     assert.equal(date.suggestion, "9月26日");
-    assert.equal(date.needsReview, false);
+    assert.equal(date.needsReview, true);
 });
 
 test("government pack normalizes a square-bracket document year", () => {
@@ -97,7 +97,7 @@ test("government pack normalizes a square-bracket document year", () => {
 
     assert.ok(documentNumber);
     assert.equal(documentNumber.suggestion, "韶府〔2026〕12号");
-    assert.equal(documentNumber.needsReview, false);
+    assert.equal(documentNumber.needsReview, true);
 });
 
 test("work-safety pack catches the wrong confined-space work sequence", () => {
@@ -109,7 +109,7 @@ test("work-safety pack catches the wrong confined-space work sequence", () => {
 
     assert.ok(confined);
     assert.equal(confined.suggestion, "先通风、再检测、后作业");
-    assert.equal(confined.needsReview, false);
+    assert.equal(confined.needsReview, true);
 });
 
 test("built-in packs include contextual AI review rules with explicit instructions", () => {

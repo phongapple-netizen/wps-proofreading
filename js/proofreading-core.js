@@ -200,6 +200,26 @@
         };
     }
 
+    function buildConsistencyIndexes(paragraphs, maxChars) {
+        var limit = Number(maxChars) > 0 ? Number(maxChars) : MAX_CONSISTENCY_INDEX_CHARACTERS;
+        var all = buildConsistencyIndex(paragraphs, Number.MAX_SAFE_INTEGER).entries;
+        var windows = [];
+        var entries = [];
+        var size = 2;
+        all.forEach(function (entry) {
+            var encoded = JSON.stringify(entry);
+            if (entries.length && size + encoded.length + 1 > limit) {
+                windows.push({ entries: entries, truncated: false, sourceEntries: all.length });
+                entries = [];
+                size = 2;
+            }
+            entries.push(entry);
+            size += encoded.length + 1;
+        });
+        if (entries.length) windows.push({ entries: entries, truncated: false, sourceEntries: all.length });
+        return windows;
+    }
+
     function hasCrossParagraphConsistency(index) {
         var seen = Object.create(null);
         var count = 0;
@@ -465,20 +485,54 @@
         var fetcher = fetchImpl || root.fetch;
         if (typeof fetcher !== "function") throw new Error("当前 WPS 内核不支持网络请求。");
 
+        function timed(operation, timeoutMs) {
+            return new Promise(function (resolve, reject) {
+                var parent = options && options.signal;
+                if (parent && parent.aborted) {
+                    var early = new Error("已取消校对。");
+                    early.name = "AbortError";
+                    return reject(early);
+                }
+                var controller = typeof AbortController === "function" ? new AbortController() : null;
+                var settled = false;
+                var timer;
+                function finish(error, value) {
+                    if (settled) return;
+                    settled = true;
+                    clearTimeout(timer);
+                    if (parent && parent.removeEventListener) parent.removeEventListener("abort", cancel);
+                    if (error) reject(error);
+                    else resolve(value);
+                }
+                function cancel() {
+                    if (controller) controller.abort();
+                    var error = new Error("已取消校对。");
+                    error.name = "AbortError";
+                    finish(error);
+                }
+                if (parent && parent.addEventListener) parent.addEventListener("abort", cancel, { once: true });
+                timer = setTimeout(function () {
+                    if (controller) controller.abort();
+                    finish(new Error("模型请求超时，请重试或缩小校对范围。"));
+                }, timeoutMs);
+                Promise.resolve().then(function () {
+                    if (settled) return;
+                    return operation(controller ? controller.signal : parent);
+                }).then(function (value) { finish(null, value); }, function (error) { finish(error); });
+            });
+        }
+
         var response;
         try {
-            response = await fetcher(request.url, {
+            response = await timed(function (signal) { return fetcher(request.url, {
                 method: "POST",
                 headers: request.headers,
                 body: JSON.stringify(request.body),
-                signal: options && options.signal ? options.signal : undefined
-            });
+                signal: signal
+            }); }, 180000);
         } catch (error) {
-            if (options && options.signal && options.signal.aborted) {
-                var aborted = new Error("已取消校对。");
-                aborted.name = "AbortError";
-                throw aborted;
-            }
+            if (error && error.name === "AbortError") throw error;
+            if (error && /超时/.test(error.message)) throw error;
             throw new Error("连接模型服务失败。请检查服务地址、网络和跨域设置；密钥只保存在当前面板会话中。");
         }
 
@@ -488,8 +542,9 @@
         }
         var payload;
         try {
-            payload = await response.json();
+            payload = await timed(function () { return response.json(); }, 180000);
         } catch (error) {
+            if (error && (error.name === "AbortError" || /超时/.test(error.message))) throw error;
             throw new Error("模型服务返回了无法识别的响应。");
         }
         return extractReply(provider, payload);
@@ -524,6 +579,7 @@
         segmentParagraphs: segmentParagraphs,
         batchParagraphs: batchParagraphs,
         buildConsistencyIndex: buildConsistencyIndex,
+        buildConsistencyIndexes: buildConsistencyIndexes,
         hasCrossParagraphConsistency: hasCrossParagraphConsistency,
         buildConsistencyPrompt: buildConsistencyPrompt,
         parseConsistencyIssues: parseConsistencyIssues,

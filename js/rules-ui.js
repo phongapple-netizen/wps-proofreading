@@ -248,7 +248,7 @@
         source.textContent = "来源：" + (rule.source || "未填写") +
             (rule.type === "ai_review"
                 ? " · AI判断后人工确认"
-                : (rule.autoFix ? " · 允许一键修正" : " · 需人工确认"));
+                : (api().isSafeAutoFix(rule) ? " · 可一键修正" : " · 需人工确认"));
         card.appendChild(source);
 
         return card;
@@ -405,6 +405,14 @@
                 select.appendChild(option);
             });
             updateBuiltinDescription();
+            if (api() && typeof api().hasStoredRules === "function" &&
+                !api().hasStoredRules()) {
+                var initialResponse = await root.fetch("../rules/chinese-writing-basic.json", { cache: "no-store" });
+                if (!initialResponse || !initialResponse.ok) throw new Error("基础规则包读取失败。");
+                api().importPack(await initialResponse.json(), "merge");
+                renderRules();
+                setStatus("已启用中文及公文基础规范规则。", "success");
+            }
             return builtinCatalog.length > 0;
         } catch (error) {
             select.textContent = "";
@@ -512,7 +520,7 @@
         }
 
         renderRules();
-        loadBuiltinCatalog();
+        root.WpsRulesReady = loadBuiltinCatalog();
     }
 
     root.openRulesCenter = function () { return setOpen(true); };

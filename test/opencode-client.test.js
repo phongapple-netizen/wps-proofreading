@@ -104,7 +104,8 @@ test('Basic auth is only sent as a header and model IDs split at the first slash
     providerID: 'provider',
     modelID: 'model/with/more/slashes'
   });
-  assert.deepEqual(message.tools, {});
+  assert.equal(message.agent, 'wps-proofreader');
+  assert.deepEqual(message.tools, { '*': false });
   assert.deepEqual(message.parts, [{ type: 'text', text: '请校对这段文字。' }]);
   assert.equal(calls[2].init.method, 'DELETE');
 });
@@ -123,6 +124,17 @@ test('successful requests delete the temporary session without aborting it', asy
     'POST /session/ok-session/message',
     'DELETE /session/ok-session'
   ]);
+});
+
+test('a stalled session cleanup cannot block a completed proofreading result', async () => {
+  const started = Date.now();
+  const result = await client.request({ model: 'local/qwen' }, 'prompt', async (url, init) => {
+    if (init.method === 'DELETE') return new Promise(() => {});
+    if (url.endsWith('/session')) return response(200, { id: 'stalled-cleanup' });
+    return response(200, { parts: [{ type: 'text', text: '{"issues":[]}' }] });
+  });
+  assert.equal(result, '{"issues":[]}');
+  assert.equal(Date.now() - started < 5000, true);
 });
 
 test('failed requests best-effort abort and then delete the temporary session', async () => {

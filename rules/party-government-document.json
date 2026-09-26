@@ -27,7 +27,7 @@
       "flags": "m",
       "replacement": "（$1）",
       "severity": "medium",
-      "autoFix": true,
+      "autoFix": false,
       "priority": 110,
       "source": "GB/T 9704—2012",
       "notes": "正文结构层次通常依次使用“一、”“（一）”“1.”“（1）”；本规则仅处理行首中文序号的半角括号。"
@@ -57,7 +57,7 @@
       "flags": "m",
       "replacement": "（$1）",
       "severity": "medium",
-      "autoFix": true,
+      "autoFix": false,
       "priority": 105,
       "source": "GB/T 9704—2012",
       "notes": "第四级结构层次通常使用“（1）”形式。"
@@ -72,7 +72,7 @@
       "flags": "",
       "replacement": "$1〔$2〕$3号",
       "severity": "high",
-      "autoFix": true,
+      "autoFix": false,
       "priority": 130,
       "source": "GB/T 9704—2012 7.2.5",
       "notes": "发文字号年份应标全称，并使用六角括号“〔〕”括入。"
@@ -87,7 +87,7 @@
       "flags": "",
       "replacement": "〔$1〕$2号",
       "severity": "high",
-      "autoFix": true,
+      "autoFix": false,
       "priority": 130,
       "source": "GB/T 9704—2012 7.2.5",
       "notes": "发文顺序号不编虚位，例如1不编为01。"
@@ -102,7 +102,7 @@
       "flags": "",
       "replacement": "〔$1〕$2号",
       "severity": "high",
-      "autoFix": true,
+      "autoFix": false,
       "priority": 130,
       "source": "GB/T 9704—2012 7.2.5",
       "notes": "发文顺序号不加“第”字。"
@@ -116,7 +116,7 @@
       "pattern": "签发人:",
       "replacement": "签发人：",
       "severity": "medium",
-      "autoFix": true,
+      "autoFix": false,
       "priority": 100,
       "source": "GB/T 9704—2012 7.2.6",
       "notes": "“签发人”三字后使用全角冒号。"
@@ -130,7 +130,7 @@
       "pattern": "附件:",
       "replacement": "附件：",
       "severity": "medium",
-      "autoFix": true,
+      "autoFix": false,
       "priority": 100,
       "source": "GB/T 9704—2012",
       "notes": "附件说明中的“附件”后使用全角冒号。"

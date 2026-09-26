@@ -10,7 +10,10 @@
     "debug:server": "node scripts/dev-server.js --port 3891",
     "build": "wpsjs build",
     "publish": "wpsjs publish",
-    "debug:mac": "node scripts/dev-server.js --port 3891"
+    "debug:mac": "node scripts/dev-server.js --port 3891",
+    "service:mac:install": "node scripts/mac-service.js install",
+    "service:mac:status": "node scripts/mac-service.js status",
+    "service:mac:remove": "node scripts/mac-service.js remove"
   },
   "devDependencies": {
     "wps-jsapi": "1.0.5",
