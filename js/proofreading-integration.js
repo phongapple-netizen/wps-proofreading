@@ -435,6 +435,7 @@
 
         if (sameSuggestion) {
             combined = Object.assign({}, ruleIssue, {
+                category: aiIssue.category || ruleIssue.category,
                 origin: "rule+ai",
                 confirmedByAI: true,
                 confidence: Math.max(Number(ruleIssue.confidence) || 0, Number(aiIssue.confidence) || 0),
