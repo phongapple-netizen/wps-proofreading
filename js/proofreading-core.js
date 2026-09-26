@@ -247,6 +247,9 @@
             };
         });
         var deep = !!(options && options.deep);
+        var ruleContext = options && Array.isArray(options.ruleContext)
+            ? options.ruleContext
+            : [];
 
         var lines = [
             "你是一名严谨的中文文稿校对员。只发现明确存在的问题，遵循最小修改原则。",
@@ -257,6 +260,12 @@
         ];
         if (deep) {
             lines.push("已开启深度增强：额外检查指代不明、歧义、成分残缺、搭配不当、语序不当、前后逻辑衔接断裂、同义重复与口语化表述；宁可多标 needsReview=true，也不要放过可疑问题。");
+        }
+        if (ruleContext.length) {
+            lines.push(
+                "本地规则引擎已经在本批文字中命中以下项目。confirmed=true 表示确定性规则，禁止重复报告同一原文和同一建议；review=true 表示规则只提供人工核对线索，你可以结合上下文独立判断，只有确有问题时才作为 AI 校对问题返回。不要因为规则存在就机械照抄。"
+            );
+            lines.push("本地规则上下文：" + JSON.stringify(ruleContext));
         }
         lines.push("格式：{\"issues\":[{\"category\":\"typo\",\"paragraphIndex\":1,\"original\":\"原文\",\"suggestion\":\"建议\",\"reason\":\"原因\",\"confidence\":0.96,\"needsReview\":false}]}");
         lines.push("待校对段落：");
