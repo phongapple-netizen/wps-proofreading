@@ -35,7 +35,9 @@
     }
 
     function typeLabel(type) {
-        return type === "regex" ? "正则" : type === "reminder" ? "提醒" : "替换";
+        return type === "regex" ? "正则" :
+            type === "reminder" ? "提醒" :
+                type === "ai_review" ? "AI核查" : "替换";
     }
 
     function severityLabel(severity) {
@@ -45,7 +47,7 @@
     function clearEditor() {
         [
             "rule-id", "rule-name", "rule-pattern", "rule-flags",
-            "rule-replacement", "rule-notes"
+            "rule-replacement", "rule-instruction", "rule-notes"
         ].forEach(function (id) {
             var field = byId(id);
             if (field) field.value = "";
@@ -56,30 +58,44 @@
         var priority = byId("rule-priority");
         var source = byId("rule-source");
         var autoFix = byId("rule-auto-fix");
+        var matchMode = byId("rule-match-mode");
         if (group) group.value = "我的规则";
         if (type) type.value = "replace";
         if (severity) severity.value = "medium";
         if (priority) priority.value = "50";
         if (source) source.value = "用户自定义";
+        if (matchMode) matchMode.value = "literal";
         if (autoFix) autoFix.checked = false;
         syncEditorType();
     }
 
     function syncEditorType() {
         var type = byId("rule-type");
+        var matchMode = byId("rule-match-mode");
         var regexOptions = byId("rule-regex-options");
+        var aiOptions = byId("rule-ai-review-options");
         var autoFix = byId("rule-auto-fix");
         var replacement = byId("rule-replacement");
+        var replacementLabel = byId("rule-replacement-label");
         var value = type ? type.value : "replace";
-        if (regexOptions) regexOptions.hidden = value !== "regex";
+        var aiReview = value === "ai_review";
+        var aiRegex = aiReview && matchMode && matchMode.value === "regex";
+
+        if (aiOptions) aiOptions.hidden = !aiReview;
+        if (regexOptions) regexOptions.hidden = !(value === "regex" || aiRegex);
         if (autoFix) {
-            if (value === "reminder") autoFix.checked = false;
-            autoFix.disabled = value === "reminder";
+            if (value === "reminder" || aiReview) autoFix.checked = false;
+            autoFix.disabled = value === "reminder" || aiReview;
+        }
+        if (replacementLabel) {
+            replacementLabel.textContent = aiReview ? "参考建议写法（可选）" : "建议写法";
         }
         if (replacement) {
-            replacement.placeholder = value === "reminder"
-                ? "可留空；如填写则作为人工建议"
-                : "命中后建议替换成的文字";
+            replacement.placeholder = aiReview
+                ? "可留空；仅作为 AI 判断时的参考，不会机械替换"
+                : value === "reminder"
+                    ? "可留空；如填写则作为人工建议"
+                    : "命中后建议替换成的文字";
         }
     }
 
@@ -95,7 +111,9 @@
             "rule-type": value.type || "replace",
             "rule-pattern": value.pattern || "",
             "rule-flags": value.flags || "",
+            "rule-match-mode": value.matchMode || "literal",
             "rule-replacement": value.replacement || "",
+            "rule-instruction": value.instruction || "",
             "rule-severity": value.severity || "medium",
             "rule-priority": value.priority == null ? 50 : value.priority,
             "rule-source": value.source || "用户自定义",
@@ -134,7 +152,9 @@
             type: value("rule-type") || "replace",
             pattern: value("rule-pattern"),
             flags: value("rule-flags"),
+            matchMode: value("rule-match-mode") || "literal",
             replacement: value("rule-replacement"),
+            instruction: value("rule-instruction"),
             severity: value("rule-severity") || "medium",
             priority: Number(value("rule-priority") || 50),
             autoFix: autoFix ? autoFix.checked === true : false,
@@ -217,14 +237,18 @@
         preview.className = "rule-pattern-preview";
         var arrow = rule.type === "reminder"
             ? " → 提醒"
-            : " → " + (rule.replacement === "" ? "删除" : rule.replacement);
+            : rule.type === "ai_review"
+                ? " → AI结合上下文核查"
+                : " → " + (rule.replacement === "" ? "删除" : rule.replacement);
         preview.textContent = rule.pattern + arrow;
         card.appendChild(preview);
 
         var source = root.document.createElement("div");
         source.className = "rule-meta";
         source.textContent = "来源：" + (rule.source || "未填写") +
-            (rule.autoFix ? " · 允许一键修正" : " · 需人工确认");
+            (rule.type === "ai_review"
+                ? " · AI判断后人工确认"
+                : (rule.autoFix ? " · 允许一键修正" : " · 需人工确认"));
         card.appendChild(source);
 
         return card;
@@ -470,6 +494,8 @@
         if (cancel) cancel.addEventListener("click", closeEditor);
         if (remove) remove.addEventListener("click", deleteCurrentRule);
         if (type) type.addEventListener("change", syncEditorType);
+        var matchMode = byId("rule-match-mode");
+        if (matchMode) matchMode.addEventListener("change", syncEditorType);
         if (test) test.addEventListener("click", testDocument);
         if (exportButton) exportButton.addEventListener("click", exportRules);
         if (builtinSelect) builtinSelect.addEventListener("change", updateBuiltinDescription);
