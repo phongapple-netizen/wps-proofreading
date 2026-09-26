@@ -87,7 +87,7 @@
 
     function normalizeRule(candidate) {
         var value = candidate && typeof candidate === "object" ? candidate : {};
-        var type = ["replace", "regex", "reminder"].indexOf(value.type) >= 0
+        var type = ["replace", "regex", "reminder", "ai_review"].indexOf(value.type) >= 0
             ? value.type
             : "replace";
         var pattern = trim(value.pattern, 500);
@@ -99,6 +99,8 @@
         if (!Number.isFinite(priority)) priority = 50;
         priority = Math.max(0, Math.min(1000, Math.round(priority)));
         var replacement = text(value.replacement).slice(0, 1000);
+        var matchMode = value.matchMode === "regex" ? "regex" : "literal";
+        var instruction = trim(value.instruction, 1200);
 
         return {
             id: trim(value.id, 120) || newId("rule"),
@@ -107,10 +109,15 @@
             group: trim(value.group, 80) || "我的规则",
             type: type,
             pattern: pattern,
-            flags: type === "regex" ? normalizeFlags(value.flags) : "",
+            flags: type === "regex" || (type === "ai_review" && matchMode === "regex")
+                ? normalizeFlags(value.flags)
+                : "",
+            matchMode: type === "ai_review" ? matchMode : "",
             replacement: replacement,
+            instruction: type === "ai_review" ? instruction : "",
             severity: severity,
-            autoFix: type !== "reminder" && value.autoFix === true && replacement !== "",
+            autoFix: type !== "reminder" && type !== "ai_review" &&
+                value.autoFix === true && replacement !== "",
             priority: priority,
             source: trim(value.source, 160) || "用户自定义",
             notes: trim(value.notes, 500)
@@ -127,7 +134,12 @@
 
     function validateRule(rule) {
         if (!rule) throw new Error("规则必须填写匹配内容。");
-        if (rule.type !== "regex") return rule;
+        if (rule.type === "ai_review" && !rule.instruction) {
+            throw new Error("AI核查规则「" + (rule.name || rule.pattern) + "」必须填写核查要求。");
+        }
+        var usesRegex = rule.type === "regex" ||
+            (rule.type === "ai_review" && rule.matchMode === "regex");
+        if (!usesRegex) return rule;
         try {
             var regex = new RegExp(rule.pattern, rule.flags + "g");
             var probe = regex.exec("");
@@ -258,7 +270,7 @@
         var candidates = [];
 
         getRules().filter(function (rule) {
-            return rule.enabled;
+            return rule.enabled && rule.type !== "ai_review";
         }).forEach(function (rule) {
             candidates = candidates.concat(candidatesForRule(rule, source, start));
         });
@@ -283,16 +295,74 @@
         return selected;
     }
 
+    function aiReviewCandidatesForRule(rule, value, baseStart) {
+        var matches = [];
+        var regex;
+        try {
+            regex = rule.matchMode === "regex"
+                ? new RegExp(rule.pattern, rule.flags + "g")
+                : new RegExp(escapeRegex(rule.pattern), "g");
+        } catch (error) {
+            return matches;
+        }
+
+        var match;
+        var guard = 0;
+        while ((match = regex.exec(value)) !== null && guard < 5000) {
+            guard += 1;
+            if (!match[0]) {
+                regex.lastIndex += 1;
+                continue;
+            }
+            matches.push({
+                id: "ai-review-" + rule.id + "-" + (baseStart + match.index),
+                ruleId: rule.id,
+                ruleName: rule.name,
+                ruleGroup: rule.group,
+                ruleSource: rule.source,
+                severity: rule.severity,
+                priority: rule.priority,
+                trigger: match[0],
+                preferredSuggestion: rule.replacement || "",
+                instruction: rule.instruction,
+                start: baseStart + match.index,
+                end: baseStart + match.index + match[0].length
+            });
+        }
+        return matches;
+    }
+
+    function collectAiReviewCandidates(value, baseStart) {
+        var source = text(value);
+        var start = Number(baseStart) || 0;
+        var candidates = [];
+
+        getRules().filter(function (rule) {
+            return rule.enabled && rule.type === "ai_review";
+        }).forEach(function (rule) {
+            candidates = candidates.concat(aiReviewCandidatesForRule(rule, source, start));
+        });
+
+        candidates.sort(function (left, right) {
+            return left.start - right.start ||
+                (Number(right.priority) || 0) - (Number(left.priority) || 0) ||
+                left.end - right.end;
+        });
+        return candidates;
+    }
+
     function summarizeMatches(value) {
         var issues = evaluate(value, 0);
+        var aiReviewCandidates = collectAiReviewCandidates(value, 0);
         var counts = Object.create(null);
-        issues.forEach(function (issue) {
-            counts[issue.ruleId] = (counts[issue.ruleId] || 0) + 1;
+        issues.concat(aiReviewCandidates).forEach(function (item) {
+            counts[item.ruleId] = (counts[item.ruleId] || 0) + 1;
         });
         return {
-            count: issues.length,
+            count: issues.length + aiReviewCandidates.length,
             byRule: counts,
-            issues: issues
+            issues: issues,
+            aiReviewCandidates: aiReviewCandidates
         };
     }
 
@@ -378,7 +448,9 @@
             group: "我的规则",
             type: "replace",
             pattern: "",
+            matchMode: "literal",
             replacement: "",
+            instruction: "",
             severity: "medium",
             autoFix: false,
             priority: 50,
@@ -398,6 +470,7 @@
         clearRules: clearRules,
         createRule: createRule,
         evaluate: evaluate,
+        collectAiReviewCandidates: collectAiReviewCandidates,
         summarizeMatches: summarizeMatches,
         testCurrentDocument: testCurrentDocument,
         exportPack: exportPack,
