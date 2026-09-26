@@ -12,6 +12,10 @@ function response(status, payload) {
   };
 }
 
+function protectedSession(id) {
+  return { id, permission: [{ permission: '*', pattern: '*', action: 'ask' }] };
+}
+
 test('health check uses the normalized endpoint and returns safe status fields', async () => {
   const calls = [];
   const health = await client.checkHealth(
@@ -80,7 +84,7 @@ test('Basic auth is only sent as a header and model IDs split at the first slash
     '请校对这段文字。',
     async (url, init) => {
       calls.push({ url, init });
-      if (url.endsWith('/session')) return response(201, { id: 'session-1' });
+      if (url.endsWith('/session')) return response(201, protectedSession('session-1'));
       if (url.endsWith('/message')) return response(200, {
         parts: [
           { type: 'reasoning', text: '内部内容不应拼接' },
@@ -104,8 +108,10 @@ test('Basic auth is only sent as a header and model IDs split at the first slash
     providerID: 'provider',
     modelID: 'model/with/more/slashes'
   });
-  assert.equal(message.agent, 'wps-proofreader');
-  assert.deepEqual(message.tools, { '*': false });
+  assert.equal(message.agent, 'build');
+  assert.equal(Object.hasOwn(message, 'tools'), false);
+  assert.match(message.system, /不要调用工具/);
+  assert.deepEqual(JSON.parse(calls[0].init.body).permission, protectedSession('').permission);
   assert.deepEqual(message.parts, [{ type: 'text', text: '请校对这段文字。' }]);
   assert.equal(calls[2].init.method, 'DELETE');
 });
@@ -114,7 +120,7 @@ test('successful requests delete the temporary session without aborting it', asy
   const paths = [];
   await client.request({ model: 'local/qwen' }, 'prompt', async (url, init) => {
     paths.push(`${init.method} ${new URL(url).pathname}`);
-    if (init.method === 'POST' && url.endsWith('/session')) return response(200, { id: 'ok-session' });
+    if (init.method === 'POST' && url.endsWith('/session')) return response(200, protectedSession('ok-session'));
     if (url.endsWith('/message')) return response(200, { parts: [{ type: 'text', text: 'done' }] });
     return response(204, null);
   });
@@ -130,7 +136,7 @@ test('a stalled session cleanup cannot block a completed proofreading result', a
   const started = Date.now();
   const result = await client.request({ model: 'local/qwen' }, 'prompt', async (url, init) => {
     if (init.method === 'DELETE') return new Promise(() => {});
-    if (url.endsWith('/session')) return response(200, { id: 'stalled-cleanup' });
+    if (url.endsWith('/session')) return response(200, protectedSession('stalled-cleanup'));
     return response(200, { parts: [{ type: 'text', text: '{"issues":[]}' }] });
   });
   assert.equal(result, '{"issues":[]}');
@@ -142,7 +148,7 @@ test('failed requests best-effort abort and then delete the temporary session', 
   await assert.rejects(
     client.request({ model: 'local/qwen' }, 'prompt', async (url, init) => {
       paths.push(`${init.method} ${new URL(url).pathname}`);
-      if (init.method === 'POST' && url.endsWith('/session')) return response(200, { id: 'failed-session' });
+      if (init.method === 'POST' && url.endsWith('/session')) return response(200, protectedSession('failed-session'));
       if (url.endsWith('/message')) return response(500, { error: 'secret response body must stay hidden' });
       return response(204, null);
     }),
@@ -157,13 +163,104 @@ test('failed requests best-effort abort and then delete the temporary session', 
   ]);
 });
 
+test('HTTP 200 with a free-tier rejection reports the model restriction and cleans up', async () => {
+  const paths = [];
+  await assert.rejects(
+    client.request({ model: 'opencode/mimo-v2.6-flash-free' }, 'prompt', async (url, init) => {
+      paths.push(`${init.method} ${new URL(url).pathname}`);
+      if (init.method === 'POST' && url.endsWith('/session')) return response(200, protectedSession('restricted-session'));
+      if (url.endsWith('/message')) return response(200, {
+        info: {
+          role: 'assistant',
+          error: {
+            name: 'APIError',
+            data: {
+              message: "Error from provider (Console): OpenCode's free tier can only be used from within OpenCode",
+              statusCode: 403,
+              isRetryable: false,
+              responseBody: 'private document and provider details',
+              responseHeaders: { Authorization: 'Bearer secret-key' }
+            }
+          }
+        },
+        parts: []
+      });
+      return response(204, null);
+    }),
+    (error) => {
+      assert.equal(error.code, 'MODEL_RESTRICTED');
+      assert.match(error.message, /免费额度仅限 OpenCode 内使用/);
+      assert.match(error.message, /HTTP 403/);
+      assert.match(error.message, /代理或权限配置不兼容/);
+      assert.doesNotMatch(error.message, /private|secret-key|没有返回文本/);
+      return true;
+    }
+  );
+  assert.deepEqual(paths, [
+    'POST /session',
+    'POST /session/restricted-session/message',
+    'POST /session/restricted-session/abort',
+    'DELETE /session/restricted-session'
+  ]);
+});
+
+test('model failures override partial text and produce safe, actionable messages', async (t) => {
+  const cases = [
+    { name: 'APIError', statusCode: 401, code: 'MODEL_AUTH_ERROR', message: /服务端检查模型提供商的密钥/ },
+    { name: 'APIError', statusCode: 403, code: 'MODEL_AUTH_ERROR', message: /没有调用权限/ },
+    { name: 'ProviderAuthError', code: 'MODEL_AUTH_ERROR', message: /插件中的服务密码仅用于连接/ },
+    { name: 'APIError', statusCode: 402, code: 'MODEL_QUOTA_ERROR', message: /额度不足/ },
+    { name: 'APIError', statusCode: 429, code: 'MODEL_RATE_LIMITED', message: /稍后重试或切换模型/ },
+    { name: 'APIError', statusCode: 503, code: 'MODEL_ERROR', message: /HTTP 503/ },
+    { name: 'MessageAbortedError', code: 'MODEL_ABORTED', message: /请求已中止/ },
+    { name: 'ContextOverflowError', code: 'MODEL_CONTEXT_OVERFLOW', message: /上下文容量/ },
+    { name: 'MessageOutputLengthError', code: 'MODEL_OUTPUT_LIMIT', message: /输出达到长度上限/ },
+    { name: 'ContentFilterError', code: 'MODEL_CONTENT_FILTERED', message: /拦截了本次响应/ },
+    { name: 'UnknownError', code: 'MODEL_ERROR', message: /服务端日志和模型设置/ }
+  ];
+  for (const fixture of cases) {
+    await t.test(`${fixture.name} ${fixture.statusCode || ''}`, async () => {
+      await assert.rejects(
+        client.request({ model: 'local/qwen' }, 'prompt', async (url, init) => {
+          if (init.method === 'POST' && url.endsWith('/session')) return response(200, protectedSession('model-error-session'));
+          if (url.endsWith('/message')) return response(200, {
+            info: { error: { name: fixture.name, data: { statusCode: fixture.statusCode, message: 'secret credential and document' } } },
+            parts: [{ type: 'text', text: '{"issues":[]}' }]
+          });
+          return response(204, null);
+        }),
+        (error) => {
+          assert.equal(error.code, fixture.code);
+          assert.match(error.message, fixture.message);
+          assert.doesNotMatch(error.message, /secret|credential|document/);
+          return true;
+        }
+      );
+    });
+  }
+});
+
+test('a response with only reasoning still reports an empty model output', async () => {
+  await assert.rejects(
+    client.request({ model: 'local/qwen' }, 'prompt', async (url, init) => {
+      if (init.method === 'POST' && url.endsWith('/session')) return response(200, protectedSession('empty-session'));
+      if (url.endsWith('/message')) return response(200, {
+        info: { role: 'assistant' },
+        parts: [{ type: 'reasoning', text: 'private reasoning' }, { type: 'text', text: '  ' }]
+      });
+      return response(204, null);
+    }),
+    (error) => error.code === 'EMPTY_RESPONSE' && /重试或切换模型/.test(error.message) && !error.message.includes('private')
+  );
+});
+
 test('cancellation returns a safe Chinese error and still cleans up after a created session', async () => {
   const controller = new AbortController();
   const paths = [];
   await assert.rejects(
     client.request({ model: 'local/qwen', signal: controller.signal }, 'prompt', async (url, init) => {
       paths.push(`${init.method} ${new URL(url).pathname}`);
-      if (init.method === 'POST' && url.endsWith('/session')) return response(200, { id: 'cancelled-session' });
+      if (init.method === 'POST' && url.endsWith('/session')) return response(200, protectedSession('cancelled-session'));
       controller.abort();
       const error = new Error('secret should not leak');
       error.name = 'AbortError';
@@ -188,4 +285,64 @@ test('invalid endpoint and model errors never echo a password', async () => {
     () => client.parseModelName('provider/   '),
     (error) => error.code === 'INVALID_MODEL'
   );
+});
+
+test('a server that ignores session permissions is stopped before sending document text', async () => {
+  const paths = [];
+  await assert.rejects(client.request({ model: 'opencode/mimo-v2.6-flash-free' }, 'private document', async (url, init) => {
+    paths.push(`${init.method} ${new URL(url).pathname}`);
+    if (init.method === 'POST' && url.endsWith('/session')) return response(200, { id: 'unprotected-session' });
+    assert.equal(String(init.body || '').includes('private document'), false);
+    return response(200, true);
+  }), (error) => error.code === 'UNSAFE_SESSION');
+  assert.deepEqual(paths, ['POST /session', 'POST /session/unprotected-session/abort', 'DELETE /session/unprotected-session']);
+});
+
+test('a pending tool permission aborts proofreading without granting access', async () => {
+  const calls = [];
+  let messageSignal;
+  await assert.rejects(client.request({ model: 'opencode/mimo-v2.6-flash-free' }, 'prompt', async (url, init) => {
+    calls.push({ path: new URL(url).pathname, method: init.method, body: init.body });
+    if (init.method === 'POST' && url.endsWith('/session')) return response(200, protectedSession('tool-session'));
+    if (url.endsWith('/message')) {
+      messageSignal = init.signal;
+      return new Promise(() => {});
+    }
+    if (url.endsWith('/permission')) return response(200, [{ id: 'per_test', sessionID: 'tool-session', permission: 'bash' }]);
+    return response(200, true);
+  }), (error) => error.code === 'MODEL_TOOL_BLOCKED');
+  assert.equal(messageSignal.aborted, true);
+  assert.equal(calls.some(call => /\/reply$/.test(call.path)), false);
+  assert.deepEqual(calls.slice(-2).map(call => `${call.method} ${call.path}`), [
+    'POST /session/tool-session/abort', 'DELETE /session/tool-session'
+  ]);
+});
+
+test('permission requests from other sessions are left alone while proofreading completes', async () => {
+  const paths = [];
+  let completeMessage;
+  const result = await client.request({ model: 'local/qwen' }, 'prompt', async (url, init) => {
+    paths.push(`${init.method} ${new URL(url).pathname}`);
+    if (init.method === 'POST' && url.endsWith('/session')) return response(200, protectedSession('own-session'));
+    if (url.endsWith('/message')) return new Promise(resolve => { completeMessage = resolve; });
+    if (url.endsWith('/permission')) {
+      setTimeout(() => completeMessage(response(200, { parts: [{ type: 'text', text: '{"issues":[]}' }] })), 10);
+      return response(200, [{ id: 'per_unrelated', sessionID: 'another-session', permission: 'read' }]);
+    }
+    return response(200, true);
+  });
+  assert.equal(result, '{"issues":[]}');
+  assert.deepEqual(paths, ['POST /session', 'POST /session/own-session/message', 'GET /permission', 'DELETE /session/own-session']);
+});
+
+test('failed permission monitoring stops a pending model request and cleans up', async () => {
+  const paths = [];
+  await assert.rejects(client.request({ model: 'local/qwen' }, 'prompt', async (url, init) => {
+    paths.push(`${init.method} ${new URL(url).pathname}`);
+    if (init.method === 'POST' && url.endsWith('/session')) return response(200, protectedSession('guard-failed-session'));
+    if (url.endsWith('/message')) return new Promise(() => {});
+    if (url.endsWith('/permission')) return response(503, null);
+    return response(200, true);
+  }), (error) => error.code === 'HTTP_ERROR');
+  assert.deepEqual(paths.slice(-2), ['POST /session/guard-failed-session/abort', 'DELETE /session/guard-failed-session']);
 });

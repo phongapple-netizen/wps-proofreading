@@ -169,6 +169,45 @@ function createHarness(options = {}) {
     };
 }
 
+test("repeated successful model detection clears the working status even when the catalog is unchanged", async () => {
+    const harness = createHarness({ seed: JSON.stringify(Object.assign({}, DEFAULT_SETTINGS, { provider: "opencode" })) });
+    const connection = [];
+    harness.window.setModelConnectionStatus = (text, tone) => connection.push({ text, tone });
+    harness.window.WpsModelCatalog = { detect: async () => ({
+        provider: "opencode", models: ["opencode/mimo-v2.6-flash-free"],
+        defaultModel: "opencode/mimo-v2.6-flash-free", detail: "OpenCode 已连接"
+    }) };
+
+    const first = await harness.window.refreshProviderModels();
+    assert.equal(first.models.length, 1);
+    const catalog = JSON.stringify(harness.window.WpsSettingsStore.loadCatalog());
+    connection.length = 0;
+    const second = await harness.window.refreshProviderModels();
+    assert.equal(second.models.length, 1);
+    assert.equal(JSON.stringify(harness.window.WpsSettingsStore.loadCatalog()), catalog);
+    assert.equal(connection[0].tone, "working");
+    assert.equal(connection[connection.length - 1].tone, "success");
+    assert.equal(connection[connection.length - 1].text, "OpenCode 已连接 · 1 个模型");
+});
+
+test("repeated failed model detection clears the working status even when the error catalog is unchanged", async () => {
+    const harness = createHarness();
+    const connection = [];
+    harness.window.setModelConnectionStatus = (text, tone) => connection.push({ text, tone });
+    harness.window.WpsModelCatalog = { detect: async () => { throw new Error("测试连接失败"); } };
+
+    await harness.window.refreshProviderModels();
+    const catalog = JSON.stringify(harness.window.WpsSettingsStore.loadCatalog());
+    connection.length = 0;
+    const second = await harness.window.refreshProviderModels();
+    assert.equal(second.error, true);
+    assert.equal(JSON.stringify(harness.window.WpsSettingsStore.loadCatalog()), catalog);
+    assert.equal(connection[0].tone, "working");
+    assert.equal(connection[connection.length - 1].tone, "error");
+    assert.equal(connection[connection.length - 1].text, "连接失败 · 0 个模型");
+    assert.equal(harness.status.text, "测试连接失败");
+});
+
 test("only selected text is sent and a verified suggestion updates the WPS range", async () => {
     const harness = createHarness({ requireSelection: true });
     await harness.window.runProofreading();
@@ -184,6 +223,82 @@ test("only selected text is sent and a verified suggestion updates the WPS range
     assert.equal(harness.window.applyProofreadingIssue(id), true);
     assert.equal(harness.readDocument(), harness.prefix + "本段有错别字。" + harness.suffix);
     assert.equal(harness.window.getWpsProofreadingState().issues[0].status, "accepted");
+});
+
+test("OpenCode proofreading uses the built-in agent and retains the selection-only workflow", async () => {
+    const harness = createHarness({
+        requireSelection: true,
+        seed: JSON.stringify(Object.assign({}, DEFAULT_SETTINGS, { provider: "opencode" }))
+    });
+    let message;
+    harness.window.WpsOpenCodeClient = require("../js/opencode-client.js");
+    harness.window.fetch = async (url, init) => {
+        const body = init.body ? JSON.parse(init.body) : null;
+        let payload = null;
+        if (init.method === "POST" && url.endsWith("/session")) payload = {
+            id: "pane-ok-session", permission: body.permission
+        };
+        if (url.endsWith("/message")) {
+            message = body;
+            payload = { info: { role: "assistant" }, parts: [{ type: "text", text: JSON.stringify({ issues: [{
+                category: "typo", paragraphIndex: 1, original: "错字", suggestion: "错别字",
+                reason: "用词错误", confidence: 0.95, needsReview: false
+            }] }) }] };
+        }
+        return { ok: true, status: 200, json: async () => payload };
+    };
+
+    const result = await harness.window.runProofreading();
+    assert.equal(result.accepted, true);
+    assert.equal(harness.renderedIssues.length, 1);
+    assert.equal(harness.busy, false);
+    assert.equal(harness.status.tone, "success");
+    assert.equal(message.agent, "build");
+    assert.equal(message.tools, undefined);
+    assert.equal(JSON.stringify(message).includes(harness.selectedText), true);
+    assert.equal(JSON.stringify(message).includes(harness.prefix), false);
+    assert.equal(JSON.stringify(message).includes(harness.suffix), false);
+    assert.equal(harness.contentReads, 0);
+});
+
+test("OpenCode free-tier rejection reaches the task pane and releases the busy state", async () => {
+    const harness = createHarness({
+        requireSelection: true,
+        seed: JSON.stringify(Object.assign({}, DEFAULT_SETTINGS, { provider: "opencode" }))
+    });
+    const originalDocument = harness.readDocument();
+    const paths = [];
+    harness.window.WpsOpenCodeClient = require("../js/opencode-client.js");
+    harness.window.fetch = async (url, init) => {
+        paths.push(`${init.method} ${new URL(url).pathname}`);
+        let payload = null;
+        if (init.method === "POST" && url.endsWith("/session")) payload = {
+            id: "pane-error-session", permission: [{ permission: "*", pattern: "*", action: "ask" }]
+        };
+        if (url.endsWith("/message")) payload = {
+            info: { error: { name: "APIError", data: {
+                statusCode: 403,
+                message: "Error from provider (Console): OpenCode's free tier can only be used from within OpenCode"
+            } } },
+            parts: []
+        };
+        return { ok: true, status: 200, json: async () => payload };
+    };
+
+    const result = await harness.window.runProofreading();
+    assert.equal(result.accepted, false);
+    assert.equal(result.reason, "error");
+    assert.equal(harness.status.tone, "error");
+    assert.match(harness.status.text, /免费额度仅限 OpenCode 内使用/);
+    assert.match(harness.status.text, /代理或权限配置不兼容/);
+    assert.equal(harness.busy, false);
+    assert.equal(harness.renderedIssues.length, 0);
+    assert.equal(harness.readDocument(), originalDocument);
+    assert.equal(harness.contentReads, 0);
+    assert.deepEqual(paths.slice(-2), [
+        "POST /session/pane-error-session/abort",
+        "DELETE /session/pane-error-session"
+    ]);
 });
 
 test("a finding can be located and ignored without changing document text", async () => {

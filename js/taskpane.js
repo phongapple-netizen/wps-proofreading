@@ -143,9 +143,12 @@
         root.document.addEventListener("keydown", function (event) {
             if ((event.key === "Escape" || event.key === "Esc") && !popover.hidden) {
                 setSettingsOpen(false);
+                if (typeof toggle.focus === "function") toggle.focus();
             }
         });
     }
+
+    root.openProofreadingSettings = function () { return setSettingsOpen(true); };
 
     function normalizeIssue(issue, index) {
         var value = issue || {};

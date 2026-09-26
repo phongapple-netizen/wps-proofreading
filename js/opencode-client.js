@@ -6,6 +6,9 @@
     var REQUEST_TIMEOUT_MS = 180000;
     var HEALTH_TIMEOUT_MS = 10000;
     var CLEANUP_TIMEOUT_MS = 2000;
+    var PERMISSION_POLL_MS = 1000;
+    var PROOFREADING_SYSTEM_PROMPT = "你是中文文本校对助手。仅根据用户提供的文本返回请求的校对结果。" +
+        "不要调用工具，不要读取本机文件，不要执行命令或访问网络。";
 
     function text(value) {
         return String(value == null ? "" : value);
@@ -407,6 +410,105 @@
         }).join("");
     }
 
+    function watchPermissions(fetcher, options, endpoint, sessionId, signal) {
+        var stopped = false;
+        var timer;
+        var promise = new Promise(function (resolve, reject) {
+            async function poll() {
+                if (stopped) return;
+                try {
+                    var response = await safeFetch(fetcher, urlFor(endpoint, "/permission"),
+                        requestInit(options, "GET", undefined, false), signal,
+                        "检查 OpenCode 工具审批", HEALTH_TIMEOUT_MS);
+                    var pending = await responseJson(response, "检查 OpenCode 工具审批", signal, HEALTH_TIMEOUT_MS);
+                    if (stopped) return;
+                    if (!Array.isArray(pending)) {
+                        throw createError("OpenCode 工具审批检查返回格式无效，已中止校对。", "INVALID_PERMISSIONS");
+                    }
+                    if (pending.some(function (item) { return item && item.sessionID === sessionId; })) {
+                        throw createError("OpenCode 尝试调用工具，已中止本次校对。请重试。", "MODEL_TOOL_BLOCKED");
+                    }
+                    timer = setTimeout(poll, PERMISSION_POLL_MS);
+                } catch (error) {
+                    if (!stopped) reject(error);
+                }
+            }
+            timer = setTimeout(poll, PERMISSION_POLL_MS);
+        });
+        return {
+            promise: promise,
+            stop: function () { stopped = true; clearTimeout(timer); }
+        };
+    }
+
+    async function requestMessage(fetcher, options, endpoint, sessionId, body, signal) {
+        var controller = typeof AbortController === "function" ? new AbortController() : null;
+        var requestSignal = controller ? controller.signal : signal;
+        function cancel() { if (controller) controller.abort(); }
+        if (signal && signal.aborted) cancel();
+        if (signal && typeof signal.addEventListener === "function") {
+            signal.addEventListener("abort", cancel, { once: true });
+        }
+        var watcher = watchPermissions(fetcher, options, endpoint, sessionId, requestSignal);
+        try {
+            var message = (async function () {
+                var response = await safeFetch(fetcher, urlFor(endpoint, sessionPath(sessionId, "/message")),
+                    requestInit(options, "POST", body, false), requestSignal, "发送 OpenCode 校对请求");
+                return responseJson(response, "OpenCode 校对请求", requestSignal);
+            })();
+            return await Promise.race([message, watcher.promise]);
+        } finally {
+            watcher.stop();
+            cancel();
+            if (signal && typeof signal.removeEventListener === "function") {
+                signal.removeEventListener("abort", cancel);
+            }
+        }
+    }
+
+    function messageError(payload) {
+        // Model failures are returned in info.error even when HTTP is 200.
+        // Map known errors without exposing provider bodies, headers or secrets.
+        var error = payload && payload.info && payload.info.error;
+        if (!error) return null;
+        var data = error.data || {};
+        var status = Number(data.statusCode);
+        var statusLabel = Number.isInteger(status) && status >= 100 && status <= 599
+            ? "（HTTP " + status + "）" : "";
+
+        if (error.name === "APIError" && status === 403 &&
+            /opencode['’]s free tier can only be used from within opencode/i.test(text(data.message))) {
+            return createError("OpenCode 免费模型拒绝当前请求（HTTP 403），服务端提示免费额度仅限 OpenCode 内使用。" +
+                "代理或权限配置不兼容也可能触发此提示，请检查 OpenCode 配置或切换模型后重试。", "MODEL_RESTRICTED");
+        }
+        if (error.name === "ProviderAuthError" || status === 401 || status === 403) {
+            return createError("OpenCode 模型认证失败或没有调用权限" + statusLabel +
+                "。请在 OpenCode 服务端检查模型提供商的密钥和权限；插件中的服务密码仅用于连接 OpenCode。", "MODEL_AUTH_ERROR");
+        }
+        if (status === 402) {
+            return createError("OpenCode 模型额度不足" + statusLabel +
+                "。请检查模型提供商的余额或切换模型。", "MODEL_QUOTA_ERROR");
+        }
+        if (status === 429) {
+            return createError("OpenCode 模型请求受限" + statusLabel +
+                "。请检查模型额度，稍后重试或切换模型。", "MODEL_RATE_LIMITED");
+        }
+        if (error.name === "MessageAbortedError") {
+            return createError("OpenCode 模型请求已中止，请重试。", "MODEL_ABORTED");
+        }
+        if (error.name === "ContextOverflowError") {
+            return createError("校对内容超过 OpenCode 模型的上下文容量，请缩短选区或切换模型。", "MODEL_CONTEXT_OVERFLOW");
+        }
+        if (error.name === "MessageOutputLengthError") {
+            return createError("OpenCode 模型输出达到长度上限，请缩短选区或切换模型后重试。", "MODEL_OUTPUT_LIMIT");
+        }
+        if (error.name === "ContentFilterError") {
+            return createError("OpenCode 模型提供商拦截了本次响应，请检查校对内容或切换模型。", "MODEL_CONTENT_FILTERED");
+        }
+        return createError("OpenCode 模型调用失败" + statusLabel +
+            "。请检查 OpenCode 服务端日志和模型设置，或切换模型后重试。", "MODEL_ERROR");
+    }
+
     async function request(options, prompt, fetchImpl) {
         options = options || {};
         var endpoint = normalizeEndpoint(options.endpoint);
@@ -419,36 +521,43 @@
         var sessionId = "";
         var completed = false;
         try {
+            // Keep OpenCode's standard tool definitions for model compatibility.
+            // Every action requires approval; this client never grants approval.
             var sessionResponse = await safeFetch(
                 fetcher,
                 urlFor(endpoint, "/session"),
-                requestInit(options, "POST", { title: "WPS 文本校对" }, true),
+                requestInit(options, "POST", {
+                    title: "WPS 文本校对",
+                    permission: [{ permission: "*", pattern: "*", action: "ask" }]
+                }, true),
                 signal,
                 "创建 OpenCode 会话"
             );
             var sessionPayload = await responseJson(sessionResponse, "创建 OpenCode 会话", signal);
             sessionId = sessionPayload && typeof sessionPayload.id === "string" ? sessionPayload.id : "";
             if (!sessionId) throw createError("OpenCode 没有返回有效的会话编号。", "INVALID_SESSION");
+            var permissions = sessionPayload.permission;
+            if (!Array.isArray(permissions) || permissions.length !== 1 ||
+                !permissions[0] || permissions[0].permission !== "*" ||
+                permissions[0].pattern !== "*" || permissions[0].action !== "ask") {
+                throw createError("OpenCode 没有启用校对会话的工具审批限制，请更新 OpenCode 后重试。", "UNSAFE_SESSION");
+            }
 
+            // The built-in agent preserves OpenCode's provider system prompt.
             var body = {
                 model: model,
-                agent: "wps-proofreader",
-                tools: { "*": false },
+                agent: "build",
+                system: PROOFREADING_SYSTEM_PROMPT,
                 parts: [{ type: "text", text: promptText }]
             };
             if (typeof options.systemPrompt === "string" && options.systemPrompt.trim()) {
-                body.system = options.systemPrompt;
+                body.system += "\n" + options.systemPrompt;
             }
-            var messageResponse = await safeFetch(
-                fetcher,
-                urlFor(endpoint, sessionPath(sessionId, "/message")),
-                requestInit(options, "POST", body, true),
-                signal,
-                "发送 OpenCode 校对请求"
-            );
-            var messagePayload = await responseJson(messageResponse, "OpenCode 校对请求", signal);
+            var messagePayload = await requestMessage(fetcher, options, endpoint, sessionId, body, signal);
+            var modelError = messageError(messagePayload);
+            if (modelError) throw modelError;
             var result = extractTextParts(messagePayload);
-            if (!result.trim()) throw createError("OpenCode 没有返回文本内容。", "EMPTY_RESPONSE");
+            if (!result.trim()) throw createError("OpenCode 模型返回了空文本，请重试或切换模型。", "EMPTY_RESPONSE");
             completed = true;
             return result;
         } catch (error) {

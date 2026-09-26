@@ -346,6 +346,8 @@
                 }
             }
             syncFromStore();
+            // Detection changes the UI even when the stored catalog is unchanged.
+            renderModelSummary();
             if (!result.models.length) {
                 setStatus("模型服务可以访问，但没有返回可用模型。请先在服务端配置模型。", "warning");
                 return { models: [], defaultModel: "" };
@@ -360,6 +362,7 @@
                 detail: "连接失败"
             }, "error");
             syncFromStore();
+            renderModelSummary();
             setStatus(error && error.message
                 ? error.message
                 : "模型服务检测失败。请确认服务已启动并允许加载项跨域访问。", "error");

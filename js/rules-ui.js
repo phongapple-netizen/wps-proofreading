@@ -25,6 +25,9 @@
         var panel = byId("rules-center");
         var toggle = byId("rules-toggle");
         var visible = open === true;
+        if (visible && typeof root.openProofreadingSettings === "function") {
+            root.openProofreadingSettings();
+        }
         if (panel) panel.hidden = !visible;
         if (toggle) {
             toggle.setAttribute("aria-expanded", visible ? "true" : "false");
@@ -479,7 +482,6 @@
 
     function bind() {
         var toggle = byId("rules-toggle");
-        var close = byId("rules-close");
         var newButton = byId("rule-new");
         var editor = byId("rule-editor");
         var cancel = byId("rule-cancel");
@@ -496,7 +498,6 @@
             var panel = byId("rules-center");
             setOpen(panel ? panel.hidden : true);
         });
-        if (close) close.addEventListener("click", function () { setOpen(false); });
         if (newButton) newButton.addEventListener("click", function () { openEditor(null); });
         if (editor) editor.addEventListener("submit", saveEditor);
         if (cancel) cancel.addEventListener("click", closeEditor);

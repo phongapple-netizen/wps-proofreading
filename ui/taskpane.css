@@ -25,11 +25,6 @@ body {
 
 .page-shell {
     min-height: 100vh;
-    padding: 18px 16px 20px;
-}
-
-.page-shell {
-    min-height: 100vh;
     padding: 12px 16px 20px;
 }
 
@@ -37,9 +32,9 @@ body {
     position: relative;
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 8px;
     margin-bottom: 12px;
-    padding: 9px 12px;
+    padding: 7px 10px;
     border: 1px solid var(--line);
     border-radius: 10px;
     background: var(--panel);
@@ -195,6 +190,25 @@ h2 {
     color: var(--accent-dark);
 }
 
+.button-icon {
+    display: inline-flex;
+    flex: 0 0 28px;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    min-height: 28px;
+    padding: 0;
+    background: transparent;
+    color: var(--muted);
+    line-height: 1;
+}
+
+.button-icon:hover {
+    background: #edf2fb;
+    color: var(--accent-dark);
+}
+
 .button-secondary {
     width: 100%;
     border-color: #b7c8f2;
@@ -284,9 +298,56 @@ h2 {
     display: block;
 }
 
-#settings-toggle.is-active,
+#settings-toggle.is-active {
+    background: #e8efff;
+    color: var(--accent-dark);
+}
+
+.settings-rules {
+    margin: 8px 0 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--line);
+}
+
+.settings-section-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    min-height: 32px;
+    padding: 6px 8px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--ink);
+    font: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.4;
+    text-align: left;
+    cursor: pointer;
+}
+
+.settings-section-toggle:hover {
+    background: #f3f6fb;
+}
+
+.settings-section-toggle:focus-visible {
+    outline: 2px solid rgba(40, 100, 220, 0.35);
+    outline-offset: 2px;
+}
+
+.disclosure-icon {
+    flex: 0 0 auto;
+    color: var(--muted);
+    transition: transform 0.15s ease;
+}
+
+.settings-section-toggle.is-active .disclosure-icon {
+    transform: rotate(90deg);
+}
+
 #rules-toggle.is-active {
-    border-color: var(--accent);
     background: #e8efff;
     color: var(--accent-dark);
 }
@@ -673,19 +734,11 @@ h2 {
 
 
 .rules-center {
-    border-color: #c9d7f5;
+    padding-top: 6px;
 }
 
-.rules-head {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 10px;
-    margin-bottom: 10px;
-}
-
-.rules-head h2 {
-    margin: 0;
+.rules-note {
+    margin: 0 0 8px;
 }
 
 .rules-toolbar {

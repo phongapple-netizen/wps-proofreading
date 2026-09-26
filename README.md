@@ -90,7 +90,7 @@ npm run service:mac:install
 npm run service:mac:status
 ```
 
-安装会注册 WPS 加载项，并让插件网页服务和 OpenCode 在登录后自动启动。两个服务只监听本机 `127.0.0.1`；OpenCode 从项目目录启动，加载本项目的 `wps-proofreader` 代理配置。无需 `sudo`。运行日志位于 `~/Library/Logs/wps-proofreading/`。如果已经手动运行两个服务，先在对应终端按 `Control+C` 再安装，以免占用端口。移除登录自启：`npm run service:mac:remove`。
+安装会注册 WPS 加载项，并让插件网页服务和 OpenCode 在登录后自动启动。两个服务只监听本机 `127.0.0.1`；OpenCode 从项目目录启动。无需 `sudo`。运行日志位于 `~/Library/Logs/wps-proofreading/`。如果已经手动运行两个服务，先在对应终端按 `Control+C` 再安装，以免占用端口。移除登录自启：`npm run service:mac:remove`。
 
 如果 WPS 功能区仍未出现“WPS 文本校对”，先启动一次 WPS，让系统创建沙盒目录，然后退出 WPS，再重新执行：
 
@@ -109,7 +109,9 @@ cd ~/wps-proofreading
 opencode serve --hostname 127.0.0.1 --port 4096 --cors http://127.0.0.1:3891
 ```
 
-必须从项目目录启动，使 OpenCode 加载 `opencode.json` 中禁止工具调用的专用代理。插件请求还会显式指定该代理并禁用全部工具。然后在任务窗格中选择 OpenCode 并读取可用模型。
+在任务窗格中选择 OpenCode 并读取可用模型。插件使用内置 `build` 代理，在每个临时校对会话中将全部工具设为必须审批，并核对服务端已启用该限制。插件不会批准工具请求；如果模型请求工具，插件会中止并清理会话。
+
+模型列表读取成功只表示服务已连接，不代表模型允许校对调用。“免费额度仅限 OpenCode 内使用”（HTTP 403）也可能由自定义代理或完全禁用工具引发的兼容性问题导致，不能据此认定免费模型无法用于插件。当前调用方式已在 OpenCode 1.18.32 和 `opencode/mimo-v2.6-flash-free` 上验证。插件中的“OpenCode 服务密码”只用于连接本机服务，不是模型提供商的 API 密钥。
 
 ## 校对流程
 
@@ -145,6 +147,8 @@ WPS 精确定位
 - 模型请求、模型列表读取和 OpenCode 会话清理均设置超时；校对期间不能应用或忽略建议。
 
 ## 规则中心
+
+点击任务窗格右上角的齿轮打开设置，再展开“校对规则”。
 
 规则中心支持：
 

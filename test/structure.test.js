@@ -99,6 +99,8 @@ test('top toolbar and rules center expose the expected controls', () => {
   assert.match(html, /<h1 class="toolbar-title">智能校对<\/h1>/);
   assert.match(html, /id="rules-toggle"/);
   assert.match(html, /id="settings-toggle"/);
+  assert.match(html, /aria-label="设置" title="设置"/);
+  assert.equal(html.slice(0, html.indexOf('<div id="settings-popover"')).includes('id="rules-toggle"'), false);
   assert.match(html, /<div id="settings-popover" class="settings-popover" hidden>/);
   assert.equal(/id="page-header"|id="selection-heading"|id="selected-text"|id="selection-meta"|id="refresh-selection"|<details/.test(html), false);
   assert.equal((html.match(/id="run-proofreading"/g) || []).length, 1);
@@ -155,13 +157,13 @@ test('top toolbar and rules center expose the expected controls', () => {
   assert.match(read('rules/catalog.json'), /work-safety\.json/);
 });
 
-test('settings popover opens on demand and closes on outside click or Escape', () => {
-  const ids = ['settings-toggle', 'settings-popover', 'run-proofreading', 'cancel-proofreading',
+test('settings popover contains a rules accordion and closes on outside click or Escape', () => {
+  const ids = ['settings-toggle', 'settings-popover', 'rules-toggle', 'rules-center', 'run-proofreading', 'cancel-proofreading',
     'issue-filter', 'tab-issues', 'tab-history', 'apply-all', 'rerun-proofreading'];
   const elements = {};
   ids.forEach((id) => {
     elements[id] = {
-      hidden: id === 'settings-popover',
+      hidden: id === 'settings-popover' || id === 'rules-center',
       disabled: false,
       classList: { toggle() {}, add() {}, remove() {} },
       setAttribute() {},
@@ -192,10 +194,17 @@ test('settings popover opens on demand and closes on outside click or Escape', (
     WpsNativeDocument: { readSelectionText: () => '' }
   };
   loadBrowserScript('js/taskpane.js', win);
+  loadBrowserScript('js/rules-ui.js', win);
 
   assert.equal(elements['settings-popover'].hidden, true);
   elements['settings-toggle'].fire('click');
   assert.equal(elements['settings-popover'].hidden, false);
+  assert.equal(elements['rules-center'].hidden, true);
+  elements['rules-toggle'].fire('click');
+  assert.equal(elements['rules-center'].hidden, false);
+  assert.equal(elements['settings-popover'].hidden, false);
+  elements['rules-toggle'].fire('click');
+  assert.equal(elements['rules-center'].hidden, true);
   elements['settings-popover'].fire('click');
   assert.equal(elements['settings-popover'].hidden, false);
   win.document.fire('click');
@@ -205,6 +214,12 @@ test('settings popover opens on demand and closes on outside click or Escape', (
   assert.equal(elements['settings-popover'].hidden, false);
   win.document.fire('keydown', { key: 'Escape' });
   assert.equal(elements['settings-popover'].hidden, true);
+  win.openRulesCenter();
+  assert.equal(elements['settings-popover'].hidden, false);
+  assert.equal(elements['rules-center'].hidden, false);
+  win.closeRulesCenter();
+  assert.equal(elements['rules-center'].hidden, true);
+  assert.equal(elements['settings-popover'].hidden, false);
 });
 
 test('task pane exposes safe integration callbacks without fabricating results', () => {
