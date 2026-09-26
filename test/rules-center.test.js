@@ -194,3 +194,71 @@ test("invalid or empty-match regex rules are rejected", () => {
         replacement: "x"
     }), /正则表达式无效/);
 });
+
+
+test("AI review rules create candidates but do not become immediate findings", () => {
+    const { api } = createHarness();
+    api.saveRule({
+        id: "ai-review",
+        name: "术语上下文核查",
+        type: "ai_review",
+        pattern: "高空作业",
+        matchMode: "literal",
+        replacement: "高处作业",
+        instruction: "只有在安全生产专业语境中才建议改为高处作业。",
+        autoFix: true,
+        priority: 90,
+        source: "专业术语"
+    });
+
+    assert.equal(api.evaluate("这里提到高空作业。", 5).length, 0);
+
+    const candidates = api.collectAiReviewCandidates("这里提到高空作业。", 5);
+    assert.equal(candidates.length, 1);
+    assert.equal(candidates[0].ruleId, "ai-review");
+    assert.equal(candidates[0].trigger, "高空作业");
+    assert.equal(candidates[0].preferredSuggestion, "高处作业");
+    assert.equal(candidates[0].start, 9);
+
+    const saved = api.getRules().find((rule) => rule.id === "ai-review");
+    assert.equal(saved.autoFix, false);
+    assert.equal(saved.instruction.includes("专业语境"), true);
+});
+
+test("AI review rules support regex triggers and are included in document hit counts", () => {
+    const { api } = createHarness("报告中写明：妥否，请批示。");
+    api.saveRule({
+        id: "ai-regex",
+        name: "请示语气核查",
+        type: "ai_review",
+        pattern: "妥否[，,]请批示",
+        matchMode: "regex",
+        flags: "",
+        instruction: "结合文种判断是否属于报告夹带请示事项。"
+    });
+
+    const result = api.testCurrentDocument();
+    assert.equal(result.count, 1);
+    assert.equal(result.byRule["ai-regex"], 1);
+    assert.equal(result.issues.length, 0);
+    assert.equal(result.aiReviewCandidates.length, 1);
+});
+
+test("AI review rules require an instruction and reject empty-match regex triggers", () => {
+    const { api } = createHarness();
+
+    assert.throws(() => api.saveRule({
+        name: "缺少要求",
+        type: "ai_review",
+        pattern: "关键词",
+        instruction: ""
+    }), /必须填写核查要求/);
+
+    assert.throws(() => api.saveRule({
+        name: "空匹配AI核查",
+        type: "ai_review",
+        pattern: "a*",
+        matchMode: "regex",
+        instruction: "结合上下文判断。"
+    }), /正则表达式无效/);
+});
