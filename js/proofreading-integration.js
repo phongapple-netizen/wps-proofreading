@@ -682,10 +682,9 @@
             var batches = root.WpsProofreadingCore.batchParagraphs(
                 paragraphs, root.WpsProofreadingCore.defaultBatchCharacters);
             var deep = isDeepMode();
-            var consistencyIndexes = root.WpsProofreadingCore.buildConsistencyIndexes(paragraphs);
-            var runConsistencyPass = batches.length > 1 && consistencyIndexes.some(function (item) {
-                return root.WpsProofreadingCore.hasCrossParagraphConsistency(item);
-            });
+            var consistencyCandidates = root.WpsProofreadingCore.buildGlobalConsistencyCandidates(paragraphs);
+            var consistencyBatches = root.WpsProofreadingCore.batchGlobalConsistencyCandidates(consistencyCandidates);
+            var runConsistencyPass = consistencyBatches.length > 0;
             var firstPassProgressCeiling = runConsistencyPass ? 85 : 100;
             var totalFirstPassCharacters = batches.reduce(function (total, batch) {
                 return total + batchCharacterCount(batch);
@@ -746,10 +745,9 @@
                 setStatus("第一遍逐段校对已完成，正在进行跨段落一致性复核…", "working");
                 reportProgress(firstPassProgressCeiling, "正文校对完成 · 全文一致性复核中");
                 try {
-                    for (var windowIndex = 0; windowIndex < consistencyIndexes.length; windowIndex += 1) {
-                        var consistencyIndex = consistencyIndexes[windowIndex];
-                        if (!root.WpsProofreadingCore.hasCrossParagraphConsistency(consistencyIndex)) continue;
-                        var consistencyPrompt = root.WpsProofreadingCore.buildConsistencyPrompt(consistencyIndex);
+                    for (var candidateBatchIndex = 0; candidateBatchIndex < consistencyBatches.length; candidateBatchIndex += 1) {
+                        var consistencyBatch = consistencyBatches[candidateBatchIndex];
+                        var consistencyPrompt = root.WpsProofreadingCore.buildConsistencyPrompt(consistencyBatch);
                         var consistencyResponse = await requestProofreadingModel(options, consistencyPrompt);
                         if (!currentDocumentMatches(snapshot)) {
                             currentSnapshot = null;
@@ -758,7 +756,8 @@
                             viewIssues();
                             throw new Error("一致性复核期间" + scopeLabel + "内容已变化，结果已丢弃。请重新校对。");
                         }
-                        var consistencyParsed = root.WpsProofreadingCore.parseConsistencyIssues(consistencyResponse);
+                        var consistencyParsed = root.WpsProofreadingCore.filterConsistencyIssuesToCandidates(
+                            root.WpsProofreadingCore.parseConsistencyIssues(consistencyResponse), consistencyBatch);
                         collected = collected.concat(
                             root.WpsProofreadingCore.mapIssuesToRanges(
                                 paragraphs, consistencyParsed, snapshot.start).map(function (issue) {
@@ -768,13 +767,10 @@
                         currentSnapshot = snapshot;
                         viewIssues();
                         reportProgress(firstPassProgressCeiling + Math.round(
-                            ((windowIndex + 1) / consistencyIndexes.length) * (100 - firstPassProgressCeiling)),
-                            "一致性复核 · 第 " + (windowIndex + 1) + "/" + consistencyIndexes.length + " 窗");
+                            ((candidateBatchIndex + 1) / consistencyBatches.length) * (100 - firstPassProgressCeiling)),
+                            "一致性复核 · 第 " + (candidateBatchIndex + 1) + "/" + consistencyBatches.length + " 批候选组");
                     }
                     consistencyCompleted = true;
-                    if (consistencyIndexes.length > 1) {
-                        consistencyWarning = "已覆盖全部一致性候选段落；不同窗口之间的差异仍需人工复核。";
-                    }
                     reportProgress(100, "全文一致性复核完成");
                 } catch (consistencyError) {
                     if ((currentController && currentController.signal && currentController.signal.aborted) ||
@@ -795,9 +791,7 @@
             reportProgress(100, "完成");
             var consistencyText = runConsistencyPass
                 ? (consistencyCompleted
-                    ? (consistencyIndexes.length > 1
-                        ? "；已分窗复核全部一致性候选段落"
-                        : "；已完成跨段落一致性复核")
+                    ? "；已复核 " + consistencyCandidates.length + " 组全文一致性候选"
                     : "；逐段校对已完成，但一致性复核未完成")
                 : "";
             var finalTone = consistencyWarning ? "warning" : "success";
