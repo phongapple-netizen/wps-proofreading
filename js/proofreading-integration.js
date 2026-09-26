@@ -555,7 +555,7 @@
                 if (results.length >= 20 || usedCharacters >= maxCharacters) return;
                 var start = base + paragraph.offset;
                 var end = start + text(paragraph.text).length;
-                if (candidate.start >= end || candidate.end <= start) return;
+                if (candidate.start < start || candidate.end > end) return;
                 var entry = {
                     ruleId: candidate.ruleId,
                     ruleName: text(candidate.ruleName).slice(0, 120),
@@ -577,13 +577,13 @@
     }
 
     function annotateAiReviewIssues(issues, candidates) {
-        var byId = Object.create(null);
-        (candidates || []).forEach(function (candidate) {
-            if (candidate && candidate.ruleId) byId[candidate.ruleId] = candidate;
-        });
-
         return (issues || []).map(function (issue) {
-            var candidate = issue && issue.reviewRuleId ? byId[issue.reviewRuleId] : null;
+            var candidate = issue && issue.reviewRuleId
+                ? (candidates || []).find(function (item) {
+                    return item && item.ruleId === issue.reviewRuleId &&
+                        issue.start < item.end && item.start < issue.end;
+                })
+                : null;
             if (!candidate) return Object.assign({ origin: "ai" }, issue);
             return Object.assign({}, issue, {
                 origin: "ai-review",
