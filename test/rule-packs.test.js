@@ -52,12 +52,13 @@ test("built-in rule catalog references valid importable packs", () => {
             assert.equal(seenIds.has(rule.id), false, "duplicate rule id: " + rule.id);
             seenIds.add(rule.id);
 
-            assert.equal(["replace", "regex", "reminder"].includes(rule.type), true);
+            assert.equal(["replace", "regex", "reminder", "ai_review"].includes(rule.type), true);
             assert.equal(typeof rule.pattern, "string");
             assert.equal(rule.pattern.length > 0, true);
 
             if (rule.autoFix === true) {
                 assert.notEqual(rule.type, "reminder", "reminder must not auto-fix: " + rule.id);
+                assert.notEqual(rule.type, "ai_review", "AI review must not auto-fix: " + rule.id);
                 assert.equal(typeof rule.replacement, "string");
                 assert.equal(rule.replacement.length > 0, true, "auto-fix must have replacement: " + rule.id);
             }
@@ -109,6 +110,35 @@ test("work-safety pack catches the wrong confined-space work sequence", () => {
     assert.ok(confined);
     assert.equal(confined.suggestion, "先通风、再检测、后作业");
     assert.equal(confined.needsReview, false);
+});
+
+test("built-in packs include contextual AI review rules with explicit instructions", () => {
+    const government = readPack("party-government-document.json");
+    const safety = readPack("work-safety.json");
+    const aiRules = government.rules.concat(safety.rules)
+        .filter((rule) => rule.type === "ai_review");
+
+    assert.equal(aiRules.length, 8);
+    aiRules.forEach((rule) => {
+        assert.equal(rule.enabled, true);
+        assert.equal(rule.autoFix, false);
+        assert.equal(typeof rule.instruction, "string");
+        assert.equal(rule.instruction.length > 20, true, "instruction too short: " + rule.id);
+        assert.equal(["literal", "regex"].includes(rule.matchMode), true);
+    });
+
+    assert.equal(
+        government.rules.find((rule) => rule.id === "gov-report-with-request").type,
+        "ai_review"
+    );
+    assert.equal(
+        safety.rules.find((rule) => rule.id === "safety-high-altitude-work").type,
+        "ai_review"
+    );
+    assert.equal(
+        safety.rules.find((rule) => rule.id === "safety-major-hidden-danger-term").type,
+        "ai_review"
+    );
 });
 
 test("context-sensitive abbreviation reminders are disabled by default", () => {
