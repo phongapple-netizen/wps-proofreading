@@ -250,6 +250,9 @@
         var ruleContext = options && Array.isArray(options.ruleContext)
             ? options.ruleContext
             : [];
+        var aiReviewContext = options && Array.isArray(options.aiReviewContext)
+            ? options.aiReviewContext
+            : [];
 
         var lines = [
             "你是一名严谨的中文文稿校对员。只发现明确存在的问题，遵循最小修改原则。",
@@ -267,7 +270,13 @@
             );
             lines.push("本地规则上下文：" + JSON.stringify(ruleContext));
         }
-        lines.push("格式：{\"issues\":[{\"category\":\"typo\",\"paragraphIndex\":1,\"original\":\"原文\",\"suggestion\":\"建议\",\"reason\":\"原因\",\"confidence\":0.96,\"needsReview\":false}]}");
+        if (aiReviewContext.length) {
+            lines.push(
+                "下面是本批文字中触发的 AI 核查规则。触发关键词本身不等于错误。你必须结合对应段落上下文和 instruction 独立判断；只有确认存在问题时才返回建议，没有问题则完全不要返回。若依据某条 AI 核查规则返回问题，必须把该规则的 ruleId 原样写入 reviewRuleId，并将 needsReview 设为 true。preferredSuggestion 只是参考写法，不得机械采用。"
+            );
+            lines.push("AI核查规则：" + JSON.stringify(aiReviewContext));
+        }
+        lines.push("格式：{\"issues\":[{\"category\":\"typo\",\"paragraphIndex\":1,\"original\":\"原文\",\"suggestion\":\"建议\",\"reason\":\"原因\",\"confidence\":0.96,\"needsReview\":false,\"reviewRuleId\":\"\"}]}");
         lines.push("待校对段落：");
         lines.push(JSON.stringify(payload));
         return lines.join("\n\n");
@@ -306,7 +315,10 @@
                 suggestion: suggestion,
                 reason: typeof item.reason === "string" ? item.reason : "",
                 confidence: confidenceValid ? confidence : 0,
-                needsReview: needsReview
+                needsReview: needsReview,
+                reviewRuleId: typeof item.reviewRuleId === "string"
+                    ? item.reviewRuleId.trim().slice(0, 120)
+                    : ""
             });
             return results;
         }, []);
