@@ -366,11 +366,15 @@
             个: ["count", 1], 处: ["places", 1], 天: ["days", 1]
         };
         var quantityPattern = /\d+(?:\.\d+)?\s*(?:GW|MW|kW|亿元|万元|公里|千米|元|米|吨|亩|人|家|项|次|个|处|天)/gi;
-        var excludedQuantitySpans = dateSpans.concat(percentageSpans);
+        var excludedQuantitySpans = dateSpans.concat(percentageSpans).sort(function (left, right) {
+            return left[0] - right[0];
+        });
+        var excludedSpanIndex = 0;
         while ((match = quantityPattern.exec(source)) !== null) {
-            var overlaps = excludedQuantitySpans.some(function (span) {
-                return match.index < span[1] && quantityPattern.lastIndex > span[0];
-            });
+            while (excludedSpanIndex < excludedQuantitySpans.length &&
+                excludedQuantitySpans[excludedSpanIndex][1] <= match.index) excludedSpanIndex += 1;
+            var span = excludedQuantitySpans[excludedSpanIndex];
+            var overlaps = span && match.index < span[1] && quantityPattern.lastIndex > span[0];
             if (overlaps) continue;
             var parts = match[0].match(/^(\d+(?:\.\d+)?)\s*(.+)$/);
             var unit = units[parts[2].toLowerCase()];

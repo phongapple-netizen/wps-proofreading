@@ -433,6 +433,19 @@ test("one large dimension bucket compares bounded neighbors for different matter
     assert.equal(diagnostics.numericComparisons < 1500, true);
 });
 
+test("interleaved dates, percentages and quantities in one long paragraph retain tail signals", () => {
+    const first = Array.from({ length: 300 }, (_, index) =>
+        `事项${index}于9月26日完成，完成率为${index % 100}%，投资${index + 1}万元。`).join("；");
+    const second = "事项299于9月26日完成，完成率为99%，投资301万元。";
+    const candidates = core.buildGlobalConsistencyCandidates(
+        core.splitIntoParagraphs(first + "\n" + second));
+    const amount = candidates.find((candidate) => candidate.type === "quantity" &&
+        candidate.variants.some((variant) => variant.text === "301万元"));
+
+    assert.ok(amount);
+    assert.deepEqual(amount.variants.map((variant) => variant.paragraphs), [[1], [2]]);
+});
+
 test("oversized candidate groups split without exceeding the batch character limit", () => {
     const paragraphs = core.splitIntoParagraphs(Array.from({ length: 80 }, (_, index) =>
         `项目总投资${index + 1}万元。`).join("\n"));
