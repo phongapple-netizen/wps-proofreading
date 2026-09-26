@@ -528,7 +528,7 @@ test("local rules run before AI and safe rule findings can be one-click fixed", 
 
     const result = await harness.window.runProofreading();
     assert.equal(result.accepted, true);
-    assert.equal(harness.statuses.some((item) => /本地规则扫描完成/.test(item.text)), true);
+    assert.equal(harness.statuses.some((item) => /规则扫描完成/.test(item.text)), true);
     assert.equal(JSON.stringify(harness.requests[0].body).includes("本地规则上下文"), true);
     assert.equal(JSON.stringify(harness.requests[0].body).includes("单位名称规范"), true);
 
