@@ -192,7 +192,7 @@
             redundancy: "重复冗余",
             wording: "用词",
             consistency: "前后统一",
-            rule: "规则命中"
+            rule: "规则核对"
         };
         return labels[category] || "校对提示";
     }
@@ -224,7 +224,10 @@
                 actionable: issue.actionable !== false,
                 ruleName: issue.ruleName || "",
                 ruleSource: issue.ruleSource || "",
-                severity: issue.severity || ""
+                severity: issue.severity || "",
+                origin: issue.origin || issueOrigin(issue),
+                confirmedByAI: issue.confirmedByAI === true,
+                aiConflict: issue.aiConflict === true
             };
         }));
     }
@@ -589,6 +592,13 @@
                 ? root.WpsRulesCenter.evaluate(snapshot.selectedText, snapshot.start)
                 : [];
             collected = collected.concat(localRuleIssues);
+            currentSnapshot = snapshot;
+            currentIssues = mergeMappedIssues(collected);
+            viewIssues();
+            setStatus(localRuleIssues.length
+                ? "本地规则扫描完成，发现 " + localRuleIssues.length + " 项；AI 正在继续校对并核对规则结果…"
+                : "本地规则扫描完成，未发现规则问题；AI 正在继续校对…", "working");
+            reportProgress(2, "规则扫描完成 · AI 校对准备中");
 
             var paragraphs = root.WpsProofreadingCore.splitIntoParagraphs(snapshot.selectedText);
             if (!paragraphs.length) {
@@ -614,7 +624,10 @@
                     abortError.name = "AbortError";
                     throw abortError;
                 }
-                var prompt = root.WpsProofreadingCore.buildPrompt(batches[index], { deep: deep });
+                var prompt = root.WpsProofreadingCore.buildPrompt(batches[index], {
+                    deep: deep,
+                    ruleContext: batchRuleContext(batches[index], localRuleIssues, snapshot.start)
+                });
                 var response = await requestProofreadingModel(options, prompt);
                 if (!currentDocumentMatches(snapshot)) {
                     currentSnapshot = null;
@@ -625,7 +638,13 @@
                 }
                 var parsed = root.WpsProofreadingCore.parseIssues(response);
                 collected = collected.concat(
-                    root.WpsProofreadingCore.mapIssuesToRanges(batches[index], parsed, snapshot.start));
+                    root.WpsProofreadingCore.mapIssuesToRanges(
+                        batches[index], parsed, snapshot.start).map(function (issue) {
+                            return Object.assign({ origin: "ai" }, issue);
+                        }));
+                currentIssues = mergeMappedIssues(collected);
+                currentSnapshot = snapshot;
+                viewIssues();
                 completedFirstPassCharacters += batchCharacterCount(batches[index]);
                 var firstPassPercent = totalFirstPassCharacters > 0
                     ? Math.round((completedFirstPassCharacters / totalFirstPassCharacters) *
@@ -661,7 +680,12 @@
                     var consistencyParsed = root.WpsProofreadingCore.parseConsistencyIssues(consistencyResponse);
                     collected = collected.concat(
                         root.WpsProofreadingCore.mapIssuesToRanges(
-                            paragraphs, consistencyParsed, snapshot.start));
+                            paragraphs, consistencyParsed, snapshot.start).map(function (issue) {
+                                return Object.assign({ origin: "ai" }, issue);
+                            }));
+                    currentIssues = mergeMappedIssues(collected);
+                    currentSnapshot = snapshot;
+                    viewIssues();
                     consistencyCompleted = true;
                     reportProgress(100, "全文一致性复核完成");
                 } catch (consistencyError) {
