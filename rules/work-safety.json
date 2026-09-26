@@ -60,14 +60,16 @@
       "name": "“三个必须”业务表述核对",
       "enabled": true,
       "group": "责任体系",
-      "type": "reminder",
+      "type": "ai_review",
       "pattern": "管生产必须管安全",
       "replacement": "管生产经营必须管安全",
       "severity": "medium",
       "autoFix": false,
       "priority": 80,
       "source": "安全生产“三个必须”原则",
-      "notes": "如本处是在引用“三个必须”，应使用“管生产经营必须管安全”；若是普通语境则人工判断。"
+      "notes": "如本处是在引用“三个必须”，应使用“管生产经营必须管安全”；若是普通语境则人工判断。",
+      "matchMode": "literal",
+      "instruction": "判断“管生产必须管安全”是否是在引用或概括“三个必须”的规范表述。如果是，应建议使用“管生产经营必须管安全”；如果只是普通语境描述生产环节责任，不要机械修改。"
     },
     {
       "id": "safety-confined-order-detect-first",
@@ -102,56 +104,64 @@
       "name": "“高空作业”术语核对",
       "enabled": true,
       "group": "作业安全",
-      "type": "replace",
+      "type": "ai_review",
       "pattern": "高空作业",
       "replacement": "高处作业",
       "severity": "medium",
       "autoFix": false,
       "priority": 70,
       "source": "安全生产专业术语",
-      "notes": "安全生产标准和监管材料通常使用“高处作业”；部分行业或引用原文可能使用“高空作业”，默认人工确认。"
+      "notes": "安全生产标准和监管材料通常使用“高处作业”；部分行业或引用原文可能使用“高空作业”，默认人工确认。",
+      "matchMode": "literal",
+      "instruction": "判断当前“高空作业”是否属于安全生产监管、作业管理或专业标准语境。若属于规范性专业表述，通常建议使用“高处作业”；若为文件原名、直接引语、历史材料或特定行业固定称谓，不要修改。"
     },
     {
       "id": "safety-high-altitude-fall",
       "name": "“高空坠落”术语核对",
       "enabled": true,
       "group": "事故类型",
-      "type": "replace",
+      "type": "ai_review",
       "pattern": "高空坠落",
       "replacement": "高处坠落",
       "severity": "medium",
       "autoFix": false,
       "priority": 70,
       "source": "事故类型规范表述",
-      "notes": "事故类型通常表述为“高处坠落”，但引用历史材料时应保留原文，默认人工确认。"
+      "notes": "事故类型通常表述为“高处坠落”，但引用历史材料时应保留原文，默认人工确认。",
+      "matchMode": "literal",
+      "instruction": "判断当前“高空坠落”是否是在表述事故类型或安全生产专业术语。若是，通常建议使用“高处坠落”；若为引用原文、专有名称或其他非事故类型语境，不要修改。"
     },
     {
       "id": "safety-major-hidden-danger-term",
       "name": "“重大安全事故隐患”术语核对",
       "enabled": true,
       "group": "隐患治理",
-      "type": "replace",
+      "type": "ai_review",
       "pattern": "重大安全事故隐患",
       "replacement": "重大事故隐患",
       "severity": "medium",
       "autoFix": false,
       "priority": 75,
       "source": "现行工贸重大事故隐患标准",
-      "notes": "现行《工贸企业重大事故隐患判定标准》使用“重大事故隐患”。其他行业文件可能存在特定名称，默认人工确认。"
+      "notes": "现行《工贸企业重大事故隐患判定标准》使用“重大事故隐患”。其他行业文件可能存在特定名称，默认人工确认。",
+      "matchMode": "literal",
+      "instruction": "结合行业和引用对象判断“重大安全事故隐患”是否是在表达现行监管术语“重大事故隐患”。只有属于一般安全生产监管或现行重大事故隐患判定语境时才建议改为“重大事故隐患”；若属于特定文件原名、历史引用或其他法定名称，不要机械替换。"
     },
     {
       "id": "safety-old-industry-major-hazard-standard",
       "name": "工贸2017版重大隐患标准已废止",
       "enabled": true,
       "group": "法规标准时效",
-      "type": "reminder",
+      "type": "ai_review",
       "pattern": "工贸行业重大生产安全事故隐患判定标准（2017版）",
       "replacement": "《工贸企业重大事故隐患判定标准》",
       "severity": "high",
       "autoFix": false,
       "priority": 140,
       "source": "应急管理部令第10号",
-      "notes": "2023年标准施行时，2017版同时废止。引用历史文件可保留原称，现行依据应核对更新。"
+      "notes": "2023年标准施行时，2017版同时废止。引用历史文件可保留原称，现行依据应核对更新。",
+      "matchMode": "literal",
+      "instruction": "判断此处引用2017版工贸重大隐患标准是作为历史材料回顾，还是作为当前有效依据。若作为当前检查、执法、监管依据，应提醒更新为现行《工贸企业重大事故隐患判定标准》；若明确讨论历史时期或引用旧文件原文，不要改写。"
     },
     {
       "id": "safety-old-industry-major-hazard-standard-book",
@@ -214,14 +224,16 @@
       "name": "全员安全生产责任制表述提醒",
       "enabled": true,
       "group": "责任体系",
-      "type": "reminder",
+      "type": "ai_review",
       "pattern": "全员安全生产责任制度",
       "replacement": "全员安全生产责任制",
       "severity": "low",
       "autoFix": false,
       "priority": 55,
       "source": "安全生产责任体系规范表述",
-      "notes": "政策和监管材料通常使用“全员安全生产责任制”表述；如引用原文或制度正式名称，请人工确认。"
+      "notes": "政策和监管材料通常使用“全员安全生产责任制”表述；如引用原文或制度正式名称，请人工确认。",
+      "matchMode": "literal",
+      "instruction": "判断“全员安全生产责任制度”是否是在一般政策、监管或责任体系语境中表达通常所称的“全员安全生产责任制”。若是可建议规范为“全员安全生产责任制”；若它是某单位正式制度名称或引用原文，不要机械修改。"
     }
   ]
 }
