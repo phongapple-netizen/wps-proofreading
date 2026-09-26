@@ -15,6 +15,10 @@
     var MAX_CONSISTENCY_INDEX_CHARACTERS = 16000;
     var MAX_GLOBAL_CANDIDATES_PER_REQUEST = 16;
     var MAX_GLOBAL_CANDIDATE_CHARACTERS = 12000;
+    var MAX_CONTEXT_BUCKET_EXHAUSTIVE = 12;
+    var MAX_CONTEXT_NEIGHBORS = 4;
+    var MAX_NAME_BUCKET_EXHAUSTIVE = 32;
+    var MAX_NAME_NEIGHBORS = 8;
 
     function splitIntoParagraphs(value) {
         var text = String(value == null ? "" : value);
@@ -269,8 +273,47 @@
         return match ? match[0] : "";
     }
 
+    function organizationIdentity(value) {
+        var name = normalizedName(value);
+        var regionMatch = name.match(/^(?:[\u4e00-\u9fa5]{2,8}(?:省|市|县|区)|[省市县区])/);
+        var region = regionMatch ? regionMatch[0] : "";
+        var body = name.slice(region.length);
+        var endings = [
+            [/^(.*?)(?:委员会办公室|委会办公室|委办)$/, "committee-office"],
+            [/^(.*?)(?:人民政府办公室|政府办公室|政府办)$/, "government-office"],
+            [/^(.*?)(?:人民政府|政府)$/, "government"],
+            [/^(.*?)(?:委员会|委)$/, "committee"],
+            [/^(.*?)(?:管理局|局)$/, "bureau"],
+            [/^(.*?)(?:办公室|办)$/, "office"],
+            [/^(.*?)(?:总局)$/, "general-bureau"],
+            [/^(.*?)(研究院|公司|集团|中心|学校|医院|协会|厅|部)$/, "other"]
+        ];
+        for (var index = 0; index < endings.length; index += 1) {
+            var match = body.match(endings[index][0]);
+            if (match) {
+                return { region: region, core: match[1], role: endings[index][1] === "other"
+                    ? match[2] : endings[index][1] };
+            }
+        }
+        return { region: region, core: body, role: organizationSuffix(body) };
+    }
+
+    function orderedAbbreviation(shorter, longer) {
+        if (shorter.length < 2 || longer.length < shorter.length + 2 ||
+            longer.length > shorter.length * 4 || shorter.charAt(0) !== longer.charAt(0) ||
+            longer.lastIndexOf(shorter.charAt(shorter.length - 1)) < longer.length - 3) {
+            return false;
+        }
+        var cursor = 0;
+        for (var index = 0; index < longer.length && cursor < shorter.length; index += 1) {
+            if (longer.charAt(index) === shorter.charAt(cursor)) cursor += 1;
+        }
+        return cursor === shorter.length;
+    }
+
     function cleanOrganization(value) {
-        var name = String(value).replace(/^.*(?:根据|按照|交由|负责由|由|与|和|及|向|请|将)(?=[\u4e00-\u9fa5]{2,})/, "");
+        var name = String(value).replace(/^.*(?:与|和|及)(?=[\u4e00-\u9fa5]{0,8}[省市县区])/, "");
+        name = name.replace(/^.*(?:根据|按照|交由|负责由|由|向|请|将)(?=[\u4e00-\u9fa5]{2,})/, "");
         name = name.replace(/^(?:本次|目前|此前|随后|第一段|第二段|该|本)/, "");
         return name;
     }
@@ -323,8 +366,9 @@
             个: ["count", 1], 处: ["places", 1], 天: ["days", 1]
         };
         var quantityPattern = /\d+(?:\.\d+)?\s*(?:GW|MW|kW|亿元|万元|公里|千米|元|米|吨|亩|人|家|项|次|个|处|天)/gi;
+        var excludedQuantitySpans = dateSpans.concat(percentageSpans);
         while ((match = quantityPattern.exec(source)) !== null) {
-            var overlaps = dateSpans.concat(percentageSpans).some(function (span) {
+            var overlaps = excludedQuantitySpans.some(function (span) {
                 return match.index < span[1] && quantityPattern.lastIndex > span[0];
             });
             if (overlaps) continue;
@@ -411,10 +455,13 @@
         var b = normalizedName(right.text);
         if (a === b) return false;
         if (type === "organization") {
-            var aliasA = a.replace(/安委会办公室$/, "安委办");
-            var aliasB = b.replace(/安委会办公室$/, "安委办");
-            if (aliasA === aliasB) return true;
-            if (organizationSuffix(a) !== organizationSuffix(b)) return false;
+            var first = organizationIdentity(a);
+            var second = organizationIdentity(b);
+            if (first.region !== second.region || first.role !== second.role) return false;
+            if (first.core === second.core) return true;
+            var shorterCore = first.core.length <= second.core.length ? first.core : second.core;
+            var longerCore = first.core.length <= second.core.length ? second.core : first.core;
+            if (orderedAbbreviation(shorterCore, longerCore)) return true;
         } else if (nameKind(a) !== nameKind(b) || !nameKind(a)) {
             return false;
         }
@@ -428,12 +475,98 @@
     }
 
     function comparableContext(left, right) {
-        var a = left.context.replace(/#/g, "");
-        var b = right.context.replace(/#/g, "");
+        var a = left.context.replace(/#/g, "").slice(0, 40);
+        var b = right.context.replace(/#/g, "").slice(0, 40);
         var shorter = Math.min(a.length, b.length);
         if (shorter < 5) return false;
         return commonSubsequenceLength(a, b) >= Math.max(5, Math.ceil(shorter * 0.8)) &&
             Math.max(a.length, b.length) <= shorter * 1.8;
+    }
+
+    function numericContextBucket(context) {
+        var marker = context.indexOf("#");
+        var before = (marker >= 0 ? context.slice(0, marker) : context)
+            .replace(/[^\u4e00-\u9fa5A-Za-z0-9]/g, "");
+        var identifier = before.match(/^[\u4e00-\u9fa5]{1,6}[A-Za-z0-9]{1,8}/);
+        if (identifier) return identifier[0];
+        if (before.length >= 3) return before.slice(0, 3);
+        var after = marker >= 0 ? context.slice(marker + 1).replace(/#/g, "") : "";
+        return before + "|" + after.slice(0, 3);
+    }
+
+    function linkNumericRepresentatives(representatives, link, diagnostics) {
+        var exactContexts = Object.create(null);
+        representatives.forEach(function (signal, index) {
+            if (!exactContexts[signal.context]) exactContexts[signal.context] = [];
+            exactContexts[signal.context].push(index);
+        });
+
+        var coarseBuckets = Object.create(null);
+        Object.keys(exactContexts).forEach(function (context) {
+            var indices = exactContexts[context];
+            var first = representatives[indices[0]];
+            var different = indices.some(function (index) {
+                return !equivalentValue(first, representatives[index]);
+            });
+            if (different) {
+                indices.slice(1).forEach(function (index) { link(indices[0], index); });
+            }
+            var bucket = numericContextBucket(context);
+            if (!coarseBuckets[bucket]) coarseBuckets[bucket] = [];
+            coarseBuckets[bucket].push({ context: context, index: indices[0] });
+        });
+
+        Object.keys(coarseBuckets).forEach(function (bucket) {
+            var groups = coarseBuckets[bucket];
+            groups.sort(function (left, right) {
+                return left.context < right.context ? -1 : (left.context > right.context ? 1 : 0);
+            });
+            // Every context is visited. Large buckets use nearby comparisons to keep UI work bounded.
+            var exhaustive = groups.length <= MAX_CONTEXT_BUCKET_EXHAUSTIVE;
+            for (var i = 0; i < groups.length; i += 1) {
+                var end = exhaustive ? groups.length : Math.min(groups.length, i + MAX_CONTEXT_NEIGHBORS + 1);
+                for (var j = i + 1; j < end; j += 1) {
+                    if (diagnostics) diagnostics.numericComparisons += 1;
+                    var first = representatives[groups[i].index];
+                    var second = representatives[groups[j].index];
+                    if (!equivalentValue(first, second) && comparableContext(first, second)) {
+                        link(groups[i].index, groups[j].index);
+                    }
+                }
+            }
+        });
+    }
+
+    function linkNameRepresentatives(representatives, link) {
+        if (representatives[0].type === "organization") {
+            var equivalentNames = Object.create(null);
+            representatives.forEach(function (signal, index) {
+                var identity = organizationIdentity(signal.text);
+                var key = identity.region + ":" + identity.role + ":" + identity.core;
+                if (equivalentNames[key] !== undefined) link(equivalentNames[key], index);
+                else equivalentNames[key] = index;
+            });
+        }
+        var ordered = representatives.map(function (signal, index) {
+            return { index: index, name: normalizedName(signal.text) };
+        });
+        if (ordered.length > MAX_NAME_BUCKET_EXHAUSTIVE) {
+            // Dense title/name families get the same bounded fallback instead of quadratic matching.
+            ordered.sort(function (left, right) {
+                return left.name < right.name ? -1 : (left.name > right.name ? 1 : 0);
+            });
+        }
+        var exhaustive = ordered.length <= MAX_NAME_BUCKET_EXHAUSTIVE;
+        for (var i = 0; i < ordered.length; i += 1) {
+            var end = exhaustive ? ordered.length : Math.min(ordered.length, i + MAX_NAME_NEIGHBORS + 1);
+            for (var j = i + 1; j < end; j += 1) {
+                var left = ordered[i].index;
+                var right = ordered[j].index;
+                if (comparableNames(representatives[left], representatives[right], representatives[left].type)) {
+                    link(left, right);
+                }
+            }
+        }
     }
 
     function equivalentValue(left, right) {
@@ -453,8 +586,10 @@
             return signal.type + ":" + signal.dimension;
         }
         var name = normalizedName(signal.text);
-        if (signal.type === "organization" && /安委(?:会办公室|办)$/.test(name)) {
-            return "organization:安委:" + name.replace(/安委(?:会办公室|办)$/, "");
+        if (signal.type === "organization") {
+            var identity = organizationIdentity(name);
+            return "organization:" + identity.region + ":" + identity.role + ":" +
+                identity.core.charAt(0);
         }
         if (signal.type === "policy" && nameKind(name)) {
             return "policy:" + nameKind(name);
@@ -467,7 +602,9 @@
             name.slice(0, signal.type === "organization" ? 2 : 3);
     }
 
-    function buildGlobalConsistencyCandidates(paragraphs) {
+    function buildGlobalConsistencyCandidates(paragraphs, diagnostics) {
+        // Optional diagnostics are used by stress tests; they do not affect candidate generation.
+        if (diagnostics) diagnostics.numericComparisons = 0;
         var families = Object.create(null);
         (paragraphs || []).forEach(function (paragraph) {
             if (!paragraph || !String(paragraph.text || "").trim()) return;
@@ -501,15 +638,16 @@
                 }
                 return index;
             }
-            for (var i = 0; i < representatives.length; i += 1) {
-                for (var j = i + 1; j < representatives.length; j += 1) {
-                    var type = representatives[i].type;
-                    var related = type === "date" || type === "quantity" || type === "percentage"
-                        ? comparableContext(representatives[i], representatives[j]) &&
-                            !equivalentValue(representatives[i], representatives[j])
-                        : comparableNames(representatives[i], representatives[j], type);
-                    if (related) parents[rootOf(j)] = rootOf(i);
-                }
+            function link(left, right) {
+                parents[rootOf(right)] = rootOf(left);
+            }
+            var numeric = representatives[0].type === "date" ||
+                representatives[0].type === "quantity" ||
+                representatives[0].type === "percentage";
+            if (numeric) {
+                linkNumericRepresentatives(representatives, link, diagnostics);
+            } else {
+                linkNameRepresentatives(representatives, link);
             }
             var components = Object.create(null);
             signals.forEach(function (signal, index) {
@@ -579,19 +717,28 @@
         var charLimit = Number(maxChars) > 0 ? Number(maxChars) : MAX_GLOBAL_CANDIDATE_CHARACTERS;
         var countLimit = Number(maxCandidates) > 0 ? Number(maxCandidates) : MAX_GLOBAL_CANDIDATES_PER_REQUEST;
         var units = [];
+        function fits(candidate) {
+            return JSON.stringify({ candidates: [candidate] }).length <= charLimit;
+        }
         (candidates || []).forEach(function (candidate) {
             var compact = compactGlobalCandidate(candidate);
-            if (JSON.stringify(compact).length <= charLimit || compact.variants.length <= 2) {
+            if (fits(compact)) {
                 units.push(compact);
                 return;
+            }
+            if (compact.variants.length <= 2) {
+                throw new Error("一致性候选组超过单批字符上限，请提高上限。");
             }
             var anchor = compact.variants[0];
             var group = [anchor];
             compact.variants.slice(1).forEach(function (variant) {
                 var next = { type: compact.type, variants: group.concat([variant]) };
-                if (group.length > 1 && JSON.stringify(next).length > charLimit) {
+                if (group.length > 1 && !fits(next)) {
                     units.push({ type: compact.type, variants: group });
                     group = [anchor];
+                }
+                if (!fits({ type: compact.type, variants: group.concat([variant]) })) {
+                    throw new Error("一致性候选组超过单批字符上限，请提高上限。");
                 }
                 group.push(variant);
             });
@@ -600,16 +747,13 @@
 
         var batches = [];
         var current = [];
-        var size = 2;
         units.forEach(function (candidate) {
-            var length = JSON.stringify(candidate).length + 1;
-            if (current.length && (current.length >= countLimit || size + length > charLimit)) {
+            if (current.length && (current.length >= countLimit ||
+                JSON.stringify({ candidates: current.concat([candidate]) }).length > charLimit)) {
                 batches.push({ candidates: current });
                 current = [];
-                size = 2;
             }
             current.push(candidate);
-            size += length;
         });
         if (current.length) batches.push({ candidates: current });
         return batches;

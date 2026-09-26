@@ -277,6 +277,34 @@ test("identical organization names and distinct government offices do not create
         item.type === "organization"), false);
 });
 
+test("common organization full names and ordered abbreviations become candidates", () => {
+    const pairs = [
+        ["市安委办", "市安委会办公室"],
+        ["市应急管理局", "市应急局"],
+        ["市发展和改革委员会", "市发改委"],
+        ["市住房和城乡建设局", "市住建局"]
+    ];
+    pairs.forEach(([full, short]) => {
+        const paragraphs = core.splitIntoParagraphs(
+            `${full}负责统筹。\n${short}负责协调。`);
+        const group = core.buildGlobalConsistencyCandidates(paragraphs)
+            .find((candidate) => candidate.type === "organization");
+        assert.ok(group, `${full} / ${short}`);
+        assert.deepEqual(group.variants.map((variant) => variant.text), [full, short]);
+    });
+});
+
+test("different bureaus are not grouped just because their suffix matches", () => {
+    const paragraphs = core.splitIntoParagraphs(
+        "市教育局负责学校。\n市财政局负责预算。\n市公安局负责治安。");
+    assert.equal(core.buildGlobalConsistencyCandidates(paragraphs).some((item) =>
+        item.type === "organization"), false);
+    const separateEntities = core.splitIntoParagraphs(
+        "华能公司负责建设。\n华能集团负责投资。");
+    assert.equal(core.buildGlobalConsistencyCandidates(separateEntities).some((item) =>
+        item.type === "organization"), false);
+});
+
 test("equivalent converted quantities are not treated as conflicting values", () => {
     const equal = core.splitIntoParagraphs(
         "项目装机容量为2GW。\n项目装机容量为2000MW。");
@@ -348,6 +376,80 @@ test("global candidate batches preserve every group while bounding each request"
     assert.equal(batches.every((batch) => JSON.stringify(batch.candidates).length <= 700), true);
     const last = batches.flatMap((batch) => batch.candidates).at(-1);
     assert.deepEqual(last.variants.map((variant) => variant.paragraphs), [[22], [44]]);
+});
+
+test("hundreds of money and power signals use sparse buckets and retain tail conflicts", () => {
+    const filler = "补充说明文字。".repeat(9);
+    const lines = [];
+    for (let index = 0; index < 400; index += 1) {
+        lines.push(`项目${index}总投资${index + 1}万元。${filler}`);
+    }
+    for (let index = 0; index < 300; index += 1) {
+        lines.push(`设备${index}装机容量为${index + 10}MW。${filler}`);
+    }
+    lines.push(`项目399总投资401万元。${filler}`);
+    lines.push(`设备299装机容量为310MW。${filler}`);
+    const source = lines.join("\n");
+    const diagnostics = {};
+    const candidates = core.buildGlobalConsistencyCandidates(
+        core.splitIntoParagraphs(source), diagnostics);
+    const quantities = candidates.filter((candidate) => candidate.type === "quantity");
+
+    assert.equal(source.length <= core.maxDocumentCharacters, true);
+    assert.equal(quantities.length, 2);
+    assert.equal(quantities.some((candidate) => candidate.variants.some((variant) =>
+        variant.paragraphs.includes(701))), true);
+    assert.equal(quantities.some((candidate) => candidate.variants.some((variant) =>
+        variant.paragraphs.includes(702))), true);
+    assert.equal(diagnostics.numericComparisons < 5000, true);
+});
+
+test("hundreds of percentage signals avoid Cartesian comparison", () => {
+    const lines = Array.from({ length: 500 }, (_, index) =>
+        `指标${index}完成率为${index % 100}%。`);
+    lines.push("指标499完成率为77%。");
+    const diagnostics = {};
+    const candidates = core.buildGlobalConsistencyCandidates(
+        core.splitIntoParagraphs(lines.join("\n")), diagnostics);
+    const percentages = candidates.filter((candidate) => candidate.type === "percentage");
+
+    assert.equal(percentages.length, 1);
+    assert.equal(percentages[0].variants.some((variant) =>
+        variant.paragraphs.includes(501)), true);
+    assert.equal(diagnostics.numericComparisons < 3000, true);
+});
+
+test("one large dimension bucket compares bounded neighbors for different matters", () => {
+    const lines = Array.from({ length: 300 }, (_, index) => {
+        const label = String.fromCharCode(0x4e00 + index).repeat(6);
+        return `全市项目${label}总投资${index + 1}万元。`;
+    });
+    const diagnostics = {};
+    const candidates = core.buildGlobalConsistencyCandidates(
+        core.splitIntoParagraphs(lines.join("\n")), diagnostics);
+
+    assert.equal(candidates.some((candidate) => candidate.type === "quantity"), false);
+    assert.equal(diagnostics.numericComparisons > 0, true);
+    assert.equal(diagnostics.numericComparisons < 1500, true);
+});
+
+test("oversized candidate groups split without exceeding the batch character limit", () => {
+    const paragraphs = core.splitIntoParagraphs(Array.from({ length: 80 }, (_, index) =>
+        `项目总投资${index + 1}万元。`).join("\n"));
+    const diagnostics = {};
+    const candidates = core.buildGlobalConsistencyCandidates(paragraphs, diagnostics);
+    const batches = core.batchGlobalConsistencyCandidates(candidates, 700, 2);
+    const variants = batches.flatMap((batch) => batch.candidates)
+        .flatMap((candidate) => candidate.variants.map((variant) => variant.text));
+
+    assert.equal(candidates.length, 1);
+    assert.equal(candidates[0].variants.length, 80);
+    assert.equal(diagnostics.numericComparisons, 0);
+    assert.equal(batches.length > 1, true);
+    assert.equal(batches.every((batch) => JSON.stringify(batch).length <= 700), true);
+    assert.equal(new Set(variants).size, 80);
+    assert.throws(() => core.batchGlobalConsistencyCandidates([candidates[0]], 100),
+        /超过单批字符上限/);
 });
 
 test("consistency findings must point to a supplied excerpt", () => {
