@@ -2,6 +2,7 @@
 
 const fs = require("node:fs");
 const http = require("node:http");
+const os = require("node:os");
 const path = require("node:path");
 
 const host = "127.0.0.1";
@@ -11,44 +12,123 @@ const port = Number.isInteger(parsedPort) && parsedPort > 0 && parsedPort < 6553
 const projectRoot = path.resolve(__dirname, "..");
 const packageInfo = JSON.parse(fs.readFileSync(path.join(projectRoot, "package.json"), "utf8"));
 
-function registerPlugin() {
-    const appData = process.env.APPDATA;
+function windowsPublishPath(env) {
+    const appData = env && env.APPDATA;
     if (!appData) {
         throw new Error("找不到 Windows APPDATA，无法注册 WPS 调试加载项。");
     }
+    return path.join(appData, "kingsoft", "wps", "jsaddons", "publish.xml");
+}
 
-    const publishPath = path.join(appData, "kingsoft", "wps", "jsaddons", "publish.xml");
-    fs.mkdirSync(path.dirname(publishPath), { recursive: true });
-    let xml = fs.existsSync(publishPath)
-        ? fs.readFileSync(publishPath, "utf8")
-        : '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n<jsplugins>\r\n</jsplugins>\r\n';
-    const original = xml;
-    xml = xml.replace(
-        /\s*<jspluginonline\b[^>]*\bname=["'](?:wps-text-proofreading|wordollama-wps-native)["'][^>]*\/>/gi,
-        ""
-    );
+function macPublishCandidates(homeDir) {
+    return [
+        path.join(
+            homeDir,
+            "Library", "Containers", "com.kingsoft.wpsoffice.mac",
+            "Data", ".kingsoft", "wps", "jsaddons", "publish.xml"
+        ),
+        path.join(
+            homeDir,
+            "Library", "Containers", "com.kingsoft.wpsoffice.mac.global",
+            "Data", ".kingsoft", "wps", "jsaddons", "publish.xml"
+        ),
+        path.join(
+            homeDir,
+            "Library", "Application Support", "Kingsoft", "WPS",
+            "jsaddons", "publish.xml"
+        )
+    ];
+}
 
-    const entry = [
+function linuxPublishPath(homeDir) {
+    return path.join(homeDir, ".local", "share", "Kingsoft", "wps", "jsaddons", "publish.xml");
+}
+
+function candidateLooksInstalled(candidate, fsImpl) {
+    const jsaddonsDir = path.dirname(candidate);
+    const containerOrSupportRoot = candidate.includes(path.join("Library", "Containers"))
+        ? candidate.slice(0, candidate.indexOf(path.join("Data", ".kingsoft")))
+        : path.dirname(path.dirname(jsaddonsDir));
+    return fsImpl.existsSync(candidate) ||
+        fsImpl.existsSync(jsaddonsDir) ||
+        fsImpl.existsSync(containerOrSupportRoot);
+}
+
+function resolvePublishPaths(options) {
+    const settings = options || {};
+    const platform = settings.platform || process.platform;
+    const env = settings.env || process.env;
+    const homeDir = settings.homeDir || os.homedir();
+    const fsImpl = settings.fsImpl || fs;
+
+    if (platform === "win32") {
+        return [windowsPublishPath(env)];
+    }
+
+    if (platform === "darwin") {
+        const candidates = macPublishCandidates(homeDir);
+        const existing = candidates.filter((candidate) => candidateLooksInstalled(candidate, fsImpl));
+        // WPS 尚未启动过时沙盒目录可能不存在；默认创建普通 mac 沙盒路径。
+        return existing.length ? existing : [candidates[0]];
+    }
+
+    if (platform === "linux") {
+        return [linuxPublishPath(homeDir)];
+    }
+
+    throw new Error("当前系统暂不支持自动注册 WPS 调试加载项：" + platform);
+}
+
+function pluginEntry() {
+    return [
         "  <jspluginonline",
         ' name="' + packageInfo.name + '"',
         ' type="' + (packageInfo.addonType || "wps") + '"',
         ' url="http://' + host + ":" + port + '/"',
         ' debug="" enable="enable_dev" install="null"/>'
     ].join("");
+}
+
+function updatePublishXml(currentXml) {
+    let xml = currentXml ||
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<jsplugins>\n</jsplugins>\n';
+    xml = xml.replace(
+        /\s*<jspluginonline\b[^>]*\bname=["'](?:wps-text-proofreading|wordollama-wps-native)["'][^>]*\/>/gi,
+        ""
+    );
+    const entry = pluginEntry();
+
     if (/<\/jsplugins>\s*$/i.test(xml)) {
-        xml = xml.replace(/\s*<\/jsplugins>\s*$/i, "\r\n" + entry + "\r\n</jsplugins>\r\n");
-    } else {
-        xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n<jsplugins>\r\n' +
-            entry + "\r\n</jsplugins>\r\n";
+        return xml.replace(/\s*<\/jsplugins>\s*$/i, "\n" + entry + "\n</jsplugins>\n");
     }
 
-    if (xml !== original) {
-        if (fs.existsSync(publishPath)) {
-            fs.copyFileSync(publishPath, publishPath + ".wps-text-proofreading.bak");
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<jsplugins>\n' +
+        entry + "\n</jsplugins>\n";
+}
+
+function registerPlugin(options) {
+    const settings = options || {};
+    const fsImpl = settings.fsImpl || fs;
+    const publishPaths = resolvePublishPaths(settings);
+    const written = [];
+
+    publishPaths.forEach((publishPath) => {
+        fsImpl.mkdirSync(path.dirname(publishPath), { recursive: true });
+        const original = fsImpl.existsSync(publishPath)
+            ? fsImpl.readFileSync(publishPath, "utf8")
+            : "";
+        const xml = updatePublishXml(original);
+
+        if (xml !== original) {
+            if (original) {
+                fsImpl.copyFileSync(publishPath, publishPath + ".wps-text-proofreading.bak");
+            }
+            fsImpl.writeFileSync(publishPath, xml, "utf8");
         }
-        fs.writeFileSync(publishPath, xml, "utf8");
-    }
-    return publishPath;
+        written.push(publishPath);
+    });
+
+    return written;
 }
 
 const mimeTypes = {
@@ -95,7 +175,8 @@ function createServer() {
             }
             response.writeHead(200, {
                 "Content-Type": mimeTypes[path.extname(target).toLowerCase()] || "application/octet-stream",
-                "Cache-Control": "no-store"
+                "Cache-Control": "no-store",
+                "Access-Control-Allow-Origin": "*"
             });
             if (request.method === "HEAD") {
                 response.end();
@@ -130,23 +211,56 @@ function verifyExistingServer() {
     });
 }
 
-try {
-    const publishPath = registerPlugin();
-    const server = createServer();
-    server.on("error", (error) => {
-        if (error && error.code === "EADDRINUSE") {
-            verifyExistingServer();
-            return;
-        }
-        console.error("调试服务启动失败。");
+function platformLabel() {
+    if (process.platform === "darwin") {
+        return "macOS " + process.arch;
+    }
+    if (process.platform === "win32") return "Windows";
+    if (process.platform === "linux") return "Linux";
+    return process.platform;
+}
+
+function start() {
+    try {
+        const publishPaths = registerPlugin();
+        const server = createServer();
+        server.on("error", (error) => {
+            if (error && error.code === "EADDRINUSE") {
+                verifyExistingServer();
+                return;
+            }
+            console.error("调试服务启动失败。");
+            process.exit(1);
+        });
+        server.listen(port, host, () => {
+            console.log("运行平台：" + platformLabel());
+            publishPaths.forEach((publishPath) => {
+                console.log("WPS 文本校对已注册：" + publishPath);
+            });
+            console.log("本机调试服务：http://" + host + ":" + port);
+            if (process.platform === "darwin") {
+                console.log("Mac 首次写入 WPS 沙盒目录时，系统可能要求终端获得文件访问权限，请选择允许。");
+                console.log("注册后请完全退出并重新打开 WPS；若功能区仍未出现，请先启动一次 WPS 再重新运行 npm run debug。");
+            } else {
+                console.log("若 WPS 已打开，请关闭旧任务窗格后重新打开；首次注册需重启 WPS。");
+            }
+        });
+    } catch (error) {
+        console.error(error && error.message ? error.message : "WPS 调试加载项注册失败。");
         process.exit(1);
-    });
-    server.listen(port, host, () => {
-        console.log("WPS 文本校对已注册：" + publishPath);
-        console.log("本机调试服务：http://" + host + ":" + port);
-        console.log("若 WPS 已打开，请关闭旧任务窗格后重新打开；首次注册需重启 WPS。");
-    });
-} catch (error) {
-    console.error(error && error.message ? error.message : "WPS 调试加载项注册失败。");
-    process.exit(1);
+    }
+}
+
+module.exports = {
+    windowsPublishPath,
+    macPublishCandidates,
+    linuxPublishPath,
+    resolvePublishPaths,
+    updatePublishXml,
+    registerPlugin,
+    resolveRequestPath
+};
+
+if (require.main === module) {
+    start();
 }
