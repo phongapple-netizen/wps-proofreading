@@ -53,6 +53,44 @@ npm run debug
 http://127.0.0.1:3891
 ```
 
+### macOS / Mac mini 兼容
+
+本项目的调试注册脚本支持 macOS，包括 Intel Mac（例如 Mac mini 2014）和 Apple 芯片 Mac。
+
+首次在 Mac 上运行：
+
+```bash
+npm install
+npm test
+npm run debug:mac
+```
+
+脚本会自动识别 WPS Mac 常见加载项目录，包括：
+
+```text
+~/Library/Containers/com.kingsoft.wpsoffice.mac/Data/.kingsoft/wps/jsaddons/
+~/Library/Containers/com.kingsoft.wpsoffice.mac.global/Data/.kingsoft/wps/jsaddons/
+```
+
+对于较老的非沙盒安装，也会检测：
+
+```text
+~/Library/Application Support/Kingsoft/WPS/jsaddons/
+```
+
+脚本会更新对应目录中的 `publish.xml`，把当前项目注册为
+`http://127.0.0.1:3891/` 的 WPS 文字加载项，同时保留其他已有加载项。
+
+Mac 上注册后需要**完全退出并重新打开 WPS**。首次访问 WPS 沙盒目录时，macOS 可能要求终端获得文件访问权限，请选择允许。
+
+如果 WPS 功能区仍未出现“WPS 文本校对”，先启动一次 WPS，让系统创建沙盒目录，然后退出 WPS，再重新执行：
+
+```bash
+npm run debug:mac
+```
+
+`js/wps-api.js` 本身不依赖 Windows 专用接口，会依次兼容 `window.Application`、`wps.WpsApplication()` 和旧版 `wps` 对象。
+
 ## OpenCode
 
 可在本机启动 OpenCode：
