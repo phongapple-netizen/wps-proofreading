@@ -526,23 +526,6 @@ test("local rules run before AI and safe rule findings can be one-click fixed", 
         }]
     });
 
-test("local rules run before AI and safe rule findings can be one-click fixed", async () => {
-    const harness = createHarness({
-        selectedText: "请使用旧名称开展工作。",
-        issues: [],
-        rules: [{
-            id: "unit-name",
-            name: "单位名称规范",
-            group: "单位规范",
-            type: "replace",
-            pattern: "旧名称",
-            replacement: "新名称",
-            autoFix: true,
-            priority: 100,
-            source: "单位规范"
-        }]
-    });
-
     const result = await harness.window.runProofreading();
     assert.equal(result.accepted, true);
     assert.equal(harness.statuses.some((item) => /本地规则扫描完成/.test(item.text)), true);
