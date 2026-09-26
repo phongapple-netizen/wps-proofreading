@@ -1,0 +1,148 @@
+# WPS 智能文稿校对
+
+一个面向 **WPS 文字** 的开源智能校对加载项，重点解决中文长文校对、全文一致性、专业规则检查和安全写回问题。
+
+当前项目支持：
+
+- AI 校对：OpenCode、Ollama、OpenAI 兼容接口；
+- 长文自动分批和超长段落安全切分；
+- 全文一致性复核；
+- 原文精确定位和安全写回；
+- 一键修正的安全阈值控制；
+- 自定义规则中心；
+- JSON 规则包导入导出；
+- 中文基础、公文、安全生产等内置规则包。
+
+## 项目结构
+
+```text
+.
+├─ index.html
+├─ main.js
+├─ ribbon.xml
+├─ js/
+│  ├─ proofreading-core.js
+│  ├─ proofreading-integration.js
+│  ├─ opencode-client.js
+│  ├─ rules-center.js
+│  ├─ rules-ui.js
+│  ├─ settings-store.js
+│  ├─ taskpane.js
+│  └─ wps-api.js
+├─ ui/
+├─ rules/
+├─ test/
+├─ scripts/
+├─ SOURCE_PROVENANCE.md
+└─ THIRD_PARTY_NOTICES.md
+```
+
+## 本机开发
+
+```bash
+npm install
+npm test
+npm run debug
+```
+
+项目使用 WPS 官方 `wpsjs` / `wps-jsapi` 开发方式。
+
+调试服务默认地址：
+
+```text
+http://127.0.0.1:3891
+```
+
+## OpenCode
+
+可在本机启动 OpenCode：
+
+```bash
+opencode serve --hostname 127.0.0.1 --port 4096 --cors http://127.0.0.1:3891
+```
+
+然后在任务窗格中选择 OpenCode 并读取可用模型。
+
+## 校对流程
+
+```text
+文档
+  ↓
+本地规则预检
+  ↓
+AI 分批校对
+  ↓
+全文一致性复核
+  ↓
+结果合并与去重
+  ↓
+WPS 精确定位
+  ↓
+人工确认 / 安全写回
+```
+
+全文和长选区按段落分批处理；单个超长段落也会继续按安全边界切分。需要多批处理时，正文校对完成后会进行一次紧凑的全文一致性复核，重点检查机构称谓、政策法规名称、日期、数字、单位和标题层级。
+
+## 安全策略
+
+- 全文校对在第一次模型请求前要求用户明确确认；
+- API Key 和服务密码只保留在当前任务窗格会话内存中；
+- 应用建议前重新核对原文位置和文档状态；
+- 文档内容变化后，旧建议拒绝写入；
+- “一键修正”只处理无需人工复核且满足安全条件的建议；
+- 规则提醒类结果默认不能直接写入正文。
+
+## 规则中心
+
+规则中心支持：
+
+- 新建、编辑、删除、启用和停用规则；
+- 固定替换、正则表达式和仅提醒规则；
+- 分组、优先级、风险级别；
+- 规则来源和说明；
+- 是否允许进入一键修正；
+- 当前文档命中测试；
+- JSON 规则包导入和导出。
+
+当前提供三个内置规则包：
+
+- 中文及公文基础规范；
+- 党政机关公文规则；
+- 安全生产专业规则。
+
+## 代码来源
+
+本项目的早期代码最初位于旧仓库：
+
+https://github.com/phongapple-netizen/wps
+
+其中本项目最初以 `WpsNative/` 子目录形式开发。该目录是在旧仓库继承的 WordOllama 历史之后独立新增的 WPS JavaScript 加载项。
+
+已完成一轮工程来源审计，目前没有发现本项目核心 JavaScript 文件与 WordOllama 或 WPS-AI / 灵犀AI 存在明显的非通用逐行源码复制。
+
+详细记录：
+
+- [SOURCE_PROVENANCE.md](SOURCE_PROVENANCE.md)
+- [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
+
+## 上游致谢
+
+感谢以下项目和平台在早期研发过程中提供的公开代码、产品思路或平台能力：
+
+- WordOllama Community Edition
+- WPS-AI / 灵犀AI
+- WPS 开放平台
+
+本项目为第三方开源加载项，不代表金山办公官方产品，也不表示获得其官方背书。
+
+## 许可证
+
+当前独立仓库采用 **GNU GPL v3**。
+
+详见 [LICENSE](LICENSE)。
+
+后续如果需要调整许可证，会先重新核对代码来源、第三方依赖和外部贡献记录。
+
+## 项目状态
+
+当前仍属于持续开发阶段，尚未发布面向普通用户的正式安装版本。
