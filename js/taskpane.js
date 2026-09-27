@@ -249,7 +249,8 @@
             head.className = "history-head";
             var action = root.document.createElement("span");
             action.className = "history-action " + (record.action === "applied" ? "history-applied" : "history-ignored");
-            action.textContent = record.action === "applied" ? "已修正" : "已忽略";
+            action.textContent = record.action === "applied" ? "已修正" :
+                record.action === "undone" ? "已撤销" : "已忽略";
             var meta = root.document.createElement("span");
             meta.className = "history-meta";
             meta.textContent = record.categoryLabel + " · " + record.time;
@@ -261,16 +262,20 @@
             diff.className = "history-diff";
             var old = root.document.createElement("span");
             old.className = "diff-old";
-            old.textContent = record.original;
+            old.textContent = record.action === "undone"
+                ? (record.suggestion === "" ? "已删除" : record.suggestion)
+                : record.original;
             diff.appendChild(old);
-            if (record.action === "applied") {
+            if (record.action === "applied" || record.action === "undone") {
                 var arrow = root.document.createElement("span");
                 arrow.className = "diff-arrow";
                 arrow.textContent = " → ";
                 diff.appendChild(arrow);
                 var fresh = root.document.createElement("span");
                 fresh.className = "diff-new";
-                fresh.textContent = record.suggestion === "" ? "删除" : record.suggestion;
+                fresh.textContent = record.action === "undone"
+                    ? (record.original === "" ? "删除" : record.original)
+                    : (record.suggestion === "" ? "删除" : record.suggestion);
                 diff.appendChild(fresh);
             }
             card.appendChild(diff);
@@ -345,7 +350,8 @@
         button.disabled = disabled === true;
         button.setAttribute("data-issue-id", issue.id);
         if (!button.disabled) {
-            button.addEventListener("click", function () {
+            button.addEventListener("click", function (event) {
+                if (event && typeof event.stopPropagation === "function") event.stopPropagation();
                 callAction(callbackName, issue.id, "当前操作未能完成。");
             });
         }
@@ -390,7 +396,12 @@
         shown.forEach(function (issue) {
             var pending = issue.status === "pending";
             var card = root.document.createElement("article");
-            card.className = "issue-card";
+            card.className = "issue-card" + (pending && !state.busy ? " is-locatable" : "");
+            if (pending && !state.busy) {
+                card.addEventListener("click", function () {
+                    callAction("locateProofreadingIssue", issue.id, "当前操作未能完成。");
+                });
+            }
 
             var header = root.document.createElement("div");
             header.className = "issue-card-header";
@@ -429,13 +440,14 @@
             actions.className = "issue-actions";
             actions.appendChild(actionButton("定位", "issue-action-secondary", issue, "locateProofreadingIssue", !pending));
             actions.appendChild(actionButton(
-                issue.status === "accepted" ? "已应用" :
+                issue.status === "accepted" ? "撤销" :
                     issue.status === "ignored" ? "已忽略" :
                         issue.status === "stale" ? "需重查" : "修正",
                 "",
                 issue,
-                "applyProofreadingIssue",
-                state.busy || !pending || issue.actionable === false
+                issue.status === "accepted" ? "undoProofreadingIssue" : "applyProofreadingIssue",
+                state.busy || (!pending && issue.status !== "accepted") ||
+                    (pending && issue.actionable === false)
             ));
             actions.appendChild(actionButton("忽略", "issue-action-secondary", issue, "ignoreProofreadingIssue", state.busy || !pending));
             header.appendChild(actions);
@@ -473,6 +485,9 @@
             if (issue.reason) {
                 var analysis = root.document.createElement("details");
                 analysis.className = "issue-analysis";
+                analysis.addEventListener("click", function (event) {
+                    if (event && typeof event.stopPropagation === "function") event.stopPropagation();
+                });
                 var summary = root.document.createElement("summary");
                 summary.textContent = "错误分析";
                 analysis.appendChild(summary);
@@ -549,10 +564,13 @@
     function pushProofreadingRecord(record) {
         var value = record || {};
         var id = String(value.id == null ? "" : value.id);
-        var action = value.action === "ignored" ? "ignored" : "applied";
-        var key = (value.runId == null ? "" : value.runId) + "|" + id + "|" + action;
+        var action = value.action === "ignored" ? "ignored" :
+            value.action === "undone" ? "undone" : "applied";
+        var baseKey = (value.runId == null ? "" : value.runId) + "|" + id + "|" + action;
+        var key = value.operationId == null ? baseKey : baseKey + "|" + value.operationId;
         if (!id || state.historyIds[key]) return false;
         state.historyIds[key] = true;
+        state.historyIds[baseKey] = true;
         state.history.unshift({
             id: id,
             runId: value.runId == null ? null : value.runId,
@@ -585,6 +603,7 @@
     };
     root.runProofreading = root.runProofreading || defaultRunProofreading;
     root.applyProofreadingIssue = root.applyProofreadingIssue || defaultIssueAction;
+    root.undoProofreadingIssue = root.undoProofreadingIssue || defaultIssueAction;
     root.locateProofreadingIssue = root.locateProofreadingIssue || defaultIssueAction;
     root.ignoreProofreadingIssue = root.ignoreProofreadingIssue || defaultIssueAction;
 

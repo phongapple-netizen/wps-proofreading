@@ -11,6 +11,8 @@
     var currentController = null;
     var busy = false;
     var runCounter = 0;
+    var actionCounter = 0;
+    var ANCHOR_CHARACTERS = 40;
 
     function byId(id) {
         return root.document && root.document.getElementById
@@ -159,6 +161,47 @@
         }
     }
 
+    function refreshIssueAnchors() {
+        if (!currentSnapshot) return;
+        currentIssues.forEach(function (issue) {
+            var relativeStart = issue.start - currentSnapshot.start;
+            var relativeEnd = issue.end - currentSnapshot.start;
+            if (relativeStart < 0 || relativeEnd > currentSnapshot.selectedText.length) return;
+            var selectedBefore = currentSnapshot.selectedText.slice(
+                Math.max(0, relativeStart - ANCHOR_CHARACTERS), relativeStart);
+            var outsideBefore = relativeStart < ANCHOR_CHARACTERS
+                ? currentSnapshot.prefixText.slice(-(ANCHOR_CHARACTERS - relativeStart))
+                : "";
+            issue.anchorBefore = outsideBefore + selectedBefore;
+            issue.anchorAfter = currentSnapshot.selectedText.slice(
+                relativeEnd, relativeEnd + ANCHOR_CHARACTERS);
+        });
+    }
+
+    function checkedIssueRange(issue, expected) {
+        var document = activeDocument(app());
+        if (!document || !currentSnapshot ||
+            documentKey(document) !== currentSnapshot.documentKey) return null;
+        if (issue.start < 0 || issue.end - issue.start !== expected.length) return null;
+        if (expected === "" && !issue.anchorBefore && !issue.anchorAfter) return null;
+        var range = document.Range(issue.start, issue.end);
+        if (text(range.Text) !== expected) return null;
+        var before = issue.anchorBefore || "";
+        var after = issue.anchorAfter || "";
+        if (before && text(document.Range(issue.start - before.length, issue.start).Text) !== before) return null;
+        if (after && text(document.Range(issue.end, issue.end + after.length).Text) !== after) return null;
+        return range;
+    }
+
+    function updateSnapshotAfterReplacement(start, end, replacement) {
+        var relativeStart = start - currentSnapshot.start;
+        var relativeEnd = end - currentSnapshot.start;
+        currentSnapshot.selectedText = currentSnapshot.selectedText.slice(0, relativeStart) +
+            replacement + currentSnapshot.selectedText.slice(relativeEnd);
+        currentSnapshot.end += replacement.length - (end - start);
+        refreshIssueAnchors();
+    }
+
     function modelOptions() {
         var settings = currentSettings();
         var profile = settings.profiles && settings.profiles[settings.provider]
@@ -205,6 +248,7 @@
     }
 
     function viewIssues() {
+        refreshIssueAnchors();
         if (typeof root.setProofreadingIssues !== "function") return;
         root.setProofreadingIssues(currentIssues.map(function (issue) {
             return {
@@ -244,7 +288,8 @@
             original: issue.original,
             suggestion: issue.suggestion,
             reason: issue.reason,
-            action: action
+            action: action,
+            operationId: ++actionCounter
         });
     }
 
@@ -867,14 +912,9 @@
             setStatus("这条建议已处理或已失效，请重新校对。", "warning");
             return false;
         }
-        if (!currentDocumentMatches(currentSnapshot)) {
-            markAllPendingStale("选区内容已变化，无法定位旧结果。请重新校对。");
-            return false;
-        }
         try {
-            var document = activeDocument(app());
-            var range = document.Range(issue.start, issue.end);
-            if (text(range.Text) !== issue.original || typeof range.Select !== "function") {
+            var range = checkedIssueRange(issue, issue.original);
+            if (!range || typeof range.Select !== "function") {
                 throw new Error("range-unavailable");
             }
             range.Select();
@@ -906,28 +946,45 @@
     }
 
     function applyOneIssue(issue, deferRender) {
-        var document = activeDocument(app());
-        var range = document.Range(issue.start, issue.end);
-        if (text(range.Text) !== issue.original) {
+        var range = checkedIssueRange(issue, issue.original);
+        if (!range) {
             issue.status = "stale";
             viewIssues();
             return { ok: false, reason: "changed" };
         }
 
+        var oldStart = issue.start;
+        var oldEnd = issue.end;
         range.Text = issue.suggestion;
         recordAction("applied", issue);
         currentIssues = root.WpsProofreadingCore.shiftIssuesAfterReplacement(
             currentIssues,
             issue.id,
-            issue.start,
-            issue.end,
+            oldStart,
+            oldEnd,
             issue.suggestion.length
         );
-        currentSnapshot.selectedText = currentSnapshot.selectedText.slice(0, issue.start - currentSnapshot.start) +
-            issue.suggestion + currentSnapshot.selectedText.slice(issue.end - currentSnapshot.start);
-        currentSnapshot.end += issue.suggestion.length - issue.original.length;
+        updateSnapshotAfterReplacement(oldStart, oldEnd, issue.suggestion);
         if (!deferRender) viewIssues();
         return { ok: true };
+    }
+
+    function locateNextPendingIssue(afterId) {
+        var previous = findPendingIssue(afterId);
+        var after = previous ? previous.end : -1;
+        var pending = currentIssues.filter(function (candidate) {
+            return candidate.status === "pending";
+        });
+        pending.sort(function (left, right) { return left.start - right.start; });
+        var following = pending.filter(function (candidate) { return candidate.start >= after; });
+        var ordered = following.concat(pending.filter(function (candidate) {
+            return candidate.start < after;
+        }));
+        for (var index = 0; index < ordered.length; index += 1) {
+            if (locateProofreadingIssue(ordered[index].id)) return true;
+        }
+        if (!ordered.length) setStatus("本轮待处理问题已经处理完成。", "success");
+        return false;
     }
 
     function applyProofreadingIssue(issueId) {
@@ -944,21 +1001,53 @@
             setStatus("这条规则仅用于提醒，没有可自动写入的建议。", "warning");
             return false;
         }
-        if (!currentDocumentMatches(currentSnapshot)) {
-            markAllPendingStale("选区内容已变化，未写入任何建议。请重新校对。");
-            return false;
-        }
-
         try {
             var result = applyOneIssue(issue);
             if (!result.ok) {
                 setStatus("原文已变化，未应用这条建议。请重新校对。", "warning");
                 return false;
             }
-            setStatus("已应用一条建议。其余建议已重新定位，并会在应用前再次核对。", "success");
+            if (locateNextPendingIssue(issue.id)) {
+                setStatus("已应用一条建议，并定位到下一条待处理问题。", "success");
+            }
             return true;
         } catch (error) {
             setStatus("WPS 未能应用这条建议；文档内容未确认改变，请重新校对。", "error");
+            return false;
+        }
+    }
+
+    function undoProofreadingIssue(issueId) {
+        if (busy) {
+            setStatus("校对进行中，请等待完成或先取消。", "warning");
+            return false;
+        }
+        var issue = findPendingIssue(issueId);
+        if (!issue || issue.status !== "accepted") {
+            setStatus("这条建议尚未应用或已失效，无法撤销。", "warning");
+            return false;
+        }
+        try {
+            var range = checkedIssueRange(issue, issue.suggestion);
+            if (!range) {
+                issue.status = "stale";
+                viewIssues();
+                setStatus("正文已变化，无法自动撤销这条修改。请重新校对。", "warning");
+                return false;
+            }
+            var oldStart = issue.start;
+            var oldEnd = issue.end;
+            range.Text = issue.original;
+            recordAction("undone", issue);
+            currentIssues = root.WpsProofreadingCore.shiftIssuesAfterReplacement(
+                currentIssues, issue.id, oldStart, oldEnd, issue.original.length);
+            findPendingIssue(issue.id).status = "pending";
+            updateSnapshotAfterReplacement(oldStart, oldEnd, issue.original);
+            viewIssues();
+            setStatus("已撤销这条修改，建议恢复为待确认。", "success");
+            return true;
+        } catch (error) {
+            setStatus("WPS 未能撤销这条修改，请检查正文后重新校对。", "error");
             return false;
         }
     }
@@ -1039,6 +1128,7 @@
     root.locateProofreadingIssue = locateProofreadingIssue;
     root.ignoreProofreadingIssue = ignoreProofreadingIssue;
     root.applyProofreadingIssue = applyProofreadingIssue;
+    root.undoProofreadingIssue = undoProofreadingIssue;
     root.applyAllProofreadingIssues = applyAllProofreadingIssues;
     root.getWpsProofreadingState = function () {
         return {

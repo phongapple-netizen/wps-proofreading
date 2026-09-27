@@ -34,6 +34,7 @@ function createHarness(options = {}) {
     let documentText = prefix + selectedText + suffix;
     let selectedRange = null;
     let contentReads = 0;
+    const rangeReads = [];
     const storage = new Map();
     storage.set(SETTINGS_KEY, options.seed || JSON.stringify(Object.assign({}, DEFAULT_SETTINGS, {
         deep: options.deep === true
@@ -62,7 +63,10 @@ function createHarness(options = {}) {
             return {
                 Start: rangeStart,
                 End: rangeEnd,
-                get Text() { return documentText.slice(rangeStart, rangeEnd); },
+                get Text() {
+                    rangeReads.push([rangeStart, rangeEnd]);
+                    return documentText.slice(rangeStart, rangeEnd);
+                },
                 set Text(value) {
                     documentText = documentText.slice(0, rangeStart) + String(value) + documentText.slice(rangeEnd);
                 },
@@ -153,6 +157,7 @@ function createHarness(options = {}) {
         prefix,
         suffix,
         get contentReads() { return contentReads; },
+        get rangeReads() { return rangeReads; },
         get selectedRange() { return selectedRange; },
         get storedSettings() { return storage.get(SETTINGS_KEY) || ""; },
         get runtimeEndpoint() { return storage.get(RUNTIME_ENDPOINT_KEY) || ""; },
@@ -323,6 +328,139 @@ test("a changed document is left untouched when an old suggestion is applied", a
     assert.equal(harness.window.applyProofreadingIssue(id), false);
     assert.equal(harness.readDocument(), edited);
     assert.equal(harness.status.tone, "warning");
+});
+
+test("single correction in a long document reads only the issue and short anchors", async () => {
+    const selectedText = Array(180).fill("这是普通正文，用于验证长文档局部校验。").join("\n") +
+        "\n本段有错字。";
+    const harness = createHarness({
+        selectedText,
+        noSelection: true,
+        issues: [{ category: "typo", paragraphIndex: 181, original: "错字",
+            suggestion: "错别字", reason: "错字", confidence: 0.98, needsReview: false }]
+    });
+    await harness.window.runProofreading();
+    const issue = harness.window.getWpsProofreadingState().issues[0];
+    assert.equal(issue.anchorBefore.length <= 40, true);
+    assert.equal(issue.anchorAfter.length <= 40, true);
+    const readsBefore = harness.rangeReads.length;
+    const contentReadsBefore = harness.contentReads;
+
+    assert.equal(harness.window.applyProofreadingIssue(issue.id), true);
+    assert.equal(harness.rangeReads.slice(readsBefore).every(([start, end]) => end - start <= 40), true);
+    assert.equal(harness.contentReads, contentReadsBefore);
+    assert.match(harness.readDocument(), /本段有错别字。/);
+});
+
+test("matching anchors allow a correction and changed nearby text blocks it", async () => {
+    const original = "引言文字。前置说明本段有错字，后置说明请复核。";
+    const before = createHarness({ selectedText: original });
+    await before.window.runProofreading();
+    const beforeIssue = before.window.getWpsProofreadingState().issues[0];
+    assert.match(beforeIssue.anchorBefore, /前置说明本段有/);
+    assert.match(beforeIssue.anchorAfter, /后置说明请复核/);
+    const editedBefore = before.prefix + original.replace("前置", "另有") + before.suffix;
+    before.changeDocument(editedBefore);
+    assert.equal(before.window.applyProofreadingIssue(beforeIssue.id), false);
+    assert.equal(before.readDocument(), editedBefore);
+    assert.equal(before.window.getWpsProofreadingState().issues[0].status, "stale");
+
+    const after = createHarness({ selectedText: original });
+    await after.window.runProofreading();
+    const afterIssue = after.window.getWpsProofreadingState().issues[0];
+    const editedAfter = after.prefix + original.replace("后置", "其他") + after.suffix;
+    after.changeDocument(editedAfter);
+    assert.equal(after.window.applyProofreadingIssue(afterIssue.id), false);
+    assert.equal(after.readDocument(), editedAfter);
+    assert.equal(after.window.getWpsProofreadingState().issues[0].status, "stale");
+
+    const matching = createHarness({ selectedText: original });
+    await matching.window.runProofreading();
+    const matchingIssue = matching.window.getWpsProofreadingState().issues[0];
+    assert.equal(matching.window.applyProofreadingIssue(matchingIssue.id), true);
+    assert.match(matching.readDocument(), /本段有错别字/);
+});
+
+test("correction shifts the next issue, locates it, and undo restores offsets", async () => {
+    const harness = createHarness({
+        selectedText: "这里有错字，那里有误字。",
+        issues: [
+            { category: "typo", paragraphIndex: 1, original: "错字", suggestion: "错别字",
+                reason: "错字", confidence: 0.98, needsReview: false },
+            { category: "typo", paragraphIndex: 1, original: "误字", suggestion: "正确字",
+                reason: "误字", confidence: 0.98, needsReview: false }
+        ]
+    });
+    await harness.window.runProofreading();
+    const initial = harness.window.getWpsProofreadingState().issues;
+    const firstId = initial[0].id;
+    const secondId = initial[1].id;
+    const secondStart = initial[1].start;
+    const readsBefore = harness.rangeReads.length;
+
+    assert.equal(harness.window.applyProofreadingIssue(firstId), true);
+    assert.equal(harness.rangeReads.slice(readsBefore).every(([start, end]) => end - start <= 40), true);
+    let issues = harness.window.getWpsProofreadingState().issues;
+    assert.equal(issues[0].status, "accepted");
+    assert.equal(issues[0].end, issues[0].start + "错别字".length);
+    assert.equal(issues[1].start, secondStart + 1);
+    assert.deepEqual(harness.selectedRange, [issues[1].start, issues[1].end]);
+    assert.match(harness.status.text, /下一条/);
+
+    assert.equal(harness.window.undoProofreadingIssue(firstId), true);
+    issues = harness.window.getWpsProofreadingState().issues;
+    assert.equal(issues[0].status, "pending");
+    assert.equal(issues[1].start, secondStart);
+    assert.equal(harness.readDocument(), harness.prefix + harness.selectedText + harness.suffix);
+    assert.deepEqual(harness.records.map((record) => record.action), ["applied", "undone"]);
+    assert.equal(harness.window.applyProofreadingIssue(secondId), true);
+    assert.deepEqual(harness.selectedRange, [issues[0].start, issues[0].end]);
+});
+
+test("undo rejects manual edits to the accepted text or its anchors", async () => {
+    const harness = createHarness({ selectedText: "前文有错字，后文保留。" });
+    await harness.window.runProofreading();
+    const id = harness.window.getWpsProofreadingState().issues[0].id;
+    assert.equal(harness.window.applyProofreadingIssue(id), true);
+    const edited = harness.readDocument().replace("错别字", "人工字");
+    harness.changeDocument(edited);
+    assert.equal(harness.window.undoProofreadingIssue(id), false);
+    assert.equal(harness.readDocument(), edited);
+    assert.equal(harness.window.getWpsProofreadingState().issues[0].status, "stale");
+
+    const anchorHarness = createHarness({ selectedText: "前文有错字，后文保留。" });
+    await anchorHarness.window.runProofreading();
+    const anchorId = anchorHarness.window.getWpsProofreadingState().issues[0].id;
+    assert.equal(anchorHarness.window.applyProofreadingIssue(anchorId), true);
+    const changedAnchor = anchorHarness.readDocument().replace("后文", "别文");
+    anchorHarness.changeDocument(changedAnchor);
+    assert.equal(anchorHarness.window.undoProofreadingIssue(anchorId), false);
+    assert.equal(anchorHarness.readDocument(), changedAnchor);
+});
+
+test("applying the last pending issue reports completion and remains undoable", async () => {
+    const harness = createHarness();
+    await harness.window.runProofreading();
+    const id = harness.window.getWpsProofreadingState().issues[0].id;
+    assert.equal(harness.window.applyProofreadingIssue(id), true);
+    assert.match(harness.status.text, /待处理问题已经处理完成/);
+    assert.equal(harness.window.undoProofreadingIssue(id), true);
+    assert.equal(harness.window.getWpsProofreadingState().issues[0].status, "pending");
+});
+
+test("a deletion can be undone using its surrounding anchors", async () => {
+    const harness = createHarness({
+        selectedText: "前文有多余词，后文保留。",
+        issues: [{ category: "redundancy", paragraphIndex: 1, original: "多余词",
+            suggestion: "", reason: "冗余", confidence: 0.95, needsReview: false }]
+    });
+    await harness.window.runProofreading();
+    const id = harness.window.getWpsProofreadingState().issues[0].id;
+    assert.equal(harness.window.applyProofreadingIssue(id), true);
+    assert.equal(harness.window.getWpsProofreadingState().issues[0].end,
+        harness.window.getWpsProofreadingState().issues[0].start);
+    assert.equal(harness.window.undoProofreadingIssue(id), true);
+    assert.equal(harness.readDocument(), harness.prefix + harness.selectedText + harness.suffix);
 });
 
 test("edits after the selected range do not invalidate safe positions", async () => {

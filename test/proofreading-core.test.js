@@ -47,6 +47,16 @@ test("applying one finding shifts later findings and invalidates overlaps", () =
     assert.deepEqual([issues[2].start, issues[2].end], [20, 22]);
 });
 
+test("replacement keeps accepted findings positioned for a later undo", () => {
+    const issues = [
+        { id: "earlier", start: 2, end: 4, status: "pending" },
+        { id: "later", start: 10, end: 12, status: "accepted" }
+    ];
+    const updated = core.shiftIssuesAfterReplacement(issues, "earlier", 2, 4, 4);
+    assert.deepEqual([updated[0].start, updated[0].end, updated[0].status], [2, 6, "accepted"]);
+    assert.deepEqual([updated[1].start, updated[1].end, updated[1].status], [12, 14, "accepted"]);
+});
+
 test("Ollama and OpenAI-compatible requests keep credentials out of URLs and bodies", () => {
     const ollama = core.createModelRequest("ollama", "http://127.0.0.1:11434/", "qwen", "secret", "prompt");
     assert.equal(ollama.url, "http://127.0.0.1:11434/api/chat");
