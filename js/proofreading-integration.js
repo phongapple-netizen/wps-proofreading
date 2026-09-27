@@ -23,6 +23,7 @@
 
     function startActionPerf(action) {
         var hostname = root.location && root.location.hostname;
+        if (root.WpsIssueActionPerf === false) return null;
         if (root.WpsIssueActionPerf !== true && hostname !== "127.0.0.1" &&
             hostname !== "localhost" && hostname !== "[::1]") return null;
         return { action: action, started: actionClock(), timings: {
@@ -65,7 +66,8 @@
 
     function nextActionTurn() {
         return new Promise(function (resolve) {
-            (root.setTimeout || setTimeout)(resolve, 0);
+            if (typeof root.setTimeout === "function") root.setTimeout(resolve, 0);
+            else setTimeout(resolve, 0);
         });
     }
 
@@ -114,7 +116,7 @@
 
     function activeDocument(application) {
         try {
-            return application && application.ActiveDocument ? application.ActiveDocument : null;
+            return application ? application.ActiveDocument || null : null;
         } catch (error) {
             return null;
         }
@@ -224,40 +226,37 @@
         }
     }
 
-    function refreshIssueAnchors() {
-        if (!currentSnapshot) return;
-        currentIssues.forEach(function (issue) {
-            var relativeStart = issue.start - currentSnapshot.start;
-            var relativeEnd = issue.end - currentSnapshot.start;
-            if (relativeStart < 0 || relativeEnd > currentSnapshot.selectedText.length) return;
-            var selectedBefore = currentSnapshot.selectedText.slice(
-                Math.max(0, relativeStart - ANCHOR_CHARACTERS), relativeStart);
-            var outsideBefore = relativeStart < ANCHOR_CHARACTERS
-                ? currentSnapshot.prefixText.slice(-(ANCHOR_CHARACTERS - relativeStart))
-                : "";
-            issue.anchorBefore = outsideBefore + selectedBefore;
-            issue.anchorAfter = currentSnapshot.selectedText.slice(
-                relativeEnd, relativeEnd + ANCHOR_CHARACTERS);
-        });
+    function issueContext(issue, expected) {
+        if (!currentSnapshot || !Number.isInteger(issue.start) || !Number.isInteger(issue.end) ||
+            issue.start < 0 || issue.end - issue.start !== expected.length) return null;
+        var relativeStart = issue.start - currentSnapshot.start;
+        var relativeEnd = issue.end - currentSnapshot.start;
+        var snapshotText = currentSnapshot.selectedText;
+        if (relativeStart < 0 || relativeEnd > snapshotText.length ||
+            snapshotText.slice(relativeStart, relativeEnd) !== expected) return null;
+        // Derive only this issue's anchors from trusted snapshot text, never live WPS text.
+        var selectedBefore = snapshotText.slice(Math.max(0, relativeStart - ANCHOR_CHARACTERS), relativeStart);
+        var outsideBefore = relativeStart < ANCHOR_CHARACTERS
+            ? currentSnapshot.prefixText.slice(-(ANCHOR_CHARACTERS - relativeStart)) : "";
+        var before = outsideBefore + selectedBefore;
+        var after = snapshotText.slice(relativeEnd, relativeEnd + ANCHOR_CHARACTERS);
+        if (expected === "" && !before && !after) return null;
+        var start = Math.max(0, issue.start - before.length);
+        var end = Math.min(currentSnapshot.end, issue.end + after.length);
+        return { start: start, end: end, text: before + expected + after };
     }
 
-    function checkedIssueRange(issue, expected, perf) {
-        var document = activeDocument(app());
+    function checkedIssueRange(issue, expected, perf, operationDocument) {
+        var document = operationDocument || activeDocument(app());
         if (!document || !currentSnapshot ||
             documentKey(document) !== currentSnapshot.documentKey) return null;
-        if (issue.start < 0 || issue.end - issue.start !== expected.length) return null;
-        if (expected === "" && !issue.anchorBefore && !issue.anchorAfter) return null;
-        var range = document.Range(issue.start, issue.end);
-        if (actionStage(perf, "rangeRead", function () { return text(range.Text); }) !== expected) return null;
-        var before = issue.anchorBefore || "";
-        var after = issue.anchorAfter || "";
-        if (before && actionStage(perf, "rangeRead", function () {
-            return text(document.Range(issue.start - before.length, issue.start).Text);
-        }) !== before) return null;
-        if (after && actionStage(perf, "rangeRead", function () {
-            return text(document.Range(issue.end, issue.end + after.length).Text);
-        }) !== after) return null;
-        return range;
+        var context = issueContext(issue, expected);
+        if (!context) return null;
+        var contextRange = document.Range(context.start, context.end);
+        if (actionStage(perf, "rangeRead", function () { return text(contextRange.Text); }) !== context.text) return null;
+        // Keep the write/selection Range short-lived; do not reuse it after a write or timer.
+        return context.start === issue.start && context.end === issue.end
+            ? contextRange : document.Range(issue.start, issue.end);
     }
 
     function updateSnapshotAfterReplacement(start, end, replacement) {
@@ -316,7 +315,6 @@
     }
 
     function viewIssues() {
-        refreshIssueAnchors();
         if (typeof root.setProofreadingIssues !== "function") return;
         root.setProofreadingIssues(currentIssues.map(function (issue) {
             return {
@@ -998,10 +996,10 @@
         return true;
     }
 
-    function locateCheckedIssue(issue, perf) {
+    function locateCheckedIssue(issue, perf, operationDocument) {
         try {
             var range = actionStage(perf, "validation", function () {
-                return checkedIssueRange(issue, issue.original, perf);
+                return checkedIssueRange(issue, issue.original, perf, operationDocument);
             });
             if (!range || typeof range.Select !== "function") throw new Error("range-unavailable");
             range.Select();
@@ -1054,7 +1052,8 @@
     function writeIssueReplacement(change, perf) {
         var issue = change.issue;
         var range = actionStage(perf, "validation", function () {
-            return checkedIssueRange(issue, change.expected, perf);
+            try { return checkedIssueRange(issue, change.expected, perf); }
+            catch (error) { return null; }
         });
         if (!range) {
             issue.status = "stale";
@@ -1085,7 +1084,6 @@
         // Publish the shifted coordinates and snapshot together before calling UI code.
         currentIssues = nextIssues;
         currentSnapshot = nextSnapshot;
-        refreshIssueAnchors();
     }
 
     function invalidateWrittenAction(change) {
@@ -1123,8 +1121,10 @@
         var ordered = following.concat(pending.filter(function (candidate) {
             return candidate.start < after;
         }));
+        // Acquire the current document after yielding, then reuse only during this traversal.
+        var operationDocument = ordered.length ? activeDocument(app()) : null;
         for (var index = 0; index < ordered.length; index += 1) {
-            if (locateCheckedIssue(ordered[index], perf)) return { located: true, hadPending: true };
+            if (locateCheckedIssue(ordered[index], perf, operationDocument)) return { located: true, hadPending: true };
         }
         return { located: false, hadPending: ordered.length > 0 };
     }
