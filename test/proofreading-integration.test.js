@@ -35,6 +35,10 @@ function createHarness(options = {}) {
     let selectedRange = null;
     let contentReads = 0;
     const rangeReads = [];
+    const rangeCreations = [];
+    const actionTimers = [];
+    const actionLocks = [];
+    const perfLogs = [];
     const storage = new Map();
     storage.set(SETTINGS_KEY, options.seed || JSON.stringify(Object.assign({}, DEFAULT_SETTINGS, {
         deep: options.deep === true
@@ -60,6 +64,7 @@ function createHarness(options = {}) {
             return { Text: documentText, Start: 0, End: documentText.length };
         },
         Range(rangeStart, rangeEnd) {
+            rangeCreations.push([rangeStart, rangeEnd]);
             return {
                 Start: rangeStart,
                 End: rangeEnd,
@@ -69,8 +74,10 @@ function createHarness(options = {}) {
                 },
                 set Text(value) {
                     documentText = documentText.slice(0, rangeStart) + String(value) + documentText.slice(rangeEnd);
+                    if (options.onWrite) options.onWrite();
                 },
                 Select() {
+                    if (options.onSelect) options.onSelect(rangeStart, rangeEnd);
                     selectedRange = [rangeStart, rangeEnd];
                 }
             };
@@ -148,6 +155,9 @@ function createHarness(options = {}) {
         clearProofreadingIssues: () => { renderedIssues = []; },
         setProofreadingProgress: (percent, label) => { progress.push({ percent, label: label || "" }); },
         setProofreadingBusy: (value) => { busyValue = value === true; },
+        setProofreadingActionBusy: (value) => { actionLocks.push(value); },
+        WpsIssueActionPerf: options.perf === true,
+        console: { info: (label, report) => { perfLogs.push({ label, report }); } },
         pushProofreadingRecord: (record) => { records.push(record); return true; },
         requestFullDocumentConfirmation: (details) => {
             confirmationDetails.push(details);
@@ -163,6 +173,10 @@ function createHarness(options = {}) {
             return false;
         }
     };
+
+    if (options.manualActions) {
+        windowObject.setTimeout = (callback, delay) => { actionTimers.push({ callback, delay }); };
+    }
 
     const context = vm.createContext({ window: windowObject, URL, setTimeout, clearTimeout });
     vm.runInContext(coreSource, context, { filename: "proofreading-core.js" });
@@ -188,6 +202,17 @@ function createHarness(options = {}) {
         suffix,
         get contentReads() { return contentReads; },
         get rangeReads() { return rangeReads; },
+        get rangeCreations() { return rangeCreations; },
+        actionTimers,
+        actionLocks,
+        perfLogs,
+        flushAction: async () => {
+            const timer = actionTimers.shift();
+            assert.ok(timer, "a deferred action timer must be pending");
+            assert.equal(timer.delay, 0);
+            timer.callback();
+            await Promise.resolve();
+        },
         get selectedRange() { return selectedRange; },
         get storedSettings() { return storage.get(SETTINGS_KEY) || ""; },
         get runtimeEndpoint() { return storage.get(RUNTIME_ENDPOINT_KEY) || ""; },
@@ -259,7 +284,7 @@ test("only selected text is sent and a verified suggestion updates the WPS range
     assert.equal(harness.renderedIssues.length, 1);
 
     const id = harness.window.getWpsProofreadingState().issues[0].id;
-    assert.equal(harness.window.applyProofreadingIssue(id), true);
+    assert.equal(await harness.window.applyProofreadingIssue(id), true);
     assert.equal(harness.readDocument(), harness.prefix + "本段有错别字。" + harness.suffix);
     assert.equal(harness.window.getWpsProofreadingState().issues[0].status, "accepted");
 });
@@ -352,6 +377,48 @@ test("a finding can be located and ignored without changing document text", asyn
     assert.equal(harness.window.getWpsProofreadingState().issues[0].status, "ignored");
 });
 
+test("single correction writes immediately and leaves history, coordinates, and rendering to a timer", async () => {
+    const harness = createHarness({ manualActions: true });
+    await harness.window.runProofreading();
+    const issue = harness.window.getWpsProofreadingState().issues[0];
+    const originalSnapshot = harness.window.getWpsProofreadingState().snapshot.selectedText;
+    const initialRender = harness.renderedIssues;
+    const operation = harness.window.applyProofreadingIssue(issue.id);
+
+    assert.match(harness.readDocument(), /错别字/);
+    assert.equal(harness.records.length, 0);
+    assert.equal(harness.renderedIssues, initialRender);
+    assert.equal(harness.window.getWpsProofreadingState().snapshot.selectedText, originalSnapshot);
+    assert.equal(harness.window.getWpsProofreadingState().issues[0].status, "pending");
+    assert.equal(harness.window.getWpsProofreadingState().actionBusy, true);
+    assert.equal(harness.busy, false);
+    await Promise.resolve();
+    assert.equal(harness.records.length, 0, "a microtask must not perform the deferred work");
+    await harness.flushAction();
+    assert.equal(await operation, true);
+    assert.equal(harness.window.getWpsProofreadingState().issues[0].status, "accepted");
+    assert.equal(harness.records.length, 1);
+    assert.equal(harness.window.getWpsProofreadingState().actionBusy, false);
+});
+
+test("rapid correction, undo, locate, and rerun calls cannot use coordinates awaiting finalization", async () => {
+    const harness = createHarness({ manualActions: true });
+    await harness.window.runProofreading();
+    const issue = harness.window.getWpsProofreadingState().issues[0];
+    const operation = harness.window.applyProofreadingIssue(issue.id);
+    const written = harness.readDocument();
+    assert.equal(await harness.window.applyProofreadingIssue(issue.id), false);
+    assert.equal(await harness.window.undoProofreadingIssue(issue.id), false);
+    assert.equal(harness.window.locateProofreadingIssue(issue.id), false);
+    assert.equal(harness.window.ignoreProofreadingIssue(issue.id), false);
+    assert.equal((await harness.window.runProofreading()).reason, "action-busy");
+    assert.equal(harness.window.applyAllProofreadingIssues().applied, 0);
+    assert.equal(harness.readDocument(), written);
+    assert.equal(harness.actionTimers.length, 1);
+    await harness.flushAction();
+    assert.equal(await operation, true);
+});
+
 test("a changed document is left untouched when an old suggestion is applied", async () => {
     const harness = createHarness();
     await harness.window.runProofreading();
@@ -359,7 +426,7 @@ test("a changed document is left untouched when an old suggestion is applied", a
     const edited = harness.prefix + "本段已人工改过。" + harness.suffix;
     harness.changeDocument(edited);
 
-    assert.equal(harness.window.applyProofreadingIssue(id), false);
+    assert.equal(await harness.window.applyProofreadingIssue(id), false);
     assert.equal(harness.readDocument(), edited);
     assert.equal(harness.status.tone, "warning");
 });
@@ -380,7 +447,7 @@ test("single correction in a long document reads only the issue and short anchor
     const readsBefore = harness.rangeReads.length;
     const contentReadsBefore = harness.contentReads;
 
-    assert.equal(harness.window.applyProofreadingIssue(issue.id), true);
+    assert.equal(await harness.window.applyProofreadingIssue(issue.id), true);
     assert.equal(harness.rangeReads.slice(readsBefore).every(([start, end]) => end - start <= 40), true);
     assert.equal(harness.contentReads, contentReadsBefore);
     assert.match(harness.readDocument(), /本段有错别字。/);
@@ -395,7 +462,7 @@ test("matching anchors allow a correction and changed nearby text blocks it", as
     assert.match(beforeIssue.anchorAfter, /后置说明请复核/);
     const editedBefore = before.prefix + original.replace("前置", "另有") + before.suffix;
     before.changeDocument(editedBefore);
-    assert.equal(before.window.applyProofreadingIssue(beforeIssue.id), false);
+    assert.equal(await before.window.applyProofreadingIssue(beforeIssue.id), false);
     assert.equal(before.readDocument(), editedBefore);
     assert.equal(before.window.getWpsProofreadingState().issues[0].status, "stale");
 
@@ -404,14 +471,14 @@ test("matching anchors allow a correction and changed nearby text blocks it", as
     const afterIssue = after.window.getWpsProofreadingState().issues[0];
     const editedAfter = after.prefix + original.replace("后置", "其他") + after.suffix;
     after.changeDocument(editedAfter);
-    assert.equal(after.window.applyProofreadingIssue(afterIssue.id), false);
+    assert.equal(await after.window.applyProofreadingIssue(afterIssue.id), false);
     assert.equal(after.readDocument(), editedAfter);
     assert.equal(after.window.getWpsProofreadingState().issues[0].status, "stale");
 
     const matching = createHarness({ selectedText: original });
     await matching.window.runProofreading();
     const matchingIssue = matching.window.getWpsProofreadingState().issues[0];
-    assert.equal(matching.window.applyProofreadingIssue(matchingIssue.id), true);
+    assert.equal(await matching.window.applyProofreadingIssue(matchingIssue.id), true);
     assert.match(matching.readDocument(), /本段有错别字/);
 });
 
@@ -432,7 +499,7 @@ test("correction shifts the next issue, locates it, and undo restores offsets", 
     const secondStart = initial[1].start;
     const readsBefore = harness.rangeReads.length;
 
-    assert.equal(harness.window.applyProofreadingIssue(firstId), true);
+    assert.equal(await harness.window.applyProofreadingIssue(firstId), true);
     assert.equal(harness.rangeReads.slice(readsBefore).every(([start, end]) => end - start <= 40), true);
     let issues = harness.window.getWpsProofreadingState().issues;
     assert.equal(issues[0].status, "accepted");
@@ -441,13 +508,13 @@ test("correction shifts the next issue, locates it, and undo restores offsets", 
     assert.deepEqual(harness.selectedRange, [issues[1].start, issues[1].end]);
     assert.match(harness.status.text, /下一条/);
 
-    assert.equal(harness.window.undoProofreadingIssue(firstId), true);
+    assert.equal(await harness.window.undoProofreadingIssue(firstId), true);
     issues = harness.window.getWpsProofreadingState().issues;
     assert.equal(issues[0].status, "pending");
     assert.equal(issues[1].start, secondStart);
     assert.equal(harness.readDocument(), harness.prefix + harness.selectedText + harness.suffix);
     assert.deepEqual(harness.records.map((record) => record.action), ["applied", "undone"]);
-    assert.equal(harness.window.applyProofreadingIssue(secondId), true);
+    assert.equal(await harness.window.applyProofreadingIssue(secondId), true);
     assert.deepEqual(harness.selectedRange, [issues[0].start, issues[0].end]);
 });
 
@@ -455,20 +522,20 @@ test("undo rejects manual edits to the accepted text or its anchors", async () =
     const harness = createHarness({ selectedText: "前文有错字，后文保留。" });
     await harness.window.runProofreading();
     const id = harness.window.getWpsProofreadingState().issues[0].id;
-    assert.equal(harness.window.applyProofreadingIssue(id), true);
+    assert.equal(await harness.window.applyProofreadingIssue(id), true);
     const edited = harness.readDocument().replace("错别字", "人工字");
     harness.changeDocument(edited);
-    assert.equal(harness.window.undoProofreadingIssue(id), false);
+    assert.equal(await harness.window.undoProofreadingIssue(id), false);
     assert.equal(harness.readDocument(), edited);
     assert.equal(harness.window.getWpsProofreadingState().issues[0].status, "stale");
 
     const anchorHarness = createHarness({ selectedText: "前文有错字，后文保留。" });
     await anchorHarness.window.runProofreading();
     const anchorId = anchorHarness.window.getWpsProofreadingState().issues[0].id;
-    assert.equal(anchorHarness.window.applyProofreadingIssue(anchorId), true);
+    assert.equal(await anchorHarness.window.applyProofreadingIssue(anchorId), true);
     const changedAnchor = anchorHarness.readDocument().replace("后文", "别文");
     anchorHarness.changeDocument(changedAnchor);
-    assert.equal(anchorHarness.window.undoProofreadingIssue(anchorId), false);
+    assert.equal(await anchorHarness.window.undoProofreadingIssue(anchorId), false);
     assert.equal(anchorHarness.readDocument(), changedAnchor);
 });
 
@@ -476,9 +543,9 @@ test("applying the last pending issue reports completion and remains undoable", 
     const harness = createHarness();
     await harness.window.runProofreading();
     const id = harness.window.getWpsProofreadingState().issues[0].id;
-    assert.equal(harness.window.applyProofreadingIssue(id), true);
+    assert.equal(await harness.window.applyProofreadingIssue(id), true);
     assert.match(harness.status.text, /待处理问题已经处理完成/);
-    assert.equal(harness.window.undoProofreadingIssue(id), true);
+    assert.equal(await harness.window.undoProofreadingIssue(id), true);
     assert.equal(harness.window.getWpsProofreadingState().issues[0].status, "pending");
 });
 
@@ -490,10 +557,10 @@ test("a deletion can be undone using its surrounding anchors", async () => {
     });
     await harness.window.runProofreading();
     const id = harness.window.getWpsProofreadingState().issues[0].id;
-    assert.equal(harness.window.applyProofreadingIssue(id), true);
+    assert.equal(await harness.window.applyProofreadingIssue(id), true);
     assert.equal(harness.window.getWpsProofreadingState().issues[0].end,
         harness.window.getWpsProofreadingState().issues[0].start);
-    assert.equal(harness.window.undoProofreadingIssue(id), true);
+    assert.equal(await harness.window.undoProofreadingIssue(id), true);
     assert.equal(harness.readDocument(), harness.prefix + harness.selectedText + harness.suffix);
 });
 
@@ -503,7 +570,7 @@ test("edits after the selected range do not invalidate safe positions", async ()
     const id = harness.window.getWpsProofreadingState().issues[0].id;
     harness.changeDocument(harness.prefix + harness.selectedText + "新增的文末内容。" );
 
-    assert.equal(harness.window.applyProofreadingIssue(id), true);
+    assert.equal(await harness.window.applyProofreadingIssue(id), true);
     assert.equal(harness.readDocument(), harness.prefix + "本段有错别字。" + "新增的文末内容。");
 });
 
@@ -513,7 +580,7 @@ test("edits before the selected range invalidate old offsets", async () => {
     const id = harness.window.getWpsProofreadingState().issues[0].id;
     harness.changeDocument("机密前文已变化。" + harness.selectedText + harness.suffix);
 
-    assert.equal(harness.window.applyProofreadingIssue(id), false);
+    assert.equal(await harness.window.applyProofreadingIssue(id), false);
     assert.equal(harness.readDocument(), "机密前文已变化。" + harness.selectedText + harness.suffix);
 });
 
@@ -602,7 +669,7 @@ test("issues cannot be applied or ignored while an AI batch is pending", async (
         assert.equal(harness.busy, true);
         const issue = harness.window.getWpsProofreadingState().issues[0];
         assert.ok(issue);
-        assert.equal(harness.window.applyProofreadingIssue(issue.id), false);
+        assert.equal(await harness.window.applyProofreadingIssue(issue.id), false);
         assert.equal(harness.window.ignoreProofreadingIssue(issue.id), false);
         assert.equal(harness.window.applyAllProofreadingIssues().applied, 0);
         assert.equal(harness.readDocument(), harness.prefix + harness.selectedText + harness.suffix);
@@ -707,10 +774,10 @@ test("a legacy parenthesized deletion explanation removes only the original text
     assert.equal(issue.needsReview, true);
     assert.equal(issue.reason.includes("（删除此段错误提示内容）"), true);
 
-    assert.equal(harness.window.applyProofreadingIssue(issue.id), true);
+    assert.equal(await harness.window.applyProofreadingIssue(issue.id), true);
     assert.equal(harness.readDocument(), harness.prefix + harness.suffix);
     assert.equal(harness.readDocument().includes("删除此段错误提示内容"), false);
-    assert.equal(harness.window.undoProofreadingIssue(issue.id), true);
+    assert.equal(await harness.window.undoProofreadingIssue(issue.id), true);
     assert.equal(harness.readDocument(), harness.prefix + errorText + harness.suffix);
 });
 
@@ -734,7 +801,7 @@ test("an ambiguous edit annotation is review-only and does not change the docume
     const before = harness.readDocument();
     assert.equal(issue.actionable, false);
     assert.equal(issue.needsReview, true);
-    assert.equal(harness.window.applyProofreadingIssue(issue.id), false);
+    assert.equal(await harness.window.applyProofreadingIssue(issue.id), false);
     assert.equal(harness.readDocument(), before);
 });
 
@@ -1066,7 +1133,7 @@ test("semantic local rules run before AI and require individual confirmation", a
 
     const applied = harness.window.applyAllProofreadingIssues();
     assert.equal(applied.applied, 0);
-    assert.equal(harness.window.applyProofreadingIssue(issues[0].id), true);
+    assert.equal(await harness.window.applyProofreadingIssue(issues[0].id), true);
     assert.equal(harness.readDocument(), harness.prefix + "请使用新名称开展工作。" + harness.suffix);
 });
 
@@ -1091,7 +1158,7 @@ test("reminder-only rules can be located and ignored but never written", async (
     assert.equal(issue.actionable, false);
     assert.equal(harness.window.locateProofreadingIssue(issue.id), true);
     assert.deepEqual(harness.selectedRange, [issue.start, issue.end]);
-    assert.equal(harness.window.applyProofreadingIssue(issue.id), false);
+    assert.equal(await harness.window.applyProofreadingIssue(issue.id), false);
     assert.equal(harness.readDocument(), harness.prefix + harness.selectedText + harness.suffix);
 
     const batch = harness.window.applyAllProofreadingIssues();
@@ -1278,7 +1345,7 @@ test("AI-confirmed review rules become one applyable finding with rule provenanc
     assert.equal(batch.skipped, 1);
     assert.equal(harness.readDocument(), before);
 
-    assert.equal(harness.window.applyProofreadingIssue(issues[0].id), true);
+    assert.equal(await harness.window.applyProofreadingIssue(issues[0].id), true);
     assert.equal(harness.readDocument(), harness.prefix +
         "检查发现企业存在高处作业管理不到位问题。" + harness.suffix);
 });
@@ -1318,6 +1385,6 @@ test("AI review action stays non-writable when mapped to a matching review rule"
     assert.equal(issue.action, "review");
     assert.equal(issue.needsReview, true);
     assert.equal(issue.actionable, false);
-    assert.equal(harness.window.applyProofreadingIssue(issue.id), false);
+    assert.equal(await harness.window.applyProofreadingIssue(issue.id), false);
     assert.equal(harness.readDocument(), before);
 });

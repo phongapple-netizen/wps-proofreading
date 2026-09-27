@@ -384,6 +384,119 @@ test('issue cards locate on body click, keep buttons independent, and offer undo
   assert.equal(calls.length, 4);
 });
 
+test('action busy locks issue controls without rebuilding cards and catches rejected actions safely', async () => {
+  function element(tag) {
+    const node = { tag, children: [], parent: null, listeners: {}, disabled: false };
+    node.appendChild = (child) => { child.parent = node; node.children.push(child); return child; };
+    node.setAttribute = () => {};
+    node.addEventListener = (type, fn) => { (node.listeners[type] = node.listeners[type] || []).push(fn); };
+    node.fire = (type) => {
+      let stopped = false;
+      const event = { stopPropagation() { stopped = true; } };
+      let current = node;
+      while (current && !stopped) {
+        (current.listeners[type] || []).forEach((fn) => fn(event));
+        current = current.parent;
+      }
+    };
+    Object.defineProperty(node, 'textContent', {
+      get() { return node.value || ''; },
+      set(value) { node.value = value; node.children = []; }
+    });
+    return node;
+  }
+
+  const list = element('section');
+  const empty = element('p');
+  const controls = {};
+  ['run-proofreading', 'rerun-proofreading', 'apply-all', 'model-provider', 'rules-toggle']
+    .forEach((id) => { controls[id] = element('button'); });
+  const elements = Object.assign({
+    'proofreading-issues': list,
+    'empty-state': empty
+  }, controls);
+  const calls = [];
+  let applyResult = true;
+  const win = {
+    document: {
+      readyState: 'loading',
+      getElementById: (id) => elements[id] || null,
+      createElement: element,
+      addEventListener() {}
+    },
+    locateProofreadingIssue: (id) => { calls.push(['locate', id]); return true; },
+    applyProofreadingIssue: (id) => { calls.push(['apply', id]); return applyResult; },
+    undoProofreadingIssue: (id) => { calls.push(['undo', id]); return true; },
+    ignoreProofreadingIssue: (id) => { calls.push(['ignore', id]); return true; }
+  };
+  loadBrowserScript('js/taskpane.js', win);
+  win.setProofreadingIssues([
+    { id: 'pending', category: 'typo', original: '错字', suggestion: '正字', status: 'pending' },
+    { id: 'accepted', category: 'typo', original: '原字', suggestion: '新字', status: 'accepted' },
+    { id: 'stale', category: 'typo', original: '旧字', suggestion: '正字', status: 'stale' },
+    { id: 'review', category: 'wording', original: '待核对', suggestion: '规范写法',
+      status: 'pending', actionable: false },
+    { id: 'autofix', category: 'punctuation', original: '，', suggestion: '。', status: 'pending',
+      autoFixable: true, confidence: 0.95 }
+  ]);
+
+  const cardsBeforeLock = list.children.slice();
+  const pendingActions = cardsBeforeLock[0].children[0].children[1].children;
+  const acceptedActions = cardsBeforeLock[1].children[0].children[1].children;
+  const staleActions = cardsBeforeLock[2].children[0].children[1].children;
+  const reviewActions = cardsBeforeLock[3].children[0].children[1].children;
+
+  assert.equal(typeof win.setProofreadingActionBusy, 'function');
+  assert.equal(controls['run-proofreading'].disabled, false);
+  assert.equal(controls['rerun-proofreading'].disabled, false);
+  assert.equal(controls['apply-all'].disabled, false);
+  assert.equal(controls['model-provider'].disabled, false);
+  assert.equal(controls['rules-toggle'].disabled, false);
+
+  win.setProofreadingActionBusy(true);
+  assert.equal(list.children[0], cardsBeforeLock[0]);
+  assert.equal(controls['run-proofreading'].disabled, true);
+  assert.equal(controls['rerun-proofreading'].disabled, true);
+  assert.equal(controls['apply-all'].disabled, true);
+  assert.equal(controls['model-provider'].disabled, false);
+  assert.equal(controls['rules-toggle'].disabled, false);
+  [pendingActions, acceptedActions, staleActions, reviewActions].forEach((actions) => {
+    Array.from(actions).forEach((button) => assert.equal(button.disabled, true));
+  });
+  cardsBeforeLock[0].fire('click');
+  pendingActions[0].fire('click');
+  pendingActions[1].fire('click');
+  pendingActions[2].fire('click');
+  assert.deepEqual(calls, []);
+
+  win.setProofreadingActionBusy(false);
+  assert.equal(list.children[0], cardsBeforeLock[0]);
+  assert.equal(controls['run-proofreading'].disabled, false);
+  assert.equal(controls['rerun-proofreading'].disabled, false);
+  assert.equal(controls['apply-all'].disabled, false);
+  assert.equal(pendingActions[0].disabled, false);
+  assert.equal(pendingActions[1].disabled, false);
+  assert.equal(pendingActions[2].disabled, false);
+  assert.equal(acceptedActions[0].disabled, true);
+  assert.equal(acceptedActions[1].disabled, false);
+  assert.equal(acceptedActions[2].disabled, true);
+  assert.equal(staleActions[0].disabled, true);
+  assert.equal(staleActions[1].disabled, true);
+  assert.equal(staleActions[2].disabled, true);
+  assert.equal(reviewActions[0].disabled, false);
+  assert.equal(reviewActions[1].disabled, true);
+  assert.equal(reviewActions[2].disabled, false);
+
+  cardsBeforeLock[0].fire('click');
+  assert.deepEqual(calls, [['locate', 'pending']]);
+
+  applyResult = Promise.reject(new Error('正文内容不应出现在错误提示中'));
+  pendingActions[1].fire('click');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls.at(-1)[0], 'apply');
+  assert.equal(win.getProofreadingStatus().text.includes('正文内容不应出现在错误提示中'), false);
+});
+
 test('settings form persists safe settings while provider secrets stay memory-only', () => {
   function makeField(value) {
     return {
