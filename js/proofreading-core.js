@@ -952,10 +952,10 @@
         return (issues || []).map(function (issue) {
             var updated = Object.assign({}, issue);
             if (updated.id === acceptedId) {
+                updated.end = updated.start + replacementLength;
                 updated.status = "accepted";
                 return updated;
             }
-            if (updated.status !== "pending") return updated;
             if (updated.start >= oldEnd) {
                 updated.start += delta;
                 updated.end += delta;

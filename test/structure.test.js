@@ -260,6 +260,73 @@ test('history records are deduplicated per run id', () => {
   assert.equal(win.pushProofreadingRecord(Object.assign({ runId: 1 }, record)), true);
   assert.equal(win.pushProofreadingRecord(Object.assign({ runId: 1 }, record)), false);
   assert.equal(win.pushProofreadingRecord(Object.assign({ runId: 2 }, record)), true);
+  assert.equal(win.pushProofreadingRecord(Object.assign({}, record,
+    { runId: 1, action: 'undone', operationId: 1 })), true);
+  assert.equal(win.pushProofreadingRecord(Object.assign({}, record,
+    { runId: 1, action: 'applied', operationId: 2 })), true);
+});
+
+test('issue cards locate on body click, keep buttons independent, and offer undo after apply', () => {
+  function element(tag) {
+    const node = { tag, children: [], parent: null, listeners: {}, disabled: false };
+    node.appendChild = (child) => { child.parent = node; node.children.push(child); return child; };
+    node.setAttribute = () => {};
+    node.addEventListener = (type, fn) => { (node.listeners[type] = node.listeners[type] || []).push(fn); };
+    node.fire = (type) => {
+      let stopped = false;
+      const event = { stopPropagation() { stopped = true; } };
+      let current = node;
+      while (current && !stopped) {
+        (current.listeners[type] || []).forEach((fn) => fn(event));
+        current = current.parent;
+      }
+    };
+    Object.defineProperty(node, 'textContent', {
+      get() { return node.value || ''; },
+      set(value) { node.value = value; node.children = []; }
+    });
+    return node;
+  }
+  const list = element('section');
+  const empty = element('p');
+  const calls = [];
+  const win = {
+    document: {
+      readyState: 'loading',
+      getElementById: (id) => ({ 'proofreading-issues': list, 'empty-state': empty })[id] || null,
+      createElement: element,
+      addEventListener() {}
+    },
+    locateProofreadingIssue: (id) => { calls.push(['locate', id]); return true; },
+    applyProofreadingIssue: (id) => { calls.push(['apply', id]); return true; },
+    undoProofreadingIssue: (id) => { calls.push(['undo', id]); return true; }
+  };
+  loadBrowserScript('js/taskpane.js', win);
+  win.setProofreadingIssues([
+    { id: 'pending', category: 'typo', original: '错字', suggestion: '正字',
+      status: 'pending', reason: '需要核对' },
+    { id: 'accepted', category: 'typo', original: '原字', suggestion: '新字',
+      status: 'accepted' },
+    { id: 'stale', category: 'typo', original: '旧字', suggestion: '正字',
+      status: 'stale' }
+  ]);
+  const [pending, accepted, stale] = list.children;
+  pending.fire('click');
+  assert.deepEqual(calls, [['locate', 'pending']]);
+  pending.children[0].children[1].children[0].fire('click');
+  assert.deepEqual(calls, [['locate', 'pending'], ['locate', 'pending']]);
+  pending.children[0].children[1].children[1].fire('click');
+  assert.deepEqual(calls.at(-1), ['apply', 'pending']);
+  const analysis = pending.children.find((child) => child.tag === 'details');
+  analysis.children[0].fire('click');
+  assert.equal(calls.length, 3);
+  const undo = accepted.children[0].children[1].children[1];
+  assert.equal(undo.textContent, '撤销');
+  assert.equal(undo.disabled, false);
+  undo.fire('click');
+  assert.deepEqual(calls.at(-1), ['undo', 'accepted']);
+  stale.fire('click');
+  assert.equal(calls.length, 4);
 });
 
 test('settings form persists safe settings while provider secrets stay memory-only', () => {

@@ -467,6 +467,10 @@ h2 {
     background: #ffffff;
 }
 
+.issue-card.is-locatable {
+    cursor: pointer;
+}
+
 .issue-card-header {
     display: flex;
     align-items: center;
