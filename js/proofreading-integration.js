@@ -29,7 +29,8 @@
         return { action: action, started: actionClock(), timings: {
             issueLookup: 0, validation: 0, rangeRead: 0, write: 0,
             stateShift: 0, snapshotUpdate: 0, historyRecord: 0,
-            render: 0, locateNext: 0, writeComplete: 0, deferredDelay: 0
+            render: 0, locateNext: 0, writeComplete: 0, deferredDelay: 0,
+            postWriteVerification: 0
         } };
     }
 
@@ -243,14 +244,20 @@
         if (expected === "" && !before && !after) return null;
         var start = Math.max(0, issue.start - before.length);
         var end = Math.min(currentSnapshot.end, issue.end + after.length);
-        return { start: start, end: end, text: before + expected + after };
+        return {
+            start: start,
+            end: end,
+            before: before,
+            after: after,
+            text: before + expected + after
+        };
     }
 
-    function checkedIssueRange(issue, expected, perf, operationDocument) {
+    function checkedIssueRange(issue, expected, perf, operationDocument, contextOverride) {
         var document = operationDocument || activeDocument(app());
         if (!document || !currentSnapshot ||
             documentKey(document) !== currentSnapshot.documentKey) return null;
-        var context = issueContext(issue, expected);
+        var context = contextOverride || issueContext(issue, expected);
         if (!context) return null;
         var contextRange = document.Range(context.start, context.end);
         if (actionStage(perf, "rangeRead", function () { return text(contextRange.Text); }) !== context.text) return null;
@@ -1051,14 +1058,26 @@
 
     function writeIssueReplacement(change, perf) {
         var issue = change.issue;
+        var context;
         var range = actionStage(perf, "validation", function () {
-            try { return checkedIssueRange(issue, change.expected, perf); }
+            try {
+                context = issueContext(issue, change.expected);
+                return checkedIssueRange(issue, change.expected, perf, null, context);
+            }
             catch (error) { return null; }
         });
         if (!range) {
             issue.status = "stale";
             return false;
         }
+        // Keep only immutable snapshot-derived data across the deferred turn.
+        // Never carry a WPS Range past the synchronous write.
+        change.documentKey = currentSnapshot.documentKey;
+        change.contextStart = context.start;
+        change.contextEnd = context.end;
+        change.before = context.before;
+        change.after = context.after;
+        change.delta = change.replacement.length - change.expected.length;
         change.start = issue.start;
         change.end = issue.end;
         change.attempted = true;
@@ -1089,12 +1108,36 @@
     function invalidateWrittenAction(change) {
         currentSnapshot = null;
         currentIssues = currentIssues.map(function (issue) {
-            if (change.written && change.action === "applied" && issue.id === change.issue.id) {
+            if (change.postWriteVerified === true && change.written &&
+                change.action === "applied" && issue.id === change.issue.id) {
                 return Object.assign({}, issue, {
                     status: "accepted", start: change.start, end: change.start + change.replacement.length
                 });
             }
             return Object.assign({}, issue, { status: "stale" });
+        });
+    }
+
+    function verifyWrittenChange(change, perf) {
+        return actionStage(perf, "postWriteVerification", function () {
+            try {
+                var document = activeDocument(app());
+                if (!document || !change.documentKey ||
+                    documentKey(document) !== change.documentKey) return false;
+                var contextEnd = change.contextEnd + change.delta;
+                if (!Number.isInteger(change.contextStart) || !Number.isInteger(contextEnd) ||
+                    contextEnd < change.contextStart) return false;
+                var contextText = change.before + change.replacement + change.after;
+                // An empty context cannot distinguish an intact deletion from native undo.
+                if (!contextText) return false;
+                var contextRange = document.Range(change.contextStart, contextEnd);
+                var actualText = actionStage(perf, "rangeRead", function () {
+                    return text(contextRange.Text);
+                });
+                return actualText === contextText;
+            } catch (error) {
+                return false;
+            }
         });
     }
 
@@ -1160,6 +1203,19 @@
             // A timer (not a microtask) releases the synchronous WPS/UI call stack.
             await nextActionTurn();
             if (perf) perf.timings.deferredDelay = actionClock() - writtenAt;
+            if (!verifyWrittenChange(change, perf)) {
+                // The document may have been edited, undone, switched, or become
+                // unreadable while the WPS call stack was yielded. Do not publish
+                // shifted state or record a normal action without this proof.
+                invalidateWrittenAction(change);
+                try { actionStage(perf, "render", viewIssues); }
+                catch (renderError) { /* Keep the invalidated state even if UI fails. */ }
+                outcome = "post-write-changed";
+                try { setStatus("正文在写入后发生变化，请重新校对。", "warning"); }
+                catch (statusError) { /* UI errors must not revive the action. */ }
+                return false;
+            }
+            change.postWriteVerified = true;
             completeIssueReplacement(change, perf);
             committed = true;
             var warning = false;
@@ -1185,19 +1241,26 @@
             return true;
         } catch (error) {
             if (change && change.attempted) {
+                var postWriteUnverified = change.written === true && change.postWriteVerified !== true;
                 if (!committed) invalidateWrittenAction(change);
-                if (change.written && !committed) {
+                if (change.written && !committed && change.postWriteVerified === true) {
                     try { actionStage(perf, "historyRecord", function () { recordAction(change.action, change.issue); }); }
                     catch (historyError) { /* Keep the write result even when the history UI fails. */ }
                 }
                 try { actionStage(perf, "render", viewIssues); } catch (renderError) { /* Backend state stays safe. */ }
-                outcome = change.written ? "written-state-invalidated" : "write-unconfirmed";
-                setStatus(change.written
-                    ? "正文修改已完成，但坐标收尾失败，后续修改已停止。请重新校对。"
-                    : "WPS 未能确认写入结果，请检查正文并重新校对。", "warning");
-                return change.written === true;
+                outcome = postWriteUnverified ? "post-write-changed"
+                    : change.written ? "written-state-invalidated" : "write-unconfirmed";
+                try {
+                    setStatus(postWriteUnverified
+                        ? "正文在写入后发生变化，请重新校对。"
+                        : change.written
+                            ? "正文修改已完成，但坐标收尾失败，后续修改已停止。请重新校对。"
+                            : "WPS 未能确认写入结果，请检查正文并重新校对。", "warning");
+                } catch (statusError) { /* Do not let UI failure alter the safe state. */ }
+                return postWriteUnverified ? false : change.written === true;
             }
-            setStatus("WPS 未能验证这条修改，文档没有写入。请重新校对。", "warning");
+            try { setStatus("WPS 未能验证这条修改，文档没有写入。请重新校对。", "warning"); }
+            catch (statusError) { /* UI errors must not escape the operation. */ }
             return false;
         } finally {
             if (locked) setIssueActionBusy(false);

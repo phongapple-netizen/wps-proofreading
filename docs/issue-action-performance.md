@@ -11,13 +11,17 @@
 
 单次操作应固定输出以下 timing 字段：
 
-`issueLookup`、`validation`、`rangeRead`、`write`、`stateShift`、`snapshotUpdate`、`historyRecord`、`render`、`locateNext`、`writeComplete`、`deferredDelay`、`total`。
+`issueLookup`、`validation`、`rangeRead`、`write`、`postWriteVerification`、`stateShift`、`snapshotUpdate`、`historyRecord`、`render`、`locateNext`、`writeComplete`、`deferredDelay`、`total`。
 
-字段含义按操作实际覆盖范围解释：`validation` 包含其中的 `rangeRead`；`locateNext` 包含定位下一条问题时的校验。阶段存在嵌套时不把子阶段再次加到父阶段，`total` 以整次操作的起止时间为准，避免重复计算。
+字段含义按操作实际覆盖范围解释：`validation` 包含其中的 `rangeRead`；`postWriteVerification` 是计时器恢复后对同文档及 before + replacement + after 的一次短上下文复核，也包含其中的 `rangeRead`；`locateNext` 包含定位下一条问题时的校验。`rangeRead` 汇总这些阶段的读取时间。阶段存在嵌套时不把子阶段再次加到父阶段，`total` 以整次操作的起止时间为准，避免重复计算。
 
 `writeComplete` 表示操作开始到同步写回结束的时间；`deferredDelay` 表示同步写回结束到计时器恢复收尾之间的等待时间。`setTimeout(0)` 只能让出事件循环，不能证明 WPS 已完成绘制；正文是否可见必须在真实 WPS 窗口中目测或录屏确认。
 
 诊断实现不得长期缓存 WPS `Range` 对象。每次写回仍需重新校验原文和锚点，安全拒绝时不得写入。
+
+写入前仍只做一次上下文读取；额外的一次写后复核发生在让出事件循环之后、坐标/snapshot/历史正式更新之前。若用户在此期间原生撤销、修改附近正文或切换文档，复核失败会清空 snapshot、将问题设为 stale，不记录为正常完成，也不自动定位下一条。不会自动覆盖用户的原生编辑。
+
+全文删除后若没有任何前后文，零长度 Range 的空文本不能证明删除结果仍然存在。这种无法复核的情况保守显示需重查。
 
 ## 真实 WPS 验收
 
@@ -32,6 +36,7 @@
 | 多 stale next | 修改正文使下一条建议失效，再继续定位或修正 | 安全拒绝失效建议，不写入其他位置，状态明确 |
 | 安全拒绝 | 先人工改动原文或锚点，再点击修正/撤销 | 拒绝写回，正文保持人工修改，记录拒绝结果 |
 | 连点 | 快速连续点击修正、撤销或定位 | 只有一次有效操作；按钮锁定期间不重复写入或发起重复定位 |
+| 原生编辑竞态 | 写入后立刻 Ctrl+Z、修改附近正文或切换文档；修正和撤销各验证一次 | 写后复核拒绝正常提交，问题显示需重查，没有新的成功历史或下一条定位 |
 | 撤销 | 修正后点击撤销 | 原文恢复，历史记录完整，撤销也只完成一次 |
 
 验收目标是：可见反馈小于 300ms、单次总操作小于 500ms；Mac mini 2014 可放宽到小于 1s。这些是验收目标，不是本文件已完成的实测结果。真实 Windows WPS、macOS WPS 和 Mac mini 2014 的点击到正文可见、总操作以及上述边界用例仍需现场验证。
@@ -39,3 +44,5 @@
 ## 结果记录
 
 每个平台至少保留一条成功修正、一条撤销和一条安全拒绝记录，附性能输出与正文可见证据。性能日志不能代替正文结果确认；如果计时达标但正文没有在 WPS 中显示，仍视为未通过。
+
+大量问题时，还需单独观察写入前操作锁更新按钮的开销。目前按钮禁用仍有 O(n) DOM 更新；本次竞态补丁不改变此非阻塞项。

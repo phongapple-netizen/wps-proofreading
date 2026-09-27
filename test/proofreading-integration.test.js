@@ -443,6 +443,114 @@ function twoIssueHarness(options = {}) {
     }, options));
 }
 
+async function startDeferredReplacement(undo) {
+    const harness = twoIssueHarness({ manualActions: true, perf: true });
+    await harness.window.runProofreading();
+    const id = harness.window.getWpsProofreadingState().issues[0].id;
+    if (undo) {
+        const apply = harness.window.applyProofreadingIssue(id);
+        await harness.flushAction();
+        assert.equal(await apply, true);
+    }
+    const bodyBeforeWrite = harness.readDocument();
+    const recordsBefore = harness.records.length;
+    const selectedBefore = harness.selectedRange;
+    const operation = undo ? harness.window.undoProofreadingIssue(id) : harness.window.applyProofreadingIssue(id);
+    assert.notEqual(harness.readDocument(), bodyBeforeWrite, "the synchronous write must still happen before yielding");
+    assert.equal(harness.records.length, recordsBefore);
+    return { harness, operation, bodyBeforeWrite, recordsBefore, selectedBefore };
+}
+
+async function assertPostWriteRejected(pending) {
+    const { harness, operation, recordsBefore, selectedBefore } = pending;
+    const liveText = harness.readDocument();
+    await harness.flushAction();
+    assert.equal(await operation, false);
+    const state = harness.window.getWpsProofreadingState();
+    assert.equal(state.snapshot, null);
+    assert.equal(state.issues.every(issue => issue.status === "stale"), true);
+    assert.equal(state.actionBusy, false);
+    assert.equal(harness.records.length, recordsBefore, "must not record a normal applied/undone action");
+    assert.deepEqual(harness.selectedRange, selectedBefore, "must not locate another issue after a failed post-write check");
+    assert.equal(harness.readDocument(), liveText, "must not overwrite the user's native edit");
+    assert.match(harness.status.text, /正文在写入后发生变化/);
+    assert.equal(harness.perfLogs.at(-1).report.outcome, "post-write-changed");
+    assert.equal(await harness.window.applyProofreadingIssue(state.issues[1].id), false);
+    assert.equal(await harness.window.undoProofreadingIssue(state.issues[0].id), false);
+    assert.equal(harness.readDocument(), liveText);
+}
+
+test("native Ctrl+Z before deferred finalization cannot commit a correction or undo as completed", async () => {
+    for (const undo of [false, true]) {
+        const pending = await startDeferredReplacement(undo);
+        pending.harness.changeDocument(pending.bodyBeforeWrite);
+        await assertPostWriteRejected(pending);
+    }
+});
+
+test("native edits to nearby context before deferred finalization invalidate correction and undo", async () => {
+    for (const undo of [false, true]) {
+        const pending = await startDeferredReplacement(undo);
+        const harness = pending.harness;
+        harness.changeDocument(harness.readDocument().replace("这里", "此处"));
+        if (undo) {
+            harness.window.setProofreadingIssues = () => { throw new Error("render failed after native edit"); };
+        }
+        await assertPostWriteRejected(pending);
+    }
+});
+
+test("switching ActiveDocument before deferred finalization invalidates correction and undo without reading the new document", async () => {
+    for (const undo of [false, true]) {
+        const pending = await startDeferredReplacement(undo);
+        let rangeCalls = 0;
+        pending.harness.window.Application.ActiveDocument = {
+            FullName: "C:\\temp\\新文档.docx",
+            Range() { rangeCalls++; throw new Error("must not inspect or select a different document"); }
+        };
+        await assertPostWriteRejected(pending);
+        assert.equal(rangeCalls, 0);
+    }
+});
+
+test("post-write COM failures cannot publish a successful correction or undo", async () => {
+    for (const undo of [false, true]) {
+        const pending = await startDeferredReplacement(undo);
+        pending.harness.window.Application.ActiveDocument.Range = () => { throw new Error("post-write read failed"); };
+        await assertPostWriteRejected(pending);
+    }
+    const harness = twoIssueHarness({ manualActions: true });
+    await harness.window.runProofreading();
+    const id = harness.window.getWpsProofreadingState().issues[0].id;
+    harness.window.setTimeout = () => { throw new Error("timer unavailable after write"); };
+    assert.equal(await harness.window.applyProofreadingIssue(id), false);
+    assert.match(harness.readDocument(), /错别字/);
+    assert.equal(harness.window.getWpsProofreadingState().snapshot, null);
+    assert.equal(harness.window.getWpsProofreadingState().issues.every(issue => issue.status === "stale"), true);
+    assert.equal(harness.records.length, 0);
+    assert.equal(harness.window.getWpsProofreadingState().actionBusy, false);
+});
+
+test("an empty post-write context cannot falsely verify deletion of a whole document", async () => {
+    for (const nativeUndo of [false, true]) {
+        const harness = createHarness({ manualActions: true, prefix: "", suffix: "", noSelection: true,
+            selectedText: "多余内容", issues: [{ category: "redundancy", paragraphIndex: 1,
+                original: "多余内容", action: "delete", suggestion: "", reason: "应删除",
+                confidence: 0.99, needsReview: false }] });
+        await harness.window.runProofreading();
+        const id = harness.window.getWpsProofreadingState().issues[0].id;
+        const operation = harness.window.applyProofreadingIssue(id);
+        assert.equal(harness.readDocument(), "");
+        if (nativeUndo) harness.changeDocument("多余内容");
+        await harness.flushAction();
+        assert.equal(await operation, false, "zero-length context cannot prove an empty deletion result still exists");
+        assert.equal(harness.window.getWpsProofreadingState().snapshot, null);
+        assert.equal(harness.window.getWpsProofreadingState().issues[0].status, "stale");
+        assert.equal(harness.records.length, 0);
+        assert.equal(harness.readDocument(), nativeUndo ? "多余内容" : "");
+    }
+});
+
 test("a second rapid click is blocked until shifted coordinates are published, then can be retried safely", async () => {
     const harness = twoIssueHarness({ manualActions: true });
     await harness.window.runProofreading();
@@ -509,8 +617,9 @@ test("context validation clamps safely at the beginning and end of a full docume
         const readsBefore = harness.rangeReads.length;
         assert.equal(await harness.window.applyProofreadingIssue(issue.id), true);
         const reads = harness.rangeReads.slice(readsBefore);
-        assert.equal(reads.length, 1);
+        assert.equal(reads.length, 2, "pre-write validation and deferred post-write verification");
         assert.equal(reads[0][0] >= 0 && reads[0][1] <= selectedText.length, true);
+        assert.equal(reads[1][0] >= 0 && reads[1][1] <= selectedText.length + 1, true);
         assert.equal(harness.readDocument(), selectedText.replace("错字", "错别字"));
         assert.equal(await harness.window.undoProofreadingIssue(issue.id), true);
         assert.equal(harness.readDocument(), selectedText);
@@ -567,7 +676,7 @@ test("next location checks stale candidates safely and renders the list only onc
     const next = issues.find(issue => issue.id === third.id);
     assert.deepEqual(harness.selectedRange, [next.start, next.end]);
     assert.equal(renders, 1, "failed candidates must not trigger individual full renders");
-    assert.equal(harness.rangeReads.length - readsBefore, 3);
+    assert.equal(harness.rangeReads.length - readsBefore, 4, "pre-write, deferred verification, and two next candidates");
     assert.equal(harness.readDocument(), edited.replace("错字", "错字改"));
     assert.equal(await harness.window.applyProofreadingIssue(second.id), false);
 });
@@ -583,9 +692,12 @@ test("automatic location acquires the current document after the timer instead o
         Range() { rangeCalls++; throw new Error("must not select a different document"); }
     };
     await harness.flushAction();
-    assert.equal(await operation, true);
+    assert.equal(await operation, false);
     assert.equal(rangeCalls, 0);
     assert.equal(harness.selectedRange, null);
+    assert.equal(harness.records.length, 0);
+    assert.equal(harness.window.getWpsProofreadingState().snapshot, null);
+    assert.equal(harness.window.getWpsProofreadingState().issues[0].status, "stale");
     assert.equal(harness.window.getWpsProofreadingState().issues[1].status, "stale");
 });
 
@@ -669,7 +781,7 @@ test("development performance diagnostics contain only fixed labels and numeric 
     const log = harness.perfLogs[0];
     assert.equal(log.label, "applyIssue perf:");
     assert.equal(log.report.outcome, "completed");
-    for (const field of ["issueLookup", "validation", "rangeRead", "write", "stateShift", "snapshotUpdate",
+    for (const field of ["issueLookup", "validation", "rangeRead", "write", "postWriteVerification", "stateShift", "snapshotUpdate",
         "historyRecord", "render", "locateNext", "writeComplete", "deferredDelay", "total"]) {
         assert.equal(typeof log.report[field], "number", field);
         assert.equal(Number.isFinite(log.report[field]) && log.report[field] >= 0, true, field);
@@ -712,6 +824,7 @@ test("single correction validates a long document with one bounded context Text 
         "\n本段有错字。";
     const harness = createHarness({
         selectedText,
+        manualActions: true,
         noSelection: true,
         issues: [{ category: "typo", paragraphIndex: 181, original: "错字",
             suggestion: "错别字", reason: "错字", confidence: 0.98, needsReview: false }]
@@ -724,11 +837,16 @@ test("single correction validates a long document with one bounded context Text 
     const creationsBefore = harness.rangeCreations.length;
     const contentReadsBefore = harness.contentReads;
 
-    assert.equal(await harness.window.applyProofreadingIssue(issue.id), true);
+    const operation = harness.window.applyProofreadingIssue(issue.id);
+    assert.equal(harness.rangeReads.length - readsBefore, 1, "only one context read before yielding");
+    assert.equal(harness.rangeCreations.length - creationsBefore, 2, "context plus short-lived write Range before yielding");
+    await harness.flushAction();
+    assert.equal(await operation, true);
     const reads = harness.rangeReads.slice(readsBefore);
-    assert.equal(reads.length, 1, "original and both anchors must be read together");
+    assert.equal(reads.length, 2, "one pre-write read plus one deferred verification read");
     assert.equal(reads[0][1] - reads[0][0] <= 80 + issue.original.length, true);
-    assert.equal(harness.rangeCreations.length - creationsBefore, 2, "context plus short-lived write Range");
+    assert.equal(reads[1][1] - reads[1][0] <= 80 + issue.suggestion.length, true);
+    assert.equal(harness.rangeCreations.length - creationsBefore, 3);
     assert.equal(harness.contentReads, contentReadsBefore);
     assert.match(harness.readDocument(), /本段有错别字。/);
 });
@@ -778,7 +896,7 @@ test("correction shifts the next issue, locates it, and undo restores offsets", 
     const readsBefore = harness.rangeReads.length;
 
     assert.equal(await harness.window.applyProofreadingIssue(firstId), true);
-    assert.equal(harness.rangeReads.length - readsBefore, 2, "one context read for write and one for next location");
+    assert.equal(harness.rangeReads.length - readsBefore, 3, "pre-write, deferred verification, and next location");
     assert.equal(harness.rangeReads.slice(readsBefore).every(([start, end]) => end - start <= 83), true);
     let issues = harness.window.getWpsProofreadingState().issues;
     assert.equal(issues[0].status, "accepted");
