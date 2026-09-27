@@ -191,6 +191,15 @@
                 <button id="run-proofreading" class="button button-primary" type="button">开始校对</button>
                 <button id="cancel-proofreading" class="button button-danger" type="button" hidden disabled>取消</button>
             </div>
+            <div id="full-document-confirmation" class="full-document-confirmation" role="group"
+                 aria-labelledby="full-document-confirmation-title" hidden>
+                <p id="full-document-confirmation-title" class="full-document-confirmation-title">确认校对全文</p>
+                <p id="full-document-confirmation-message" class="full-document-confirmation-message"></p>
+                <div class="full-document-confirmation-actions">
+                    <button id="confirm-full-document" class="button button-primary" type="button">确认校对全文</button>
+                    <button id="decline-full-document" class="button button-secondary" type="button">取消</button>
+                </div>
+            </div>
             <div id="proofreading-progress" class="progress" hidden>
                 <div class="progress-track"><div id="progress-fill" class="progress-fill"></div></div>
                 <span id="progress-label" class="progress-label"></span>

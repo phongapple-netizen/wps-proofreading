@@ -222,6 +222,61 @@ test('settings popover contains a rules accordion and closes on outside click or
   assert.equal(elements['settings-popover'].hidden, false);
 });
 
+test('full-document pane confirmation waits for actual button clicks and resets between runs', async () => {
+  const elements = {};
+  const ids = ['full-document-confirmation', 'full-document-confirmation-message', 'confirm-full-document',
+    'decline-full-document', 'run-proofreading', 'cancel-proofreading'];
+  const listeners = {};
+  const doc = {
+    readyState: 'complete',
+    getElementById: (id) => elements[id] || null,
+    addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); }
+  };
+  ids.forEach((id) => {
+    elements[id] = {
+      hidden: id === 'full-document-confirmation',
+      listeners: {},
+      addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); },
+      fire(type) { (this.listeners[type] || []).forEach((fn) => fn({})); },
+      focus() { doc.activeElement = this; }
+    };
+  });
+  const win = { document: doc, confirm() { throw new Error('native confirm must not be used'); } };
+  loadBrowserScript('js/taskpane.js', win);
+  win.setProofreadingBusy(true);
+  const details = { characterCount: 1062, providerLabel: 'OpenCode', model: 'opencode/mimo-v2.6-flash-free' };
+  const first = win.requestFullDocumentConfirmation(details);
+  let settled = false;
+  first.then(() => { settled = true; });
+  await Promise.resolve();
+  assert.equal(settled, false);
+  assert.equal(elements['full-document-confirmation'].hidden, false);
+  assert.equal(elements['cancel-proofreading'].hidden, true);
+  assert.match(elements['full-document-confirmation-message'].textContent, /1062/);
+  assert.match(elements['full-document-confirmation-message'].textContent, /OpenCode/);
+  assert.match(elements['full-document-confirmation-message'].textContent, /mimo-v2.6-flash-free/);
+  assert.equal(doc.activeElement, elements['confirm-full-document']);
+  elements['confirm-full-document'].fire('click');
+  assert.equal(await first, true);
+  assert.equal(elements['full-document-confirmation'].hidden, true);
+  assert.equal(elements['cancel-proofreading'].hidden, false);
+
+  const second = win.requestFullDocumentConfirmation(details);
+  elements['decline-full-document'].fire('click');
+  assert.equal(await second, false);
+  assert.equal(elements['full-document-confirmation'].hidden, true);
+  assert.equal(win.dismissFullDocumentConfirmation(), false);
+
+  const third = win.requestFullDocumentConfirmation(details);
+  (listeners.keydown || []).forEach((fn) => fn({ key: 'Escape', preventDefault() {} }));
+  assert.equal(await third, false);
+  assert.equal(elements['full-document-confirmation'].hidden, true);
+
+  const fourth = win.requestFullDocumentConfirmation(details);
+  assert.equal(win.dismissFullDocumentConfirmation(), true);
+  assert.equal(await fourth, false);
+});
+
 test('task pane exposes safe integration callbacks without fabricating results', () => {
   const win = {
     document: undefined,

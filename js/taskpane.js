@@ -10,6 +10,7 @@
         history: [],
         historyIds: {}
     };
+    var pendingFullDocumentConfirmation = null;
 
     function byId(id) {
         return root.document && root.document.getElementById
@@ -58,12 +59,62 @@
         if (applyAllButton) applyAllButton.disabled = state.busy || !autoFixableCount();
         if (rerunButton) rerunButton.disabled = state.busy;
         if (cancelButton) {
-            cancelButton.hidden = !state.busy;
+            cancelButton.hidden = !state.busy || !!pendingFullDocumentConfirmation;
             cancelButton.disabled = !state.busy;
         }
         if (!state.busy) setProofreadingProgress(0, "");
         renderIssues();
         return state.busy;
+    }
+
+    function finishFullDocumentConfirmation(confirmed) {
+        var pending = pendingFullDocumentConfirmation;
+        if (!pending) return false;
+        pendingFullDocumentConfirmation = null;
+        var panel = byId("full-document-confirmation");
+        if (panel) panel.hidden = true;
+        var cancelButton = byId("cancel-proofreading");
+        if (cancelButton) cancelButton.hidden = !state.busy;
+        pending.resolve(confirmed === true);
+        // Restore focus after the run has had a chance to enable its controls.
+        setTimeout(function () {
+            if (!pendingFullDocumentConfirmation && pending.previousFocus &&
+                pending.previousFocus.isConnected !== false &&
+                typeof pending.previousFocus.focus === "function") {
+                pending.previousFocus.focus();
+            }
+        }, 0);
+        return true;
+    }
+
+    function dismissFullDocumentConfirmation() {
+        return finishFullDocumentConfirmation(false);
+    }
+
+    function requestFullDocumentConfirmation(details) {
+        var panel = byId("full-document-confirmation");
+        var message = byId("full-document-confirmation-message");
+        var confirmButton = byId("confirm-full-document");
+        var declineButton = byId("decline-full-document");
+        if (!panel || !message || !confirmButton || !declineButton) {
+            return Promise.reject(new Error("全文确认控件没有加载，请完全退出 WPS 后重新打开插件。"));
+        }
+        dismissFullDocumentConfirmation();
+        var value = details || {};
+        var target = String(value.providerLabel || "所选模型服务");
+        if (value.model) target += "（" + String(value.model) + "）";
+        message.textContent = "当前未选择文字，将校对全文，共 " +
+            (Number(value.characterCount) || 0) + " 个字符。\n待校对文本将发送给 " + target + "。";
+        return new Promise(function (resolve) {
+            pendingFullDocumentConfirmation = {
+                resolve: resolve,
+                previousFocus: root.document.activeElement
+            };
+            panel.hidden = false;
+            var cancelButton = byId("cancel-proofreading");
+            if (cancelButton) cancelButton.hidden = true;
+            if (typeof confirmButton.focus === "function") confirmButton.focus();
+        });
     }
 
     function setProofreadingProgress(percent, label) {
@@ -589,6 +640,8 @@
     root.pushProofreadingRecord = root.pushProofreadingRecord || pushProofreadingRecord;
     root.setModelConnectionStatus = root.setModelConnectionStatus || setModelConnectionStatus;
     root.setProofreadingBusy = root.setProofreadingBusy || setProofreadingBusy;
+    root.requestFullDocumentConfirmation = root.requestFullDocumentConfirmation || requestFullDocumentConfirmation;
+    root.dismissFullDocumentConfirmation = root.dismissFullDocumentConfirmation || dismissFullDocumentConfirmation;
     root.setProofreadingProgress = root.setProofreadingProgress || setProofreadingProgress;
     root.syncSettingsForm = syncFormFromStore;
     root.getProofreadingStatus = root.getProofreadingStatus || getProofreadingStatus;
@@ -792,6 +845,23 @@
         var runButton = byId("run-proofreading");
         var cancelButton = byId("cancel-proofreading");
         var filter = byId("issue-filter");
+        var confirmFullButton = byId("confirm-full-document");
+        var declineFullButton = byId("decline-full-document");
+
+        if (confirmFullButton) {
+            confirmFullButton.addEventListener("click", function () { finishFullDocumentConfirmation(true); });
+        }
+        if (declineFullButton) {
+            declineFullButton.addEventListener("click", dismissFullDocumentConfirmation);
+        }
+        if (root.document && typeof root.document.addEventListener === "function") {
+            root.document.addEventListener("keydown", function (event) {
+                if (event.key === "Escape" && pendingFullDocumentConfirmation) {
+                    if (typeof event.preventDefault === "function") event.preventDefault();
+                    dismissFullDocumentConfirmation();
+                }
+            });
+        }
 
         if (runButton) {
             runButton.addEventListener("click", callRunProofreading);

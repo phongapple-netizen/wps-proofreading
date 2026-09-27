@@ -22,6 +22,120 @@ test("model issues must be strict JSON and uncertain confidence stays review-onl
     assert.equal(issues[0].needsReview, true);
 });
 
+test("issue actions normalize replacement, deletion, and review without losing writable state", () => {
+    const issues = core.parseIssues(JSON.stringify({ issues: [
+        {
+            category: "typo", paragraphIndex: 1, original: "错字", suggestion: "正字",
+            action: "replace", reason: "明确错字", confidence: 0.99, needsReview: false
+        },
+        {
+            category: "redundancy", paragraphIndex: 1, original: "多余内容", suggestion: "",
+            action: "delete", reason: "应删除", confidence: 0.99, needsReview: false
+        },
+        {
+            category: "wording", paragraphIndex: 1, original: "待核对", suggestion: "规范写法",
+            action: "review", reason: "需要人工判断", confidence: 0.99, needsReview: false
+        }
+    ] }));
+
+    assert.deepEqual(issues.map((issue) => issue.action), ["replace", "delete", "review"]);
+    assert.equal(issues[0].suggestion, "正字");
+    assert.equal(issues[0].actionable, true);
+    assert.equal(issues[0].needsReview, false);
+    assert.equal(issues[1].suggestion, "");
+    assert.equal(issues[1].actionable, true);
+    assert.equal(core.parseIssues(JSON.stringify({ issues: [{
+        category: "wording", paragraphIndex: 1, original: "（删除此段）", suggestion: "（删除此段）"
+    }] })).length, 0);
+    assert.equal(issues[1].needsReview, true);
+    assert.equal(issues[2].actionable, false);
+    assert.equal(issues[2].needsReview, true);
+});
+
+test("legacy issues still accept ordinary replacement and empty deletion suggestions", () => {
+    const issues = core.parseIssues(JSON.stringify({ issues: [
+        {
+            category: "typo", paragraphIndex: 1, original: "错字", suggestion: "正字",
+            reason: "旧格式替换", confidence: 0.99, needsReview: false
+        },
+        {
+            category: "redundancy", paragraphIndex: 1, original: "多余", suggestion: "",
+            reason: "旧格式删除", confidence: 0.99, needsReview: false
+        }
+    ] }));
+
+    assert.equal(issues.length, 2);
+    assert.equal(issues[0].action, "replace");
+    assert.equal(issues[0].suggestion, "正字");
+    assert.equal(issues[0].actionable, true);
+    assert.equal(issues[1].action, "delete");
+    assert.equal(issues[1].suggestion, "");
+    assert.equal(issues[1].actionable, true);
+});
+
+test("explicit parenthesized deletion explanations become empty deletions and remain traceable", () => {
+    const explanation = "（删除此段错误提示内容）";
+    const issues = core.parseIssues(JSON.stringify({ issues: [{
+        category: "wording",
+        paragraphIndex: 1,
+        original: "[API 错误] [Ollama:transport] 发送请求时出错。",
+        suggestion: explanation,
+        reason: "模型建议清理连接错误提示",
+        confidence: 0.99,
+        needsReview: false
+    }] }));
+
+    assert.equal(issues.length, 1);
+    assert.equal(issues[0].suggestion, "");
+    assert.equal(issues[0].action, "delete");
+    assert.equal(issues[0].actionable, true);
+    assert.equal(issues[0].needsReview, true);
+    assert.equal(issues[0].reason.includes(explanation), true);
+});
+
+test("ambiguous edit annotations and contradictory actions stay non-writable while legal parentheses remain text", () => {
+    const legalSuggestion = "全国人民代表大会（以下简称全国人大）";
+    const issues = core.parseIssues(JSON.stringify({ issues: [
+        {
+            category: "wording", paragraphIndex: 1, original: "全国人大",
+            suggestion: legalSuggestion, confidence: 0.99, needsReview: false
+        },
+        {
+            category: "wording", paragraphIndex: 1, original: "待核对一",
+            suggestion: "正确表述（说明：需结合上下文）", confidence: 0.99, needsReview: false
+        },
+        {
+            category: "wording", paragraphIndex: 1, original: "待核对二",
+            suggestion: "（建议改写该句）", confidence: 0.99, needsReview: false
+        },
+        {
+            category: "wording", paragraphIndex: 1, original: "待核对三",
+            suggestion: "替换文本", action: "delete", confidence: 0.99, needsReview: false
+        },
+        {
+            category: "wording", paragraphIndex: 1, original: "待核对四",
+            suggestion: "替换文本", action: "unknown", confidence: 0.99, needsReview: false
+        },
+        {
+            category: "wording", paragraphIndex: 1, original: "待核对五",
+            suggestion: "说明：删除该段错误提示", confidence: 0.99, needsReview: false
+        },
+        {
+            category: "wording", paragraphIndex: 1, original: "待核对六",
+            suggestion: "正确表述；说明：需结合上下文", confidence: 0.99, needsReview: false
+        }
+    ] }));
+
+    const byOriginal = Object.fromEntries(issues.map((issue) => [issue.original, issue]));
+    assert.equal(byOriginal["全国人大"].suggestion, legalSuggestion);
+    assert.equal(byOriginal["全国人大"].action, "replace");
+    assert.equal(byOriginal["全国人大"].actionable, true);
+    ["待核对一", "待核对二", "待核对三", "待核对四", "待核对五", "待核对六"].forEach((original) => {
+        assert.equal(byOriginal[original].actionable, false);
+        assert.equal(byOriginal[original].needsReview, true);
+    });
+});
+
 test("issue offsets are mapped only for a unique exact excerpt", () => {
     const paragraphs = core.splitIntoParagraphs("前面有错字，后面还有错字。\r第二段有待改内容。\r");
     const issues = [

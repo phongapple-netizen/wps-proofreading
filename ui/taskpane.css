@@ -361,6 +361,31 @@ h2 {
     gap: 8px;
 }
 
+.full-document-confirmation {
+    margin-top: 12px;
+    padding: 12px;
+    border: 1px solid #e6c77f;
+    border-radius: 8px;
+    background: #fff9ed;
+}
+
+.full-document-confirmation-title {
+    margin-bottom: 6px;
+    font-weight: 600;
+}
+
+.full-document-confirmation-message {
+    margin-bottom: 12px;
+    white-space: pre-line;
+    overflow-wrap: anywhere;
+}
+
+.full-document-confirmation-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
 .count-badge {
     min-width: 24px;
     padding: 1px 7px;

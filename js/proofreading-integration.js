@@ -10,6 +10,7 @@
     var currentIssues = [];
     var currentController = null;
     var busy = false;
+    var waitingForFullDocumentConfirmation = false;
     var runCounter = 0;
     var actionCounter = 0;
     var ANCHOR_CHARACTERS = 40;
@@ -154,6 +155,14 @@
         var document = activeDocument(application);
         if (!document || documentKey(document) !== snapshot.documentKey) return false;
         try {
+            if (snapshot.mode === "full") {
+                var content = document.Content;
+                var contentStart = Number(content && content.Start);
+                if (!Number.isFinite(contentStart)) contentStart = 0;
+                return contentStart === snapshot.start &&
+                    text(content && content.Text) === snapshot.selectedText &&
+                    text(document.Range(0, snapshot.start).Text) === snapshot.prefixText;
+            }
             return text(document.Range(0, snapshot.start).Text) === snapshot.prefixText &&
                 text(document.Range(snapshot.start, snapshot.end).Text) === snapshot.selectedText;
         } catch (error) {
@@ -641,7 +650,7 @@
                 severity: candidate.severity || "",
                 priority: Number(candidate.priority) || 0,
                 needsReview: true,
-                actionable: true,
+                actionable: issue.actionable !== false,
                 reason: mergeReasons(
                     issue.reason,
                     candidate.instruction,
@@ -654,17 +663,6 @@
     function providerDisplayName(provider) {
         return provider === "opencode" ? "OpenCode" :
             provider === "ollama" ? "Ollama" : "兼容接口";
-    }
-
-    function confirmFullDocument(snapshot, options) {
-        if (!snapshot || snapshot.mode !== "full") return true;
-        if (typeof root.confirm !== "function") return false;
-        var target = providerDisplayName(options.provider);
-        if (options.model) target += "（" + options.model + "）";
-        return root.confirm(
-            "当前未选择文字，将校对全文，共 " + snapshot.selectedText.length +
-            " 个字符。\n\n待校对文本将发送给 " + target + "。是否继续？"
-        ) === true;
     }
 
     async function runProofreading() {
@@ -688,11 +686,27 @@
             var options = modelOptions();
             var providerLabel = providerDisplayName(options.provider);
             var scopeLabel = snapshot.mode === "full" ? "全文" : "选区";
-            if (snapshot.mode === "full" && !confirmFullDocument(snapshot, options)) {
-                setStatus(typeof root.confirm === "function"
-                    ? "已取消全文校对，文档内容没有发送。"
-                    : "当前环境无法显示全文发送确认。请先选择要校对的文字后重试。", "warning");
-                return { accepted: false, reason: "full-document-not-confirmed" };
+            if (snapshot.mode === "full") {
+                if (typeof root.requestFullDocumentConfirmation !== "function") {
+                    setStatus("全文确认面板尚未加载，请完全退出 WPS 后重新打开插件。", "warning");
+                    return { accepted: false, reason: "full-document-confirmation-unavailable" };
+                }
+                waitingForFullDocumentConfirmation = true;
+                setStatus("当前未选择文字，等待确认校对全文…", "warning");
+                var confirmed = await root.requestFullDocumentConfirmation({
+                    characterCount: snapshot.selectedText.length,
+                    providerLabel: providerLabel,
+                    model: options.model || ""
+                });
+                waitingForFullDocumentConfirmation = false;
+                if (confirmed !== true) {
+                    setStatus("已取消全文校对，文档内容没有发送。", "warning");
+                    return { accepted: false, reason: "full-document-not-confirmed" };
+                }
+                if (!currentDocumentMatches(snapshot)) {
+                    setStatus("等待确认期间文档内容已变化，文档内容没有发送。请重新开始校对。", "warning");
+                    return { accepted: false, reason: "document-changed-before-request" };
+                }
             }
             setStatus("正在通过 " + providerLabel + " 校对" + scopeLabel +
                 "（按段落分批发送，只发送待校对的文字）…", "working");
@@ -875,12 +889,22 @@
                 : (error && error.message ? error.message : "校对失败，请重试。"), "error");
             return { accepted: false, reason: "error" };
         } finally {
+            waitingForFullDocumentConfirmation = false;
+            if (typeof root.dismissFullDocumentConfirmation === "function") {
+                root.dismissFullDocumentConfirmation();
+            }
             currentController = null;
             setBusy(false);
         }
     }
 
     function cancelProofreading() {
+        if (busy && waitingForFullDocumentConfirmation &&
+            typeof root.dismissFullDocumentConfirmation === "function") {
+            if (currentController) currentController.abort();
+            root.dismissFullDocumentConfirmation();
+            return true;
+        }
         if (!busy || !currentController) {
             setStatus("当前没有正在进行的校对。", "warning");
             return false;
@@ -998,7 +1022,7 @@
             return false;
         }
         if (issue.actionable === false) {
-            setStatus("这条规则仅用于提醒，没有可自动写入的建议。", "warning");
+            setStatus("这条建议仅供人工核对，没有可直接写入的替换文本。", "warning");
             return false;
         }
         try {

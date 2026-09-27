@@ -89,10 +89,31 @@ function createHarness(options = {}) {
     const records = [];
     const progress = [];
     const confirmMessages = [];
+    const applicationConfirmMessages = [];
+    const confirmationDetails = [];
+    let pendingConfirmationResolve = null;
+    let notifyConfirmationRequested;
+    const confirmationRequested = new Promise((resolve) => { notifyConfirmationRequested = resolve; });
     let busyValue = false;
 
+    function resolveConfirmation(confirmed) {
+        const resolve = pendingConfirmationResolve;
+        pendingConfirmationResolve = null;
+        if (resolve) resolve(confirmed);
+        return !!resolve;
+    }
+
+    const application = {
+        ActiveDocument: document,
+        Selection: selection,
+        confirm: (message) => {
+            applicationConfirmMessages.push(String(message));
+            return false;
+        }
+    };
+
     const windowObject = {
-        Application: { ActiveDocument: document, Selection: selection },
+        Application: application,
         WpsNativeDocument: {
             getApplication: () => windowObject.Application,
             getPluginStorage: () => ({
@@ -128,9 +149,18 @@ function createHarness(options = {}) {
         setProofreadingProgress: (percent, label) => { progress.push({ percent, label: label || "" }); },
         setProofreadingBusy: (value) => { busyValue = value === true; },
         pushProofreadingRecord: (record) => { records.push(record); return true; },
+        requestFullDocumentConfirmation: (details) => {
+            confirmationDetails.push(details);
+            return new Promise((resolve) => {
+                pendingConfirmationResolve = resolve;
+                notifyConfirmationRequested();
+                if (!options.deferConfirmation) resolveConfirmation(options.confirmFullDocument !== false);
+            });
+        },
+        dismissFullDocumentConfirmation: () => resolveConfirmation(false),
         confirm: (message) => {
             confirmMessages.push(String(message));
-            return options.confirmFullDocument !== false;
+            return false;
         }
     };
 
@@ -163,6 +193,10 @@ function createHarness(options = {}) {
         get runtimeEndpoint() { return storage.get(RUNTIME_ENDPOINT_KEY) || ""; },
         get storageDump() { return Array.from(storage.values()).join("\n"); },
         get confirmMessages() { return confirmMessages.slice(); },
+        get applicationConfirmMessages() { return applicationConfirmMessages.slice(); },
+        get confirmationDetails() { return confirmationDetails.slice(); },
+        confirmationRequested,
+        resolveConfirmation,
         get sentRequest() { return requests[requests.length - 1]; },
         get requests() { return requests; },
         get renderedIssues() { return renderedIssues; },
@@ -613,15 +647,28 @@ test("an empty selection requires explicit confirmation before proofreading the 
     const result = await harness.window.runProofreading();
 
     assert.equal(result.accepted, true);
-    assert.equal(harness.confirmMessages.length, 1);
-    assert.match(harness.confirmMessages[0], /将校对全文/);
-    assert.match(harness.confirmMessages[0], /Ollama/);
+    assert.equal(harness.confirmationDetails.length, 1);
+    assert.equal(harness.confirmationDetails[0].characterCount, harness.readDocument().length);
+    assert.equal(harness.confirmationDetails[0].providerLabel, "Ollama");
+    assert.equal(Object.values(harness.confirmationDetails[0]).includes(harness.readDocument()), false);
     assert.equal(harness.contentReads >= 1, true);
     assert.equal(JSON.stringify(harness.sentRequest.body).includes(harness.readDocument()), true);
     assert.equal(harness.statuses.some((entry) => String(entry.text).includes("全文")), true);
     assert.equal(harness.status.tone, "success");
     assert.equal(harness.progress.some((entry) => entry.percent === 100), true);
     assert.equal(harness.busy, false);
+});
+
+test("pane confirmation starts full-document proofreading even when both native confirm APIs return false", async () => {
+    const harness = createHarness({ noSelection: true });
+    const result = await harness.window.runProofreading();
+
+    assert.equal(result.accepted, true);
+    assert.equal(harness.applicationConfirmMessages.length, 0);
+    assert.equal(harness.confirmMessages.length, 0);
+    assert.equal(harness.confirmationDetails.length, 1);
+    assert.equal(harness.requests.length, 1);
+    assert.equal(harness.status.tone, "success");
 });
 
 test("declining whole-document confirmation sends no model request", async () => {
@@ -631,8 +678,121 @@ test("declining whole-document confirmation sends no model request", async () =>
     assert.equal(result.accepted, false);
     assert.equal(result.reason, "full-document-not-confirmed");
     assert.equal(harness.requests.length, 0);
-    assert.equal(harness.confirmMessages.length, 1);
+    assert.equal(harness.confirmationDetails.length, 1);
     assert.match(harness.status.text, /没有发送/);
+    assert.equal(harness.busy, false);
+});
+
+test("a legacy parenthesized deletion explanation removes only the original text and can be undone", async () => {
+    const errorText = "[API 错误] [Ollama:transport] 发送请求时出错。 → 无法连接到远程服务器 → 由于目标计算机积极拒绝，无法连接。 127.0.0.1:11434";
+    const harness = createHarness({
+        selectedText: errorText,
+        issues: [{
+            category: "wording",
+            paragraphIndex: 1,
+            original: errorText,
+            suggestion: "（删除此段错误提示内容）",
+            reason: "模型认为这是一段连接错误提示",
+            confidence: 0.99,
+            needsReview: false
+        }]
+    });
+
+    const result = await harness.window.runProofreading();
+    assert.equal(result.accepted, true);
+    const issue = harness.window.getWpsProofreadingState().issues[0];
+    assert.equal(issue.action, "delete");
+    assert.equal(issue.suggestion, "");
+    assert.equal(issue.actionable, true);
+    assert.equal(issue.needsReview, true);
+    assert.equal(issue.reason.includes("（删除此段错误提示内容）"), true);
+
+    assert.equal(harness.window.applyProofreadingIssue(issue.id), true);
+    assert.equal(harness.readDocument(), harness.prefix + harness.suffix);
+    assert.equal(harness.readDocument().includes("删除此段错误提示内容"), false);
+    assert.equal(harness.window.undoProofreadingIssue(issue.id), true);
+    assert.equal(harness.readDocument(), harness.prefix + errorText + harness.suffix);
+});
+
+test("an ambiguous edit annotation is review-only and does not change the document", async () => {
+    const selectedText = "这段文字需要核对。";
+    const harness = createHarness({
+        selectedText,
+        issues: [{
+            category: "wording",
+            paragraphIndex: 1,
+            original: "需要核对",
+            suggestion: "正确表述（说明：需结合上下文）",
+            reason: "模型给出了带编辑注释的建议",
+            confidence: 0.99,
+            needsReview: false
+        }]
+    });
+
+    await harness.window.runProofreading();
+    const issue = harness.window.getWpsProofreadingState().issues[0];
+    const before = harness.readDocument();
+    assert.equal(issue.actionable, false);
+    assert.equal(issue.needsReview, true);
+    assert.equal(harness.window.applyProofreadingIssue(issue.id), false);
+    assert.equal(harness.readDocument(), before);
+});
+
+test("no request is sent while pane confirmation is pending, and confirming resumes the same full-document run", async () => {
+    const harness = createHarness({ noSelection: true, deferConfirmation: true });
+    const run = harness.window.runProofreading();
+    await harness.confirmationRequested;
+
+    assert.equal(harness.requests.length, 0);
+    assert.equal(harness.busy, true);
+    assert.equal((await harness.window.runProofreading()).reason, "busy");
+    harness.resolveConfirmation(true);
+    assert.equal((await run).accepted, true);
+    assert.equal(JSON.stringify(harness.sentRequest.body).includes(harness.readDocument()), true);
+    assert.equal(harness.busy, false);
+});
+
+test("cancelling while pane confirmation is pending sends nothing and returns to idle without AbortController", async () => {
+    const harness = createHarness({ noSelection: true, deferConfirmation: true });
+    const run = harness.window.runProofreading();
+    await harness.confirmationRequested;
+
+    assert.equal(harness.window.cancelProofreading(), true);
+    assert.equal((await run).reason, "full-document-not-confirmed");
+    assert.equal(harness.requests.length, 0);
+    assert.equal(harness.busy, false);
+    assert.match(harness.status.text, /没有发送/);
+});
+
+test("appending text while confirmation is pending prevents the old full-document snapshot from being sent", async () => {
+    const harness = createHarness({ noSelection: true, deferConfirmation: true });
+    const run = harness.window.runProofreading();
+    await harness.confirmationRequested;
+
+    harness.changeDocument(harness.readDocument() + "新增内容。");
+    harness.resolveConfirmation(true);
+    assert.equal((await run).reason, "document-changed-before-request");
+    assert.equal(harness.requests.length, 0);
+    assert.equal(harness.busy, false);
+    assert.match(harness.status.text, /文档内容已变化/);
+});
+
+test("selected-text proofreading starts without full-document confirmation", async () => {
+    const harness = createHarness({ requireSelection: true, deferConfirmation: true });
+    assert.equal((await harness.window.runProofreading()).accepted, true);
+    assert.equal(harness.confirmationDetails.length, 0);
+    assert.equal(harness.confirmMessages.length, 0);
+    assert.equal(harness.applicationConfirmMessages.length, 0);
+    assert.equal(harness.contentReads, 0);
+});
+
+test("a missing pane confirmation API fails without using native confirmation or sending text", async () => {
+    const harness = createHarness({ noSelection: true });
+    delete harness.window.requestFullDocumentConfirmation;
+    assert.equal((await harness.window.runProofreading()).reason, "full-document-confirmation-unavailable");
+    assert.equal(harness.requests.length, 0);
+    assert.equal(harness.confirmMessages.length, 0);
+    assert.equal(harness.applicationConfirmMessages.length, 0);
     assert.equal(harness.busy, false);
 });
 
@@ -1074,7 +1234,7 @@ test("AI review rules stay invisible when the model decides the trigger is valid
     assert.equal(harness.statuses.some((item) => /AI核查点 1 处/.test(item.text)), true);
 });
 
-test("AI-confirmed review rules become one review-only finding with rule provenance", async () => {
+test("AI-confirmed review rules become one applyable finding with rule provenance", async () => {
     const harness = createHarness({
         selectedText: "检查发现企业存在高空作业管理不到位问题。",
         issues: [{
@@ -1109,6 +1269,7 @@ test("AI-confirmed review rules become one review-only finding with rule provena
     assert.equal(issues[0].ruleSource, "专业术语");
     assert.equal(issues[0].suggestion, "高处作业");
     assert.equal(issues[0].needsReview, true);
+    assert.equal(issues[0].action, "replace");
     assert.equal(issues[0].actionable, true);
 
     const before = harness.readDocument();
@@ -1120,4 +1281,43 @@ test("AI-confirmed review rules become one review-only finding with rule provena
     assert.equal(harness.window.applyProofreadingIssue(issues[0].id), true);
     assert.equal(harness.readDocument(), harness.prefix +
         "检查发现企业存在高处作业管理不到位问题。" + harness.suffix);
+});
+
+test("AI review action stays non-writable when mapped to a matching review rule", async () => {
+    const harness = createHarness({
+        selectedText: "检查发现企业存在高空作业管理不到位问题。",
+        issues: [{
+            category: "wording",
+            paragraphIndex: 1,
+            original: "高空作业",
+            suggestion: "高处作业",
+            action: "review",
+            reason: "当前属于安全生产监管语境，应使用规范术语。",
+            confidence: 0.97,
+            needsReview: false,
+            reviewRuleId: "height-context"
+        }],
+        rules: [{
+            id: "height-context",
+            name: "高空作业术语核查",
+            type: "ai_review",
+            pattern: "高空作业",
+            matchMode: "literal",
+            replacement: "高处作业",
+            instruction: "安全生产监管语境通常使用高处作业；引用原文时不要机械修改。",
+            source: "专业术语",
+            severity: "medium",
+            priority: 90
+        }]
+    });
+
+    await harness.window.runProofreading();
+    const issue = harness.window.getWpsProofreadingState().issues[0];
+    const before = harness.readDocument();
+    assert.equal(issue.origin, "ai-review");
+    assert.equal(issue.action, "review");
+    assert.equal(issue.needsReview, true);
+    assert.equal(issue.actionable, false);
+    assert.equal(harness.window.applyProofreadingIssue(issue.id), false);
+    assert.equal(harness.readDocument(), before);
 });
