@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 16034)
+Total output lines: 1416
+
 (function (root) {
     "use strict";
 
@@ -368,6 +371,7 @@
                 actionable: issue.actionable !== false,
                 ruleName: issue.ruleName || "",
                 ruleSource: issue.ruleSource || "",
+                ruleType: issue.ruleType || "",
                 severity: issue.severity || "",
                 origin: issue.origin || issueOrigin(issue),
                 confirmedByAI: issue.confirmedByAI === true,
@@ -575,6 +579,7 @@
                 origin: "rule+ai",
                 ruleName: ruleIssue.ruleName || "",
                 ruleSource: ruleIssue.ruleSource || "",
+                ruleType: ruleIssue.ruleType || "",
                 severity: ruleIssue.severity || "",
                 priority: Math.max(Number(ruleIssue.priority) || 0, Number(aiIssue.priority) || 0),
                 needsReview: true,
@@ -738,88 +743,7 @@
             return Object.assign({}, issue, {
                 origin: "ai-review",
                 ruleName: candidate.ruleName || "",
-                ruleSource: candidate.ruleSource || "",
-                severity: candidate.severity || "",
-                priority: Number(candidate.priority) || 0,
-                needsReview: true,
-                actionable: issue.actionable !== false,
-                reason: mergeReasons(
-                    issue.reason,
-                    candidate.instruction,
-                    "该建议由 AI 核查规则结合上下文确认，需人工复核后再应用。"
-                )
-            });
-        });
-    }
-
-    function providerDisplayName(provider) {
-        return provider === "opencode" ? "OpenCode" :
-            provider === "ollama" ? "Ollama" : "兼容接口";
-    }
-
-    async function runProofreading() {
-        if (issueActionBusy) return { accepted: false, reason: "action-busy" };
-        if (busy) return { accepted: false, reason: "busy" };
-        currentController = makeAbortController();
-        setBusy(true);
-
-        var snapshot = null;
-        var collected = [];
-        var discarded = false;
-        try {
-            if (root.WpsRulesReady && typeof root.WpsRulesReady.then === "function") {
-                await root.WpsRulesReady;
-            }
-            snapshot = captureSnapshot();
-            var options = validateModelOptions(modelOptions());
-            var providerLabel = providerDisplayName(options.provider);
-            var scopeLabel = snapshot.mode === "full" ? "全文" : "选区";
-            if (snapshot.mode === "full") {
-                if (typeof root.requestFullDocumentConfirmation !== "function") {
-                    setStatus("全文确认面板尚未加载，请完全退出 WPS 后重新打开插件。", "warning");
-                    return { accepted: false, reason: "full-document-confirmation-unavailable" };
-                }
-                waitingForFullDocumentConfirmation = true;
-                setStatus("当前未选择文字，等待确认校对全文…", "warning");
-                var confirmed = await root.requestFullDocumentConfirmation({
-                    characterCount: snapshot.selectedText.length,
-                    providerLabel: providerLabel,
-                    model: options.model || ""
-                });
-                waitingForFullDocumentConfirmation = false;
-                if (confirmed !== true) {
-                    setStatus("已取消全文校对，文档内容没有发送。", "warning");
-                    return { accepted: false, reason: "full-document-not-confirmed" };
-                }
-                if (!currentDocumentMatches(snapshot)) {
-                    setStatus("等待确认期间文档内容已变化，文档内容没有发送。请重新开始校对。", "warning");
-                    return { accepted: false, reason: "document-changed-before-request" };
-                }
-            }
-            // Replace the previous run only after the new range and any full-document
-            // confirmation have succeeded. Cancellations leave old findings usable.
-            currentSnapshot = null;
-            currentIssues = [];
-            runCounter += 1;
-            if (typeof root.beginProofreadingRun === "function") {
-                root.beginProofreadingRun();
-            } else {
-                viewIssues();
-                if (typeof root.clearProofreadingIssues === "function") root.clearProofreadingIssues();
-            }
-            setStatus("正在通过 " + providerLabel + " 校对" + scopeLabel +
-                "（按段落分批发送，只发送待校对的文字）…", "working");
-            reportProgress(0, "已读取" + scopeLabel);
-
-            var localRuleIssues = root.WpsRulesCenter &&
-                typeof root.WpsRulesCenter.evaluate === "function"
-                ? root.WpsRulesCenter.evaluate(snapshot.selectedText, snapshot.start)
-                : [];
-            var aiReviewCandidates = root.WpsRulesCenter &&
-                typeof root.WpsRulesCenter.collectAiReviewCandidates === "function"
-                ? root.WpsRulesCenter.collectAiReviewCandidates(snapshot.selectedText, snapshot.start)
-                : [];
-            collected = collected.concat(localRuleIssues);
+  …1034 tokens truncated…            collected = collected.concat(localRuleIssues);
             currentSnapshot = snapshot;
             currentIssues = mergeMappedIssues(collected);
             viewIssues();

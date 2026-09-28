@@ -292,3 +292,79 @@ test("AI review rules require an instruction and reject empty-match regex trigge
         instruction: "结合上下文判断。"
     }), /正则表达式无效/);
 });
+
+test("user replacement rules use safe defaults and run on the next local evaluation", () => {
+    const { api } = createHarness();
+    const saved = api.saveUserReplacementRule({
+        pattern: "市消防救援支队",
+        replacement: "市消防救援局",
+        name: "消防机构名称规范",
+        notes: "按最新机构名称统一"
+    });
+
+    assert.equal(saved.type, "replace");
+    assert.equal(saved.group, "我的规则");
+    assert.equal(saved.enabled, true);
+    assert.equal(saved.autoFix, false);
+    assert.equal(saved.priority, 50);
+    assert.equal(saved.severity, "medium");
+    assert.equal(saved.source, "用户自定义");
+    assert.equal(saved.notes, "按最新机构名称统一");
+    assert.equal(api.isSafeAutoFix(saved), false);
+
+    const issue = api.evaluate("市消防救援支队已到场。", 0)[0];
+    assert.equal(issue.original, "市消防救援支队");
+    assert.equal(issue.suggestion, "市消防救援局");
+    assert.equal(issue.autoFixable, false);
+    assert.equal(issue.actionable, true);
+});
+
+test("user replacement rules reject exact duplicates and conflicting replacements without overwriting", () => {
+    const { api } = createHarness();
+    const original = api.saveUserReplacementRule({ pattern: "旧名称", replacement: "新名称A" });
+
+    assert.throws(() => api.saveUserReplacementRule({
+        pattern: "旧名称", replacement: "新名称A"
+    }), /这条固定替换规则已经存在/);
+    assert.throws(() => api.saveUserReplacementRule({
+        pattern: "旧名称", replacement: "新名称B"
+    }), /已有相同匹配内容但不同替换结果的规则，请到规则中心确认/);
+    assert.equal(JSON.stringify(api.getRules().map((rule) => [rule.id, rule.replacement])),
+        JSON.stringify([[original.id, "新名称A"]]));
+});
+
+test("user replacement rules allow deletion suggestions and reject empty or identical pairs", () => {
+    const { api } = createHarness();
+    assert.throws(() => api.saveUserReplacementRule({ pattern: "", replacement: "建议" }), /查找文字不能为空/);
+    assert.throws(() => api.saveUserReplacementRule({ pattern: "相同", replacement: "相同" }), /不能完全相同/);
+
+    const saved = api.saveUserReplacementRule({ pattern: "多余词", replacement: "" });
+    const issue = api.evaluate("这里有多余词。", 0)[0];
+    assert.equal(saved.replacement, "");
+    assert.equal(issue.suggestion, "");
+    assert.equal(issue.actionable, true);
+    assert.equal(issue.autoFixable, false);
+});
+
+test("stored advanced rule types remain readable and executable alongside user rules", () => {
+    const first = createHarness();
+    first.api.saveRule({ id: "kept-regex", type: "regex", pattern: "(\\d+)号", replacement: "$1日" });
+    first.api.saveRule({ id: "kept-reminder", type: "reminder", pattern: "绝对安全", replacement: "" });
+    first.api.saveRule({
+        id: "kept-ai", type: "ai_review", pattern: "高空作业", matchMode: "literal",
+        instruction: "结合上下文核查是否应使用规范术语。"
+    });
+    first.api.saveUserReplacementRule({ pattern: "旧称", replacement: "新称" });
+
+    const second = createHarness();
+    second.storage.set(second.api.STORAGE_KEY,
+        first.storage.get(first.api.STORAGE_KEY));
+    assert.equal(JSON.stringify(Array.from(second.api.getRules(), (rule) => rule.id).sort()),
+        JSON.stringify(["kept-ai", "kept-regex", "kept-reminder",
+            second.api.getRules().find((rule) => rule.pattern === "旧称").id].sort()));
+    const issues = second.api.evaluate("9号，绝对安全，旧称", 0);
+    assert.equal(issues.some((issue) => issue.ruleId === "kept-regex" && issue.suggestion === "9日"), true);
+    assert.equal(issues.some((issue) => issue.ruleId === "kept-reminder" && issue.actionable === false), true);
+    assert.equal(issues.some((issue) => issue.original === "旧称" && issue.suggestion === "新称"), true);
+    assert.equal(second.api.collectAiReviewCandidates("高空作业", 0)[0].ruleId, "kept-ai");
+});

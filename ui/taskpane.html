@@ -54,7 +54,8 @@
                         </div>
 
                         <div class="rules-toolbar">
-                            <button id="rule-new" class="button button-primary" type="button">+ 新建规则</button>
+                            <button id="rule-new-fixed" class="button button-primary" type="button">+ 新建固定替换规则</button>
+                            <button id="rule-new-advanced" class="button button-secondary rules-small-button" type="button">高级规则编辑</button>
                             <button id="rule-test-document" class="button button-secondary rules-small-button" type="button">测试当前文档</button>
                             <button id="rule-import" class="button button-secondary rules-small-button" type="button">导入</button>
                             <button id="rule-export" class="button button-secondary rules-small-button" type="button">导出</button>
@@ -63,6 +64,28 @@
                         <div id="rules-status" class="status status-idle">尚未测试规则。</div>
                         <div id="rules-empty" class="empty-state">还没有自定义规则。可以新建，也可以导入 JSON 规则包。</div>
                         <div id="rules-list" class="rules-list" hidden></div>
+
+                        <form id="fixed-rule-editor" class="fixed-rule-editor" hidden>
+                            <h3>固定替换规则</h3>
+                            <p class="field-note">保存后从下一次校对开始生效；命中后仍需人工确认，不会自动修改正文。</p>
+                            <p id="fixed-rule-context" class="fixed-rule-context" hidden></p>
+                            <label class="field-label" for="fixed-rule-pattern">要查找的文字</label>
+                            <textarea id="fixed-rule-pattern" class="field-control rule-textarea" rows="2"
+                                      maxlength="500" placeholder="输入要查找的固定文字"></textarea>
+                            <label class="field-label" for="fixed-rule-replacement">替换为</label>
+                            <textarea id="fixed-rule-replacement" class="field-control rule-textarea" rows="2"
+                                      maxlength="1000" placeholder="输入建议替换的文字；留空表示建议删除"></textarea>
+                            <label class="field-label" for="fixed-rule-name">规则名称（可选）</label>
+                            <input id="fixed-rule-name" class="field-control" type="text" maxlength="120"
+                                   placeholder="留空时自动按“查找文字 → 替换文字”命名">
+                            <label class="field-label" for="fixed-rule-notes">说明/备注（可选）</label>
+                            <textarea id="fixed-rule-notes" class="field-control rule-textarea" rows="2"
+                                      maxlength="500" placeholder="可补充这条规则的说明"></textarea>
+                            <div class="rule-editor-actions">
+                                <button class="button button-primary" type="submit">保存规则</button>
+                                <button id="fixed-rule-cancel" class="button button-secondary rules-small-button" type="button">取消</button>
+                            </div>
+                        </form>
 
                         <form id="rule-editor" class="rule-editor" hidden>
                             <input id="rule-id" type="hidden">

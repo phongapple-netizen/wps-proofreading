@@ -227,6 +227,7 @@
             categoryLabel: String(value.categoryLabel || value.title || value.category || "校对提示"),
             title: String(value.title || value.category || "校对提示"),
             original: String(value.original || value.excerpt || ""),
+            hasOriginal: typeof value.original === "string" && value.original.length > 0,
             reason: String(value.reason || ""),
             stateLabel: String(value.stateLabel || ""),
             confidence: typeof value.confidence === "number" ? value.confidence : null,
@@ -234,12 +235,15 @@
             suggestion: typeof value.suggestion === "string"
                 ? value.suggestion
                 : String(value.replacement || ""),
+            hasSuggestion: typeof value.suggestion === "string" || typeof value.replacement === "string",
             status: String(value.status || "pending"),
             needsReview: value.needsReview === true,
             autoFixable: value.autoFixable === true,
             actionable: value.actionable !== false,
             ruleName: String(value.ruleName || ""),
             ruleSource: String(value.ruleSource || ""),
+            ruleType: String(value.ruleType || ""),
+            ruleSaved: value.ruleSaved === true,
             severity: String(value.severity || ""),
             origin: String(value.origin || "ai"),
             confirmedByAI: value.confirmedByAI === true,
@@ -478,6 +482,38 @@
         return button;
     }
 
+    function canSaveIssueAsRule(issue) {
+        if (!issue || !issue.hasOriginal || !issue.hasSuggestion ||
+            issue.original === issue.suggestion || issue.actionable === false ||
+            issue.status !== "pending" || issue.ruleSaved) return false;
+        if (issue.origin === "rule") return false;
+        if (issue.origin === "rule+ai" && issue.ruleType === "replace") return false;
+        return true;
+    }
+
+    function saveRuleButton(issue, disabled) {
+        var button = root.document.createElement("button");
+        button.type = "button";
+        button.className = "issue-action issue-action-secondary";
+        button.textContent = issue.ruleSaved ? "已保存规则" : "保存为规则";
+        button._proofreadingActionDisabled = disabled === true || issue.ruleSaved === true;
+        button.disabled = state.actionBusy || button._proofreadingActionDisabled;
+        button.setAttribute("data-issue-id", issue.id);
+        renderedIssueActionButtons.push(button);
+        if (!button._proofreadingActionDisabled) {
+            button.addEventListener("click", function (event) {
+                if (event && typeof event.stopPropagation === "function") event.stopPropagation();
+                if (state.actionBusy) return;
+                if (typeof root.openIssueRuleDraft !== "function") {
+                    setProofreadingStatus("规则中心尚未就绪。", "warning");
+                    return;
+                }
+                root.openIssueRuleDraft(issue);
+            });
+        }
+        return button;
+    }
+
     function visibleIssues() {
         if (state.filter === "all") return state.issues.slice();
         return state.issues.filter(function (issue) {
@@ -491,7 +527,17 @@
 
     function renderIssues(issues) {
         if (Array.isArray(issues)) {
-            state.issues = issues.map(normalizeIssue);
+            var previous = state.issues;
+            state.issues = issues.map(function (issue, index) {
+                var normalized = normalizeIssue(issue, index);
+                var prior = previous.find(function (candidate) {
+                    return candidate.id === normalized.id &&
+                        candidate.original === normalized.original &&
+                        candidate.suggestion === normalized.suggestion;
+                });
+                if (prior && prior.ruleSaved) normalized.ruleSaved = true;
+                return normalized;
+            });
         }
         collectHistory();
         updateCount();
@@ -579,7 +625,6 @@
 
             var actions = root.document.createElement("div");
             actions.className = "issue-actions";
-            actions.appendChild(actionButton("定位", "issue-action-secondary", issue, "locateProofreadingIssue", state.busy || !pending));
             actions.appendChild(actionButton(
                 issue.status === "accepted" ? "撤销" :
                     issue.status === "ignored" ? "已忽略" :
@@ -590,6 +635,10 @@
                 state.busy || (!pending && issue.status !== "accepted") ||
                     (pending && issue.actionable === false)
             ));
+            actions.appendChild(actionButton("定位", "issue-action-secondary", issue, "locateProofreadingIssue", state.busy || !pending));
+            if (canSaveIssueAsRule(issue) || issue.ruleSaved) {
+                actions.appendChild(saveRuleButton(issue, state.busy || !pending));
+            }
             actions.appendChild(actionButton("忽略", "issue-action-secondary", issue, "ignoreProofreadingIssue", state.busy || !pending));
             header.appendChild(actions);
             card.appendChild(header);
@@ -643,6 +692,12 @@
                 stateLine.className = "issue-state";
                 stateLine.textContent = issue.stateLabel || "状态：" + issue.status;
                 card.appendChild(stateLine);
+            }
+            if (issue.ruleSaved) {
+                var savedLine = root.document.createElement("p");
+                savedLine.className = "issue-state rule-saved-feedback";
+                savedLine.textContent = "已保存为固定替换规则，下次校对时生效。";
+                card.appendChild(savedLine);
             }
 
             (isProcessedIssue(issue) ? processedList : list).appendChild(card);
@@ -739,6 +794,13 @@
     root.syncSettingsForm = syncFormFromStore;
     root.getProofreadingStatus = root.getProofreadingStatus || getProofreadingStatus;
     root.setProofreadingIssues = root.setProofreadingIssues || renderIssues;
+    root.markProofreadingIssueRuleSaved = function (issueId) {
+        var issue = state.issues.find(function (candidate) { return candidate.id === String(issueId); });
+        if (!issue) return false;
+        issue.ruleSaved = true;
+        renderIssues();
+        return true;
+    };
     root.clearProofreadingIssues = root.clearProofreadingIssues || clearIssues;
     root.beginProofreadingRun = root.beginProofreadingRun || beginProofreadingRun;
     root.refreshProofreadingSelection = root.refreshProofreadingSelection || refreshProofreadingSelection;
