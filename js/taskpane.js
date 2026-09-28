@@ -6,11 +6,13 @@
         issues: [],
         filter: "all",
         busy: false,
+        actionBusy: false,
         tab: "issues",
         history: [],
         historyIds: {}
     };
     var pendingFullDocumentConfirmation = null;
+    var renderedIssueActionButtons = [];
 
     function byId(id) {
         return root.document && root.document.getElementById
@@ -50,21 +52,36 @@
 
     function setProofreadingBusy(value) {
         state.busy = value === true;
-        var runButton = byId("run-proofreading");
         var cancelButton = byId("cancel-proofreading");
-        var applyAllButton = byId("apply-all");
-        var rerunButton = byId("rerun-proofreading");
-
-        if (runButton) runButton.disabled = state.busy;
-        if (applyAllButton) applyAllButton.disabled = state.busy || !autoFixableCount();
-        if (rerunButton) rerunButton.disabled = state.busy;
         if (cancelButton) {
             cancelButton.hidden = !state.busy || !!pendingFullDocumentConfirmation;
             cancelButton.disabled = !state.busy;
         }
         if (!state.busy) setProofreadingProgress(0, "");
         renderIssues();
+        updateActionControls();
         return state.busy;
+    }
+
+    function updateActionControls() {
+        var runButton = byId("run-proofreading");
+        var applyAllButton = byId("apply-all");
+        var rerunButton = byId("rerun-proofreading");
+
+        if (runButton) runButton.disabled = state.busy || state.actionBusy;
+        if (applyAllButton) {
+            applyAllButton.disabled = state.busy || state.actionBusy || !autoFixableCount();
+        }
+        if (rerunButton) rerunButton.disabled = state.busy || state.actionBusy;
+        renderedIssueActionButtons.forEach(function (button) {
+            button.disabled = state.actionBusy || button._proofreadingActionDisabled === true;
+        });
+    }
+
+    function setProofreadingActionBusy(value) {
+        state.actionBusy = value === true;
+        updateActionControls();
+        return state.actionBusy;
     }
 
     function finishFullDocumentConfirmation(confirmed) {
@@ -255,7 +272,7 @@
         if (count) count.textContent = String(state.issues.length);
         var applyAllButton = byId("apply-all");
         if (applyAllButton) {
-            applyAllButton.disabled = state.busy || autoFixableCount() === 0;
+            applyAllButton.disabled = state.busy || state.actionBusy || autoFixableCount() === 0;
             applyAllButton.title = pendingCount() > autoFixableCount()
                 ? "仅自动修正内置低风险标点格式规则"
                 : "";
@@ -386,9 +403,16 @@
             return false;
         }
         try {
-            return callback(issueId);
+            var result = callback(issueId);
+            if (result && typeof result.then === "function") {
+                return result.catch(function () {
+                    setProofreadingStatus(fallbackMessage, "error");
+                    return false;
+                });
+            }
+            return result;
         } catch (error) {
-            setProofreadingStatus(error && error.message ? error.message : fallbackMessage, "error");
+            setProofreadingStatus(fallbackMessage, "error");
             return false;
         }
     }
@@ -398,11 +422,14 @@
         button.type = "button";
         button.className = "issue-action " + className;
         button.textContent = label;
-        button.disabled = disabled === true;
+        button._proofreadingActionDisabled = disabled === true;
+        button.disabled = state.actionBusy || button._proofreadingActionDisabled;
+        renderedIssueActionButtons.push(button);
         button.setAttribute("data-issue-id", issue.id);
-        if (!button.disabled) {
+        if (!button._proofreadingActionDisabled) {
             button.addEventListener("click", function (event) {
                 if (event && typeof event.stopPropagation === "function") event.stopPropagation();
+                if (state.actionBusy) return;
                 callAction(callbackName, issue.id, "当前操作未能完成。");
             });
         }
@@ -432,6 +459,7 @@
         }
 
         var shown = visibleIssues();
+        renderedIssueActionButtons = [];
         list.textContent = "";
         if (!shown.length) {
             list.hidden = true;
@@ -450,6 +478,7 @@
             card.className = "issue-card" + (pending && !state.busy ? " is-locatable" : "");
             if (pending && !state.busy) {
                 card.addEventListener("click", function () {
+                    if (state.actionBusy) return;
                     callAction("locateProofreadingIssue", issue.id, "当前操作未能完成。");
                 });
             }
@@ -640,6 +669,7 @@
     root.pushProofreadingRecord = root.pushProofreadingRecord || pushProofreadingRecord;
     root.setModelConnectionStatus = root.setModelConnectionStatus || setModelConnectionStatus;
     root.setProofreadingBusy = root.setProofreadingBusy || setProofreadingBusy;
+    root.setProofreadingActionBusy = root.setProofreadingActionBusy || setProofreadingActionBusy;
     root.requestFullDocumentConfirmation = root.requestFullDocumentConfirmation || requestFullDocumentConfirmation;
     root.dismissFullDocumentConfirmation = root.dismissFullDocumentConfirmation || dismissFullDocumentConfirmation;
     root.setProofreadingProgress = root.setProofreadingProgress || setProofreadingProgress;

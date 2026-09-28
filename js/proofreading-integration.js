@@ -10,10 +10,67 @@
     var currentIssues = [];
     var currentController = null;
     var busy = false;
+    var issueActionBusy = false;
     var waitingForFullDocumentConfirmation = false;
     var runCounter = 0;
     var actionCounter = 0;
     var ANCHOR_CHARACTERS = 40;
+
+    function actionClock() {
+        return root.performance && typeof root.performance.now === "function"
+            ? root.performance.now() : Date.now();
+    }
+
+    function startActionPerf(action) {
+        var hostname = root.location && root.location.hostname;
+        if (root.WpsIssueActionPerf === false) return null;
+        if (root.WpsIssueActionPerf !== true && hostname !== "127.0.0.1" &&
+            hostname !== "localhost" && hostname !== "[::1]") return null;
+        return { action: action, started: actionClock(), timings: {
+            issueLookup: 0, validation: 0, rangeRead: 0, write: 0,
+            stateShift: 0, snapshotUpdate: 0, historyRecord: 0,
+            render: 0, locateNext: 0, writeComplete: 0, deferredDelay: 0,
+            postWriteVerification: 0
+        } };
+    }
+
+    function actionStage(perf, name, callback) {
+        if (!perf) return callback();
+        var started = actionClock();
+        try { return callback(); }
+        finally { perf.timings[name] += actionClock() - started; }
+    }
+
+    function finishActionPerf(perf, outcome) {
+        if (!perf) return;
+        var report = { action: perf.action, outcome: outcome };
+        Object.keys(perf.timings).forEach(function (name) {
+            report[name] = Math.round(perf.timings[name] * 100) / 100;
+        });
+        report.total = Math.round((actionClock() - perf.started) * 100) / 100;
+        // Fixed labels and numbers only: never log document data or exceptions.
+        try {
+            if (root.console && typeof root.console.info === "function") {
+                root.console.info(perf.action + "Issue perf:", report);
+            }
+        } catch (error) { /* Diagnostics must not affect document operations. */ }
+    }
+
+    function setIssueActionBusy(value) {
+        issueActionBusy = value === true;
+        try {
+            if (typeof root.setProofreadingActionBusy === "function") {
+                root.setProofreadingActionBusy(issueActionBusy);
+            }
+        } catch (error) { /* The integration lock remains authoritative. */ }
+    }
+
+    function nextActionTurn() {
+        return new Promise(function (resolve) {
+            if (typeof root.setTimeout === "function") root.setTimeout(resolve, 0);
+            else setTimeout(resolve, 0);
+        });
+    }
 
     function byId(id) {
         return root.document && root.document.getElementById
@@ -60,7 +117,7 @@
 
     function activeDocument(application) {
         try {
-            return application && application.ActiveDocument ? application.ActiveDocument : null;
+            return application ? application.ActiveDocument || null : null;
         } catch (error) {
             return null;
         }
@@ -170,45 +227,53 @@
         }
     }
 
-    function refreshIssueAnchors() {
-        if (!currentSnapshot) return;
-        currentIssues.forEach(function (issue) {
-            var relativeStart = issue.start - currentSnapshot.start;
-            var relativeEnd = issue.end - currentSnapshot.start;
-            if (relativeStart < 0 || relativeEnd > currentSnapshot.selectedText.length) return;
-            var selectedBefore = currentSnapshot.selectedText.slice(
-                Math.max(0, relativeStart - ANCHOR_CHARACTERS), relativeStart);
-            var outsideBefore = relativeStart < ANCHOR_CHARACTERS
-                ? currentSnapshot.prefixText.slice(-(ANCHOR_CHARACTERS - relativeStart))
-                : "";
-            issue.anchorBefore = outsideBefore + selectedBefore;
-            issue.anchorAfter = currentSnapshot.selectedText.slice(
-                relativeEnd, relativeEnd + ANCHOR_CHARACTERS);
-        });
+    function issueContext(issue, expected) {
+        if (!currentSnapshot || !Number.isInteger(issue.start) || !Number.isInteger(issue.end) ||
+            issue.start < 0 || issue.end - issue.start !== expected.length) return null;
+        var relativeStart = issue.start - currentSnapshot.start;
+        var relativeEnd = issue.end - currentSnapshot.start;
+        var snapshotText = currentSnapshot.selectedText;
+        if (relativeStart < 0 || relativeEnd > snapshotText.length ||
+            snapshotText.slice(relativeStart, relativeEnd) !== expected) return null;
+        // Derive only this issue's anchors from trusted snapshot text, never live WPS text.
+        var selectedBefore = snapshotText.slice(Math.max(0, relativeStart - ANCHOR_CHARACTERS), relativeStart);
+        var outsideBefore = relativeStart < ANCHOR_CHARACTERS
+            ? currentSnapshot.prefixText.slice(-(ANCHOR_CHARACTERS - relativeStart)) : "";
+        var before = outsideBefore + selectedBefore;
+        var after = snapshotText.slice(relativeEnd, relativeEnd + ANCHOR_CHARACTERS);
+        if (expected === "" && !before && !after) return null;
+        var start = Math.max(0, issue.start - before.length);
+        var end = Math.min(currentSnapshot.end, issue.end + after.length);
+        return {
+            start: start,
+            end: end,
+            before: before,
+            after: after,
+            text: before + expected + after
+        };
     }
 
-    function checkedIssueRange(issue, expected) {
-        var document = activeDocument(app());
+    function checkedIssueRange(issue, expected, perf, operationDocument, contextOverride) {
+        var document = operationDocument || activeDocument(app());
         if (!document || !currentSnapshot ||
             documentKey(document) !== currentSnapshot.documentKey) return null;
-        if (issue.start < 0 || issue.end - issue.start !== expected.length) return null;
-        if (expected === "" && !issue.anchorBefore && !issue.anchorAfter) return null;
-        var range = document.Range(issue.start, issue.end);
-        if (text(range.Text) !== expected) return null;
-        var before = issue.anchorBefore || "";
-        var after = issue.anchorAfter || "";
-        if (before && text(document.Range(issue.start - before.length, issue.start).Text) !== before) return null;
-        if (after && text(document.Range(issue.end, issue.end + after.length).Text) !== after) return null;
-        return range;
+        var context = contextOverride || issueContext(issue, expected);
+        if (!context) return null;
+        var contextRange = document.Range(context.start, context.end);
+        if (actionStage(perf, "rangeRead", function () { return text(contextRange.Text); }) !== context.text) return null;
+        // Keep the write/selection Range short-lived; do not reuse it after a write or timer.
+        return context.start === issue.start && context.end === issue.end
+            ? contextRange : document.Range(issue.start, issue.end);
     }
 
     function updateSnapshotAfterReplacement(start, end, replacement) {
         var relativeStart = start - currentSnapshot.start;
         var relativeEnd = end - currentSnapshot.start;
-        currentSnapshot.selectedText = currentSnapshot.selectedText.slice(0, relativeStart) +
-            replacement + currentSnapshot.selectedText.slice(relativeEnd);
-        currentSnapshot.end += replacement.length - (end - start);
-        refreshIssueAnchors();
+        return Object.assign({}, currentSnapshot, {
+            selectedText: currentSnapshot.selectedText.slice(0, relativeStart) +
+                replacement + currentSnapshot.selectedText.slice(relativeEnd),
+            end: currentSnapshot.end + replacement.length - (end - start)
+        });
     }
 
     function modelOptions() {
@@ -257,7 +322,6 @@
     }
 
     function viewIssues() {
-        refreshIssueAnchors();
         if (typeof root.setProofreadingIssues !== "function") return;
         root.setProofreadingIssues(currentIssues.map(function (issue) {
             return {
@@ -666,6 +730,7 @@
     }
 
     async function runProofreading() {
+        if (issueActionBusy) return { accepted: false, reason: "action-busy" };
         if (busy) return { accepted: false, reason: "busy" };
         currentController = makeAbortController();
         setBusy(true);
@@ -930,33 +995,55 @@
         setStatus(message, "warning");
     }
 
-    function locateProofreadingIssue(issueId) {
-        var issue = findPendingIssue(issueId);
-        if (!issue || issue.status !== "pending") {
-            setStatus("这条建议已处理或已失效，请重新校对。", "warning");
-            return false;
-        }
+    function issueActionUnavailable() {
+        if (!busy && !issueActionBusy) return false;
+        setStatus(issueActionBusy
+            ? "上一条操作正在收尾，请稍候。"
+            : "校对进行中，请等待完成或先取消。", "warning");
+        return true;
+    }
+
+    function locateCheckedIssue(issue, perf, operationDocument) {
         try {
-            var range = checkedIssueRange(issue, issue.original);
-            if (!range || typeof range.Select !== "function") {
-                throw new Error("range-unavailable");
-            }
+            var range = actionStage(perf, "validation", function () {
+                return checkedIssueRange(issue, issue.original, perf, operationDocument);
+            });
+            if (!range || typeof range.Select !== "function") throw new Error("range-unavailable");
             range.Select();
-            setStatus("已在文档中定位这条问题。", "success");
             return true;
         } catch (error) {
             issue.status = "stale";
-            viewIssues();
-            setStatus("WPS 未能定位这条原文，请重新校对。", "warning");
             return false;
         }
     }
 
-    function ignoreProofreadingIssue(issueId) {
-        if (busy) {
-            setStatus("校对进行中，请等待完成或先取消。", "warning");
+    function locateProofreadingIssue(issueId) {
+        if (issueActionUnavailable()) return false;
+        var perf = startActionPerf("locate");
+        var outcome = "rejected";
+        setIssueActionBusy(true);
+        try {
+            var issue = actionStage(perf, "issueLookup", function () { return findPendingIssue(issueId); });
+            if (!issue || issue.status !== "pending") {
+                setStatus("这条建议已处理或已失效，请重新校对。", "warning");
+                return false;
+            }
+            if (locateCheckedIssue(issue, perf)) {
+                outcome = "located";
+                setStatus("已在文档中定位这条问题。", "success");
+                return true;
+            }
+            actionStage(perf, "render", viewIssues);
+            setStatus("WPS 未能定位这条原文，请重新校对。", "warning");
             return false;
+        } finally {
+            setIssueActionBusy(false);
+            finishActionPerf(perf, outcome);
         }
+    }
+
+    function ignoreProofreadingIssue(issueId) {
+        if (issueActionUnavailable()) return false;
         var issue = findPendingIssue(issueId);
         if (!issue || issue.status !== "pending") {
             setStatus("这条建议已处理或已失效。", "warning");
@@ -969,31 +1056,113 @@
         return true;
     }
 
-    function applyOneIssue(issue, deferRender) {
-        var range = checkedIssueRange(issue, issue.original);
+    function writeIssueReplacement(change, perf) {
+        var issue = change.issue;
+        var context;
+        var range = actionStage(perf, "validation", function () {
+            try {
+                context = issueContext(issue, change.expected);
+                if (context && change.replacement === "" && !context.before && !context.after) {
+                    change.unverifiableDeletion = true;
+                    return null;
+                }
+                return checkedIssueRange(issue, change.expected, perf, null, context);
+            }
+            catch (error) { return null; }
+        });
         if (!range) {
-            issue.status = "stale";
-            viewIssues();
+            if (change.unverifiableDeletion) {
+                issue.actionable = false;
+                issue.needsReview = true;
+            } else {
+                issue.status = "stale";
+            }
+            return false;
+        }
+        // Keep only immutable snapshot-derived data across the deferred turn.
+        // Never carry a WPS Range past the synchronous write.
+        change.documentKey = currentSnapshot.documentKey;
+        change.contextStart = context.start;
+        change.contextEnd = context.end;
+        change.before = context.before;
+        change.after = context.after;
+        change.delta = change.replacement.length - change.expected.length;
+        change.start = issue.start;
+        change.end = issue.end;
+        change.attempted = true;
+        actionStage(perf, "write", function () { range.Text = change.replacement; });
+        change.written = true;
+        // No live WPS Range is carried into the next event-loop turn.
+        return true;
+    }
+
+    function completeIssueReplacement(change, perf) {
+        var nextIssues = actionStage(perf, "stateShift", function () {
+            return root.WpsProofreadingCore.shiftIssuesAfterReplacement(
+                currentIssues, change.issue.id, change.start, change.end, change.replacement.length);
+        });
+        var nextSnapshot = actionStage(perf, "snapshotUpdate", function () {
+            return updateSnapshotAfterReplacement(change.start, change.end, change.replacement);
+        });
+        if (change.action === "undone") {
+            nextIssues.forEach(function (issue) {
+                if (issue.id === change.issue.id) issue.status = "pending";
+            });
+        }
+        // Publish the shifted coordinates and snapshot together before calling UI code.
+        currentIssues = nextIssues;
+        currentSnapshot = nextSnapshot;
+    }
+
+    function invalidateWrittenAction(change) {
+        currentSnapshot = null;
+        currentIssues = currentIssues.map(function (issue) {
+            if (change.postWriteVerified === true && change.written &&
+                change.action === "applied" && issue.id === change.issue.id) {
+                return Object.assign({}, issue, {
+                    status: "accepted", start: change.start, end: change.start + change.replacement.length
+                });
+            }
+            return Object.assign({}, issue, { status: "stale" });
+        });
+    }
+
+    function verifyWrittenChange(change, perf) {
+        return actionStage(perf, "postWriteVerification", function () {
+            try {
+                var document = activeDocument(app());
+                if (!document || !change.documentKey ||
+                    documentKey(document) !== change.documentKey) return false;
+                var contextEnd = change.contextEnd + change.delta;
+                if (!Number.isInteger(change.contextStart) || !Number.isInteger(contextEnd) ||
+                    contextEnd < change.contextStart) return false;
+                var contextText = change.before + change.replacement + change.after;
+                // An empty context cannot distinguish an intact deletion from native undo.
+                if (!contextText) return false;
+                var contextRange = document.Range(change.contextStart, contextEnd);
+                var actualText = actionStage(perf, "rangeRead", function () {
+                    return text(contextRange.Text);
+                });
+                return actualText === contextText;
+            } catch (error) {
+                return false;
+            }
+        });
+    }
+
+    function applyOneIssue(issue, deferRender) {
+        var change = { issue: issue, expected: issue.original, replacement: issue.suggestion, action: "applied" };
+        if (!writeIssueReplacement(change)) {
+            if (!deferRender) viewIssues();
             return { ok: false, reason: "changed" };
         }
-
-        var oldStart = issue.start;
-        var oldEnd = issue.end;
-        range.Text = issue.suggestion;
+        completeIssueReplacement(change);
         recordAction("applied", issue);
-        currentIssues = root.WpsProofreadingCore.shiftIssuesAfterReplacement(
-            currentIssues,
-            issue.id,
-            oldStart,
-            oldEnd,
-            issue.suggestion.length
-        );
-        updateSnapshotAfterReplacement(oldStart, oldEnd, issue.suggestion);
         if (!deferRender) viewIssues();
         return { ok: true };
     }
 
-    function locateNextPendingIssue(afterId) {
+    function locateNextPendingIssue(afterId, perf) {
         var previous = findPendingIssue(afterId);
         var after = previous ? previous.end : -1;
         var pending = currentIssues.filter(function (candidate) {
@@ -1004,77 +1173,115 @@
         var ordered = following.concat(pending.filter(function (candidate) {
             return candidate.start < after;
         }));
+        // Acquire the current document after yielding, then reuse only during this traversal.
+        var operationDocument = ordered.length ? activeDocument(app()) : null;
         for (var index = 0; index < ordered.length; index += 1) {
-            if (locateProofreadingIssue(ordered[index].id)) return true;
+            if (locateCheckedIssue(ordered[index], perf, operationDocument)) return { located: true, hadPending: true };
         }
-        if (!ordered.length) setStatus("本轮待处理问题已经处理完成。", "success");
-        return false;
+        return { located: false, hadPending: ordered.length > 0 };
     }
 
-    function applyProofreadingIssue(issueId) {
-        if (busy) {
-            setStatus("校对进行中，请等待完成或先取消。", "warning");
-            return false;
-        }
-        var issue = findPendingIssue(issueId);
-        if (!issue || issue.status !== "pending") {
-            setStatus("这条建议已处理或已失效，请重新校对。", "warning");
-            return false;
-        }
-        if (issue.actionable === false) {
-            setStatus("这条建议仅供人工核对，没有可直接写入的替换文本。", "warning");
-            return false;
-        }
+    async function performIssueReplacement(issueId, undo) {
+        var perf = startActionPerf(undo ? "undo" : "apply");
+        var outcome = "rejected";
+        var locked = false;
+        var change = null;
+        var committed = false;
         try {
-            var result = applyOneIssue(issue);
-            if (!result.ok) {
-                setStatus("原文已变化，未应用这条建议。请重新校对。", "warning");
+            if (issueActionUnavailable()) return false;
+            setIssueActionBusy(true);
+            locked = true;
+            var issue = actionStage(perf, "issueLookup", function () { return findPendingIssue(issueId); });
+            if (!issue || issue.status !== (undo ? "accepted" : "pending")) {
+                setStatus("这条建议已处理或已失效，请重新校对。", "warning");
                 return false;
             }
-            if (locateNextPendingIssue(issue.id)) {
-                setStatus("已应用一条建议，并定位到下一条待处理问题。", "success");
+            if (!undo && issue.actionable === false) {
+                setStatus("这条建议仅供人工核对，没有可直接写入的替换文本。", "warning");
+                return false;
             }
+            change = { issue: issue, expected: undo ? issue.suggestion : issue.original,
+                replacement: undo ? issue.original : issue.suggestion, action: undo ? "undone" : "applied" };
+            if (!writeIssueReplacement(change, perf)) {
+                actionStage(perf, "render", viewIssues);
+                setStatus(change.unverifiableDeletion
+                    ? "这条删除建议没有可校验的前后文，未修改正文，请手动处理。"
+                    : "原文或上下文已变化，未写入这条修改。请重新校对。", "warning");
+                return false;
+            }
+            var writtenAt = perf ? actionClock() : 0;
+            if (perf) perf.timings.writeComplete = writtenAt - perf.started;
+            // A timer (not a microtask) releases the synchronous WPS/UI call stack.
+            await nextActionTurn();
+            if (perf) perf.timings.deferredDelay = actionClock() - writtenAt;
+            if (!verifyWrittenChange(change, perf)) {
+                // The document may have been edited, undone, switched, or become
+                // unreadable while the WPS call stack was yielded. Do not publish
+                // shifted state or record a normal action without this proof.
+                invalidateWrittenAction(change);
+                try { actionStage(perf, "render", viewIssues); }
+                catch (renderError) { /* Keep the invalidated state even if UI fails. */ }
+                outcome = "post-write-changed";
+                try { setStatus("正文在写入后发生变化，请重新校对。", "warning"); }
+                catch (statusError) { /* UI errors must not revive the action. */ }
+                return false;
+            }
+            change.postWriteVerified = true;
+            completeIssueReplacement(change, perf);
+            committed = true;
+            var warning = false;
+            try { actionStage(perf, "historyRecord", function () { recordAction(change.action, issue); }); }
+            catch (error) { warning = true; }
+            var navigation = { located: false, hadPending: false };
+            if (!undo) {
+                try {
+                    navigation = actionStage(perf, "locateNext", function () {
+                        return locateNextPendingIssue(issue.id, perf);
+                    });
+                } catch (error) { warning = true; }
+            }
+            try { actionStage(perf, "render", viewIssues); }
+            catch (error) { warning = true; }
+            outcome = warning ? "written-with-warning" : "completed";
+            setStatus(warning
+                ? "正文修改已完成，但部分记录或界面收尾失败。请检查正文后重新校对。"
+                : undo ? "已撤销这条修改，建议恢复为待确认。"
+                    : navigation.located ? "已应用一条建议，并定位到下一条待处理问题。"
+                        : navigation.hadPending ? "已应用一条建议；其他原文已变化，请重新校对。"
+                            : "本轮待处理问题已经处理完成。", warning ? "warning" : "success");
             return true;
         } catch (error) {
-            setStatus("WPS 未能应用这条建议；文档内容未确认改变，请重新校对。", "error");
+            if (change && change.attempted) {
+                var postWriteUnverified = change.written === true && change.postWriteVerified !== true;
+                if (!committed) invalidateWrittenAction(change);
+                if (change.written && !committed && change.postWriteVerified === true) {
+                    try { actionStage(perf, "historyRecord", function () { recordAction(change.action, change.issue); }); }
+                    catch (historyError) { /* Keep the write result even when the history UI fails. */ }
+                }
+                try { actionStage(perf, "render", viewIssues); } catch (renderError) { /* Backend state stays safe. */ }
+                outcome = postWriteUnverified ? "post-write-changed"
+                    : change.written ? "written-state-invalidated" : "write-unconfirmed";
+                try {
+                    setStatus(postWriteUnverified
+                        ? "正文在写入后发生变化，请重新校对。"
+                        : change.written
+                            ? "正文修改已完成，但坐标收尾失败，后续修改已停止。请重新校对。"
+                            : "WPS 未能确认写入结果，请检查正文并重新校对。", "warning");
+                } catch (statusError) { /* Do not let UI failure alter the safe state. */ }
+                return postWriteUnverified ? false : change.written === true;
+            }
+            try { setStatus("WPS 未能验证这条修改，文档没有写入。请重新校对。", "warning"); }
+            catch (statusError) { /* UI errors must not escape the operation. */ }
             return false;
+        } finally {
+            if (locked) setIssueActionBusy(false);
+            finishActionPerf(perf, outcome);
         }
     }
 
-    function undoProofreadingIssue(issueId) {
-        if (busy) {
-            setStatus("校对进行中，请等待完成或先取消。", "warning");
-            return false;
-        }
-        var issue = findPendingIssue(issueId);
-        if (!issue || issue.status !== "accepted") {
-            setStatus("这条建议尚未应用或已失效，无法撤销。", "warning");
-            return false;
-        }
-        try {
-            var range = checkedIssueRange(issue, issue.suggestion);
-            if (!range) {
-                issue.status = "stale";
-                viewIssues();
-                setStatus("正文已变化，无法自动撤销这条修改。请重新校对。", "warning");
-                return false;
-            }
-            var oldStart = issue.start;
-            var oldEnd = issue.end;
-            range.Text = issue.original;
-            recordAction("undone", issue);
-            currentIssues = root.WpsProofreadingCore.shiftIssuesAfterReplacement(
-                currentIssues, issue.id, oldStart, oldEnd, issue.original.length);
-            findPendingIssue(issue.id).status = "pending";
-            updateSnapshotAfterReplacement(oldStart, oldEnd, issue.original);
-            viewIssues();
-            setStatus("已撤销这条修改，建议恢复为待确认。", "success");
-            return true;
-        } catch (error) {
-            setStatus("WPS 未能撤销这条修改，请检查正文后重新校对。", "error");
-            return false;
-        }
-    }
+    function applyProofreadingIssue(issueId) { return performIssueReplacement(issueId, false); }
+
+    function undoProofreadingIssue(issueId) { return performIssueReplacement(issueId, true); }
 
     function isAutoFixableIssue(issue) {
         return issue && issue.status === "pending" &&
@@ -1086,8 +1293,7 @@
     }
 
     function applyAllProofreadingIssues() {
-        if (busy) {
-            setStatus("校对进行中，请等待完成或先取消。", "warning");
+        if (issueActionUnavailable()) {
             return { applied: 0, failed: 0, skipped: currentIssues.length };
         }
         var pending = currentIssues.filter(function (candidate) {
@@ -1159,6 +1365,7 @@
             snapshot: currentSnapshot,
             issues: currentIssues.slice(),
             busy: busy,
+            actionBusy: issueActionBusy,
             provider: currentSettings().provider
         };
     };
