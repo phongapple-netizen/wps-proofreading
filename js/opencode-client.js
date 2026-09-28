@@ -547,12 +547,11 @@
             var body = {
                 model: model,
                 agent: "build",
-                system: PROOFREADING_SYSTEM_PROMPT,
+                system: typeof options.systemPrompt === "string" && options.systemPrompt.trim()
+                    ? options.systemPrompt.trim()
+                    : PROOFREADING_SYSTEM_PROMPT,
                 parts: [{ type: "text", text: promptText }]
             };
-            if (typeof options.systemPrompt === "string" && options.systemPrompt.trim()) {
-                body.system += "\n" + options.systemPrompt;
-            }
             var messagePayload = await requestMessage(fetcher, options, endpoint, sessionId, body, signal);
             var modelError = messageError(messagePayload);
             if (modelError) throw modelError;

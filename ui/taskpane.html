@@ -9,8 +9,12 @@
 <body>
     <main class="page-shell">
         <div class="toolbar">
-            <h1 class="toolbar-title">智能校对</h1>
-            <label class="toolbar-deep" for="deep-enhance">
+            <h1 class="toolbar-title">智能校改</h1>
+            <div id="app-mode-switch" class="app-mode-switch" role="tablist" aria-label="工作模式">
+                <button id="mode-proofread" class="app-mode-tab is-active" type="button" role="tab" aria-selected="true">校对</button>
+                <button id="mode-rewrite" class="app-mode-tab" type="button" role="tab" aria-selected="false">改写</button>
+            </div>
+            <label id="deep-enhance-control" class="toolbar-deep" for="deep-enhance">
                 <input id="deep-enhance" type="checkbox">
                 <span>深度增强</span>
             </label>
@@ -208,6 +212,7 @@
             </div>
         </div>
 
+        <div id="proofreading-view">
         <section class="panel run-panel">
             <div class="run-actions">
                 <button id="run-proofreading" class="button button-primary" type="button">开始校对</button>
@@ -268,6 +273,57 @@
         </section>
 
         <p class="footer-note">每次校对先在本地执行已启用规则，再由所选模型分批复核正文（每批约 2500 字）；规则与 AI 结果会自动去重、合并。应用前会再次核对原文，文档已变化时不会写入。</p>
+        </div>
+
+        <section id="rewrite-view" class="rewrite-view" hidden aria-labelledby="rewrite-heading">
+            <section class="panel rewrite-panel">
+                <div class="section-heading">
+                    <h2 id="rewrite-heading">改写</h2>
+                    <span class="rewrite-mode-label">理顺改写</span>
+                </div>
+                <p id="rewrite-selection-count" class="field-note rewrite-selection-count">当前未选中文字</p>
+                <p class="field-note rewrite-guard-note">在不改变事实、数字、时间、单位、主体和政策含义的前提下，理顺逻辑、调整层次、精简重复表达，使文字更规范流畅。</p>
+                <label class="field-label" for="rewrite-requirements">改写要求（可选）</label>
+                <textarea id="rewrite-requirements" class="field-control rewrite-requirements" rows="3" maxlength="500"
+                          placeholder="例如：保持篇幅基本不变；突出第四季度安全风险"></textarea>
+                <div class="rewrite-actions">
+                    <button id="run-rewrite" class="button button-primary" type="button">生成改写</button>
+                    <button id="cancel-rewrite" class="button button-danger" type="button" hidden disabled>取消生成</button>
+                </div>
+                <div id="rewrite-status" class="status status-idle" role="status" aria-live="polite">请选中需要理顺改写的段落。</div>
+
+                <div id="rewrite-result" class="rewrite-result" hidden>
+                    <h3>改写结果</h3>
+                    <p id="rewrite-length-summary" class="field-note"></p>
+                    <div class="rewrite-preview-block">
+                        <h4>原文</h4>
+                        <pre id="rewrite-original-preview" class="rewrite-preview"></pre>
+                    </div>
+                    <div class="rewrite-preview-block">
+                        <h4>改写后</h4>
+                        <pre id="rewrite-text-preview" class="rewrite-preview"></pre>
+                    </div>
+                    <ul id="rewrite-summary-list" class="rewrite-summary-list" hidden></ul>
+                    <div id="rewrite-risk" class="rewrite-risk" hidden>
+                        <strong id="rewrite-risk-title"></strong>
+                        <ul id="rewrite-risk-list"></ul>
+                    </div>
+                    <label id="rewrite-risk-confirm-row" class="rewrite-risk-confirm" hidden>
+                        <input id="rewrite-risk-confirm" type="checkbox">
+                        <span>我已核对上方提醒，确认替换</span>
+                    </label>
+                    <div class="rewrite-actions rewrite-result-actions">
+                        <button id="replace-rewrite" class="button button-primary" type="button">替换原文</button>
+                        <button id="regenerate-rewrite" class="button button-secondary" type="button">重新生成</button>
+                        <button id="discard-rewrite" class="button button-secondary" type="button">放弃</button>
+                    </div>
+                    <div id="rewrite-completed" class="rewrite-completed" hidden>
+                        <span>✓ 已替换原文</span>
+                        <button id="undo-rewrite" class="button button-secondary" type="button">撤销本次改写</button>
+                    </div>
+                </div>
+            </section>
+        </section>
     </main>
 
     <script type="text/javascript" src="../js/wps-api.js"></script>
@@ -277,6 +333,8 @@
     <script type="text/javascript" src="../js/opencode-client.js"></script>
     <script type="text/javascript" src="../js/model-catalog.js"></script>
     <script type="text/javascript" src="../js/proofreading-integration.js"></script>
+    <script type="text/javascript" src="../js/rewrite-core.js"></script>
+    <script type="text/javascript" src="../js/rewrite-integration.js"></script>
     <script type="text/javascript" src="../js/taskpane.js"></script>
     <script type="text/javascript" src="../js/rules-ui.js"></script>
 </body>

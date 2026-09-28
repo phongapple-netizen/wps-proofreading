@@ -7,6 +7,7 @@
         filter: "all",
         busy: false,
         actionBusy: false,
+        appMode: "proofread",
         tab: "issues",
         history: [],
         historyIds: {}
@@ -760,6 +761,31 @@
         }
     }
 
+    function setAppMode(mode) {
+        var rewriteMode = mode === "rewrite";
+        state.appMode = rewriteMode ? "rewrite" : "proofread";
+        var proofreadingView = byId("proofreading-view");
+        var rewriteView = byId("rewrite-view");
+        var proofreadingTab = byId("mode-proofread");
+        var rewriteTab = byId("mode-rewrite");
+        var deepControl = byId("deep-enhance-control");
+        if (proofreadingView) proofreadingView.hidden = rewriteMode;
+        if (rewriteView) rewriteView.hidden = !rewriteMode;
+        if (deepControl) deepControl.hidden = rewriteMode;
+        if (proofreadingTab) {
+            proofreadingTab.classList.toggle("is-active", !rewriteMode);
+            proofreadingTab.setAttribute("aria-selected", rewriteMode ? "false" : "true");
+        }
+        if (rewriteTab) {
+            rewriteTab.classList.toggle("is-active", rewriteMode);
+            rewriteTab.setAttribute("aria-selected", rewriteMode ? "true" : "false");
+        }
+        if (rewriteMode && typeof root.refreshRewriteSelection === "function") {
+            root.refreshRewriteSelection();
+        }
+        return state.appMode;
+    }
+
     function pushProofreadingRecord(record) {
         var value = record || {};
         var id = String(value.id == null ? "" : value.id);
@@ -793,6 +819,8 @@
     root.dismissFullDocumentConfirmation = root.dismissFullDocumentConfirmation || dismissFullDocumentConfirmation;
     root.setProofreadingProgress = root.setProofreadingProgress || setProofreadingProgress;
     root.syncSettingsForm = syncFormFromStore;
+    root.setAppMode = setAppMode;
+    root.getAppMode = function () { return state.appMode; };
     root.getProofreadingStatus = root.getProofreadingStatus || getProofreadingStatus;
     root.setProofreadingIssues = root.setProofreadingIssues || renderIssues;
     root.markProofreadingIssueRuleSaved = function (issueId) {
@@ -1004,6 +1032,11 @@
         var filter = byId("issue-filter");
         var confirmFullButton = byId("confirm-full-document");
         var declineFullButton = byId("decline-full-document");
+        var proofreadingMode = byId("mode-proofread");
+        var rewriteMode = byId("mode-rewrite");
+
+        if (proofreadingMode) proofreadingMode.addEventListener("click", function () { setAppMode("proofread"); });
+        if (rewriteMode) rewriteMode.addEventListener("click", function () { setAppMode("rewrite"); });
 
         if (confirmFullButton) {
             confirmFullButton.addEventListener("click", function () { finishFullDocumentConfirmation(true); });

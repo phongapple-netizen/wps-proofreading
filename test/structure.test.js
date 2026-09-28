@@ -81,7 +81,8 @@ function makeTaskPaneElement(tag) {
 function createResultHarness() {
   const ids = ['issue-filter', 'tab-issues', 'tab-history', 'proofreading-issues', 'empty-state',
     'history-empty', 'proofreading-history', 'result-count', 'result-summary', 'result-stale-summary',
-    'apply-all', 'rerun-proofreading', 'proofreading-status'];
+    'apply-all', 'rerun-proofreading', 'proofreading-status', 'proofreading-view', 'rewrite-view',
+    'mode-proofread', 'mode-rewrite', 'deep-enhance-control'];
   const elements = {};
   ids.forEach((id) => { elements[id] = makeTaskPaneElement(id === 'proofreading-issues' ? 'section' : 'div'); });
   elements['issue-filter'].value = 'all';
@@ -155,6 +156,22 @@ test('document adapter reads and replaces the WPS selection safely', () => {
   assert.equal(win.WpsNativeDocument.readSelectionText(), '原文');
   assert.equal(win.WpsNativeDocument.replaceSelectionText('修订后'), true);
   assert.equal(selection.Range.Text, '修订后');
+});
+
+test('top-level mode switch separates rewrite from proofreading and hides deep enhancement in rewrite mode', () => {
+  const { win, elements } = createResultHarness();
+  elements['rewrite-view'].hidden = true;
+  assert.equal(elements['proofreading-view'].hidden, false);
+  assert.equal(elements['rewrite-view'].hidden, true);
+  assert.equal(win.setAppMode('rewrite'), 'rewrite');
+  assert.equal(elements['proofreading-view'].hidden, true);
+  assert.equal(elements['rewrite-view'].hidden, false);
+  assert.equal(elements['deep-enhance-control'].hidden, true);
+  assert.equal(elements['mode-rewrite'].getAttribute('aria-selected'), 'true');
+  assert.equal(win.setAppMode('proofread'), 'proofread');
+  assert.equal(elements['proofreading-view'].hidden, false);
+  assert.equal(elements['rewrite-view'].hidden, true);
+  assert.equal(elements['deep-enhance-control'].hidden, false);
 });
 
 test('ribbon callback opens one task pane and stores its id', () => {
@@ -340,7 +357,10 @@ test('manual fixed-rule entry persists only after submit through the existing ru
 test('top toolbar and rules center expose the expected controls', () => {
   const html = read('ui/taskpane.html');
   assert.match(html, /<div class="toolbar">/);
-  assert.match(html, /<h1 class="toolbar-title">智能校对<\/h1>/);
+  assert.match(html, /<h1 class="toolbar-title">智能校改<\/h1>/);
+  assert.match(html, /id="mode-proofread"/);
+  assert.match(html, /id="mode-rewrite"/);
+  assert.match(html, /id="rewrite-view"/);
   assert.match(html, /id="rules-toggle"/);
   assert.match(html, /id="settings-toggle"/);
   assert.match(html, /aria-label="设置" title="设置"/);
