@@ -485,7 +485,7 @@
     function canSaveIssueAsRule(issue) {
         if (!issue || !issue.hasOriginal || !issue.hasSuggestion ||
             issue.original === issue.suggestion || issue.actionable === false ||
-            issue.status !== "pending" || issue.ruleSaved) return false;
+            (issue.status !== "pending" && issue.status !== "accepted") || issue.ruleSaved) return false;
         if (issue.origin === "rule") return false;
         if (issue.origin === "rule+ai" && issue.ruleType === "replace") return false;
         return true;
@@ -637,7 +637,8 @@
             ));
             actions.appendChild(actionButton("定位", "issue-action-secondary", issue, "locateProofreadingIssue", state.busy || !pending));
             if (canSaveIssueAsRule(issue) || issue.ruleSaved) {
-                actions.appendChild(saveRuleButton(issue, state.busy || !pending));
+                actions.appendChild(saveRuleButton(issue, state.busy ||
+                    (!pending && issue.status !== "accepted")));
             }
             actions.appendChild(actionButton("忽略", "issue-action-secondary", issue, "ignoreProofreadingIssue", state.busy || !pending));
             header.appendChild(actions);

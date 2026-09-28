@@ -580,7 +580,6 @@
     function bind() {
         var toggle = byId("rules-toggle");
         var newFixedButton = byId("rule-new-fixed");
-        var newAdvancedButton = byId("rule-new-advanced");
         var fixedEditor = byId("fixed-rule-editor");
         var fixedCancel = byId("fixed-rule-cancel");
         var editor = byId("rule-editor");
@@ -599,7 +598,6 @@
             setOpen(panel ? panel.hidden : true);
         });
         if (newFixedButton) newFixedButton.addEventListener("click", function () { openFixedEditor(null); });
-        if (newAdvancedButton) newAdvancedButton.addEventListener("click", function () { openEditor(null); });
         if (fixedEditor) fixedEditor.addEventListener("submit", saveFixedEditor);
         if (fixedCancel) fixedCancel.addEventListener("click", closeFixedEditor);
         if (editor) editor.addEventListener("submit", saveEditor);
