@@ -254,6 +254,24 @@
         }).length;
     }
 
+    function reviewPendingCount() {
+        return state.issues.filter(function (issue) {
+            return issue.status === "pending" && issue.needsReview === true;
+        }).length;
+    }
+
+    function processedCount() {
+        return state.issues.filter(function (issue) {
+            return issue.status === "accepted" || issue.status === "ignored";
+        }).length;
+    }
+
+    function staleCount() {
+        return state.issues.filter(function (issue) {
+            return issue.status === "stale";
+        }).length;
+    }
+
     function isAutoFixable(issue) {
         return issue && issue.status === "pending" &&
             issue.autoFixable === true &&
@@ -269,10 +287,24 @@
 
     function updateCount() {
         var count = byId("result-count");
-        if (count) count.textContent = String(state.issues.length);
+        var pending = pendingCount();
+        var review = reviewPendingCount();
+        var processed = processedCount();
+        var stale = staleCount();
+        var autoFixable = autoFixableCount();
+        if (count) count.textContent = String(pending);
+        var summary = byId("result-summary");
+        if (summary) summary.textContent = "待处理 " + pending + "（其中需复核 " + review +
+            "）· 已处理 " + processed;
+        var staleSummary = byId("result-stale-summary");
+        if (staleSummary) {
+            staleSummary.textContent = "需重查 " + stale;
+            staleSummary.hidden = stale === 0;
+        }
         var applyAllButton = byId("apply-all");
         if (applyAllButton) {
-            applyAllButton.disabled = state.busy || state.actionBusy || autoFixableCount() === 0;
+            applyAllButton.textContent = "修正安全格式项（" + autoFixable + "）";
+            applyAllButton.disabled = state.busy || state.actionBusy || autoFixable === 0;
             applyAllButton.title = pendingCount() > autoFixableCount()
                 ? "仅自动修正内置低风险标点格式规则"
                 : "";
@@ -383,6 +415,7 @@
 
     function clearIssues() {
         state.issues = [];
+        renderedIssueActionButtons = [];
         updateCount();
         var list = byId("proofreading-issues");
         var emptyState = byId("empty-state");
@@ -394,6 +427,15 @@
             emptyState.textContent = "校对结果会显示在这里。";
             emptyState.hidden = false;
         }
+    }
+
+    function beginProofreadingRun() {
+        state.filter = "all";
+        var filter = byId("issue-filter");
+        if (filter) filter.value = "all";
+        clearIssues();
+        switchTab("issues");
+        return true;
     }
 
     function callAction(name, issueId, fallbackMessage) {
@@ -443,6 +485,10 @@
         });
     }
 
+    function isProcessedIssue(issue) {
+        return issue.status === "accepted" || issue.status === "ignored";
+    }
+
     function renderIssues(issues) {
         if (Array.isArray(issues)) {
             state.issues = issues.map(normalizeIssue);
@@ -470,6 +516,21 @@
                 emptyState.hidden = false;
             }
             return state.issues.slice();
+        }
+
+        var processed = shown.filter(isProcessedIssue);
+        var processedDetails = null;
+        var processedList = null;
+        if (processed.length) {
+            processedDetails = root.document.createElement("details");
+            processedDetails.className = "processed-issues";
+            processedDetails.open = false;
+            var processedSummary = root.document.createElement("summary");
+            processedSummary.textContent = "已处理（" + processed.length + "）";
+            processedDetails.appendChild(processedSummary);
+            processedList = root.document.createElement("div");
+            processedList.className = "processed-issues-list";
+            processedDetails.appendChild(processedList);
         }
 
         shown.forEach(function (issue) {
@@ -518,7 +579,7 @@
 
             var actions = root.document.createElement("div");
             actions.className = "issue-actions";
-            actions.appendChild(actionButton("定位", "issue-action-secondary", issue, "locateProofreadingIssue", !pending));
+            actions.appendChild(actionButton("定位", "issue-action-secondary", issue, "locateProofreadingIssue", state.busy || !pending));
             actions.appendChild(actionButton(
                 issue.status === "accepted" ? "撤销" :
                     issue.status === "ignored" ? "已忽略" :
@@ -584,8 +645,10 @@
                 card.appendChild(stateLine);
             }
 
-            list.appendChild(card);
+            (isProcessedIssue(issue) ? processedList : list).appendChild(card);
         });
+
+        if (processedDetails) list.appendChild(processedDetails);
 
         list.hidden = false;
         if (emptyState) emptyState.hidden = true;
@@ -677,6 +740,7 @@
     root.getProofreadingStatus = root.getProofreadingStatus || getProofreadingStatus;
     root.setProofreadingIssues = root.setProofreadingIssues || renderIssues;
     root.clearProofreadingIssues = root.clearProofreadingIssues || clearIssues;
+    root.beginProofreadingRun = root.beginProofreadingRun || beginProofreadingRun;
     root.refreshProofreadingSelection = root.refreshProofreadingSelection || refreshProofreadingSelection;
     root.readSelectedText = root.readSelectedText || readSelectedText;
     root.replaceSelectedText = root.replaceSelectedText || function (value) {
