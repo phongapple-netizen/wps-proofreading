@@ -1208,6 +1208,70 @@ test("failed rerun capture and model configuration preserve the previous suggest
     assert.equal(harness.renderedIssues[0].id, previousIssue.id);
 });
 
+test("invalid OpenCode model configuration preserves previous suggestions before rerun starts", async () => {
+    const harness = createHarness();
+    assert.equal((await harness.window.runProofreading()).accepted, true);
+    const previousSnapshot = harness.window.getWpsProofreadingState().snapshot;
+    const previousIssue = harness.window.getWpsProofreadingState().issues[0];
+    const previousRequestCount = harness.requests.length;
+
+    harness.window.WpsOpenCodeClient = require("../js/opencode-client.js");
+    harness.window.WpsSettingsStore.updateSettings({
+        provider: "opencode",
+        profile: { endpoint: "http://127.0.0.1:4096", model: "invalid-model-name" }
+    });
+
+    const rerun = await harness.window.runProofreading();
+    assert.equal(rerun.accepted, false);
+    assert.equal(rerun.reason, "error");
+    assert.match(harness.status.text, /provider\/model/);
+    assert.equal(harness.requests.length, previousRequestCount);
+    assert.equal(harness.window.getWpsProofreadingState().snapshot, previousSnapshot);
+    assert.equal(harness.renderedIssues[0].id, previousIssue.id);
+});
+
+test("invalid compatible API endpoint preserves previous suggestions before rerun starts", async () => {
+    const harness = createHarness();
+    assert.equal((await harness.window.runProofreading()).accepted, true);
+    const previousSnapshot = harness.window.getWpsProofreadingState().snapshot;
+    const previousIssue = harness.window.getWpsProofreadingState().issues[0];
+    const previousRequestCount = harness.requests.length;
+
+    harness.window.WpsSettingsStore.updateSettings({
+        provider: "openai",
+        profile: { endpoint: "not-a-url", model: "test-model" }
+    });
+
+    const rerun = await harness.window.runProofreading();
+    assert.equal(rerun.accepted, false);
+    assert.equal(rerun.reason, "error");
+    assert.match(harness.status.text, /http:\/\//);
+    assert.equal(harness.requests.length, previousRequestCount);
+    assert.equal(harness.window.getWpsProofreadingState().snapshot, previousSnapshot);
+    assert.equal(harness.renderedIssues[0].id, previousIssue.id);
+});
+
+test("empty compatible API model preserves previous suggestions before rerun starts", async () => {
+    const harness = createHarness();
+    assert.equal((await harness.window.runProofreading()).accepted, true);
+    const previousSnapshot = harness.window.getWpsProofreadingState().snapshot;
+    const previousIssue = harness.window.getWpsProofreadingState().issues[0];
+    const previousRequestCount = harness.requests.length;
+
+    harness.window.WpsSettingsStore.updateSettings({
+        provider: "openai",
+        profile: { endpoint: "https://models.example/v1/chat/completions", model: "" }
+    });
+
+    const rerun = await harness.window.runProofreading();
+    assert.equal(rerun.accepted, false);
+    assert.equal(rerun.reason, "error");
+    assert.match(harness.status.text, /模型名称/);
+    assert.equal(harness.requests.length, previousRequestCount);
+    assert.equal(harness.window.getWpsProofreadingState().snapshot, previousSnapshot);
+    assert.equal(harness.renderedIssues[0].id, previousIssue.id);
+});
+
 test("a confirmed rerun resets suggestions only when the new run starts", async () => {
     const options = { deferConfirmation: true };
     const harness = createHarness(options);
