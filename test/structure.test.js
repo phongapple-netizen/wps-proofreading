@@ -81,12 +81,13 @@ function makeTaskPaneElement(tag) {
 function createResultHarness() {
   const ids = ['issue-filter', 'tab-issues', 'tab-history', 'proofreading-issues', 'empty-state',
     'history-empty', 'proofreading-history', 'result-count', 'result-summary', 'result-stale-summary',
-    'apply-all', 'rerun-proofreading'];
+    'apply-all', 'rerun-proofreading', 'proofreading-status'];
   const elements = {};
   ids.forEach((id) => { elements[id] = makeTaskPaneElement(id === 'proofreading-issues' ? 'section' : 'div'); });
   elements['issue-filter'].value = 'all';
   const documentListeners = {};
   const calls = [];
+  const ruleDrafts = [];
   const win = {
     document: {
       readyState: 'complete',
@@ -99,10 +100,20 @@ function createResultHarness() {
     applyProofreadingIssue: (id) => { calls.push(['apply', id]); return true; },
     undoProofreadingIssue: (id) => { calls.push(['undo', id]); return true; },
     ignoreProofreadingIssue: (id) => { calls.push(['ignore', id]); return true; },
+    openIssueRuleDraft: (issue) => { ruleDrafts.push(issue); return true; },
     applyAllProofreadingIssues: () => { calls.push(['apply-all']); return true; }
   };
   loadBrowserScript('js/taskpane.js', win);
-  return { win, elements, calls };
+  return { win, elements, calls, ruleDrafts };
+}
+
+function findNode(node, predicate) {
+  if (predicate(node)) return node;
+  for (const child of node.children || []) {
+    const found = findNode(child, predicate);
+    if (found) return found;
+  }
+  return null;
 }
 
 test('WPS root files and ribbon callbacks are present', () => {
@@ -176,6 +187,156 @@ test('ribbon callback opens one task pane and stores its id', () => {
   assert.equal(pane.DockPosition, 2);
 });
 
+test('AI issue can open a fixed-rule draft without applying text and shows saved-session feedback', () => {
+  const { win, elements, calls, ruleDrafts } = createResultHarness();
+  win.setProofreadingIssues([{
+    id: 'ai-issue', category: 'wording', origin: 'ai',
+    original: '高空作业', suggestion: '高处作业', actionable: true, status: 'pending'
+  }]);
+
+  const saveButton = findNode(elements['proofreading-issues'], (node) => node.textContent === '保存为规则');
+  assert.ok(saveButton);
+  saveButton.fire('click');
+  assert.equal(ruleDrafts.length, 1);
+  assert.equal(ruleDrafts[0].original, '高空作业');
+  assert.equal(ruleDrafts[0].suggestion, '高处作业');
+  assert.equal(calls.some((call) => call[0] === 'apply'), false);
+
+  win.markProofreadingIssueRuleSaved('ai-issue');
+  const savedButton = findNode(elements['proofreading-issues'], (node) => node.textContent === '已保存规则');
+  assert.ok(savedButton);
+  assert.equal(savedButton.disabled, true);
+  assert.equal(findNode(elements['proofreading-issues'],
+    (node) => node.textContent === '已保存为固定替换规则，下次校对时生效。') !== null, true);
+});
+
+test('accepted AI issues can save a rule without applying again or changing accepted status', () => {
+  const { win, elements, calls, ruleDrafts } = createResultHarness();
+  let documentText = '市消防救援支队';
+  const apply = win.applyProofreadingIssue;
+  win.applyProofreadingIssue = (id) => {
+    apply(id);
+    documentText = '市消防救援局';
+    return true;
+  };
+  const storage = new Map();
+  win.localStorage = {
+    getItem: (key) => storage.get(key) || '',
+    setItem: (key, value) => storage.set(key, String(value))
+  };
+  loadBrowserScript('js/rules-center.js', win);
+  win.setProofreadingIssues([{
+    id: 'accepted-ai', category: 'wording', origin: 'ai',
+    original: '市消防救援支队', suggestion: '市消防救援局', status: 'pending'
+  }]);
+
+  findNode(elements['proofreading-issues'], (node) => node.textContent === '修正').fire('click');
+  assert.deepEqual(calls, [['apply', 'accepted-ai']]);
+  win.setProofreadingIssues([{
+    id: 'accepted-ai', category: 'wording', origin: 'ai',
+    original: '市消防救援支队', suggestion: '市消防救援局', status: 'accepted'
+  }]);
+  assert.ok(findNode(elements['proofreading-issues'], (node) => node.textContent === '撤销'));
+  const save = findNode(elements['proofreading-issues'], (node) => node.textContent === '保存为规则');
+  assert.ok(save);
+  assert.equal(save.disabled, false);
+
+  save.fire('click');
+  assert.equal(ruleDrafts.length, 1);
+  const saved = win.WpsRulesCenter.saveUserReplacementRule({
+    pattern: ruleDrafts[0].original,
+    replacement: ruleDrafts[0].suggestion
+  });
+  assert.equal(saved.type, 'replace');
+  assert.equal(saved.autoFix, false);
+  win.markProofreadingIssueRuleSaved('accepted-ai');
+
+  assert.equal(documentText, '市消防救援局');
+  assert.deepEqual(calls, [['apply', 'accepted-ai']]);
+  assert.ok(findNode(elements['proofreading-issues'], (node) => node.textContent === '撤销'));
+  const savedButton = findNode(elements['proofreading-issues'], (node) => node.textContent === '已保存规则');
+  assert.ok(savedButton);
+  assert.equal(savedButton.disabled, true);
+  assert.match(elements['result-summary'].textContent, /已处理 1/);
+});
+
+test('ignored and stale issues do not offer save-as-rule', () => {
+  const { win, elements } = createResultHarness();
+  win.setProofreadingIssues([
+    { id: 'ignored-ai', origin: 'ai', original: '甲', suggestion: '乙', status: 'ignored' },
+    { id: 'stale-ai', origin: 'ai', original: '丙', suggestion: '丁', status: 'stale' }
+  ]);
+  assert.equal(findNode(elements['proofreading-issues'],
+    (node) => node.textContent === '保存为规则'), null);
+});
+
+test('issues already generated by a local fixed rule do not offer save-as-rule again', () => {
+  const { win, elements } = createResultHarness();
+  win.setProofreadingIssues([{
+    id: 'local-rule', category: 'rule', origin: 'rule', ruleType: 'replace',
+    original: '旧名称', suggestion: '新名称', actionable: true, status: 'pending'
+  }]);
+  assert.equal(findNode(elements['proofreading-issues'],
+    (node) => node.textContent === '保存为规则'), null);
+});
+
+test('manual fixed-rule entry persists only after submit through the existing rules center', () => {
+  function field() {
+    const node = {
+      value: '', textContent: '', hidden: false, disabled: false, checked: false,
+      listeners: {}, children: [], className: '', attributes: {}, style: {}
+    };
+    node.addEventListener = (type, fn) => { (node.listeners[type] = node.listeners[type] || []).push(fn); };
+    node.fire = (type, event) => (node.listeners[type] || []).forEach((fn) => fn(event || {
+      preventDefault() {}, stopPropagation() {}
+    }));
+    node.appendChild = (child) => { node.children.push(child); return child; };
+    node.setAttribute = (name, value) => { node.attributes[name] = String(value); };
+    node.getAttribute = (name) => node.attributes[name] || null;
+    node.classList = { toggle() {}, add() {}, remove() {} };
+    node.focus = () => {};
+    node.scrollIntoView = () => {};
+    return node;
+  }
+  const ids = ['rule-new-fixed', 'fixed-rule-editor', 'fixed-rule-cancel',
+    'fixed-rule-pattern', 'fixed-rule-replacement', 'fixed-rule-name', 'fixed-rule-notes',
+    'fixed-rule-context', 'rules-list', 'rules-empty', 'rules-status'];
+  const elements = Object.fromEntries(ids.map((id) => [id, field()]));
+  elements['fixed-rule-editor'].hidden = true;
+  const storage = new Map();
+  const win = {
+    document: {
+      readyState: 'complete',
+      getElementById: (id) => elements[id] || null,
+      createElement: () => field()
+    },
+    localStorage: {
+      getItem: (key) => storage.get(key) || '',
+      setItem: (key, value) => storage.set(key, String(value))
+    }
+  };
+  loadBrowserScript('js/rules-center.js', win);
+  loadBrowserScript('js/rules-ui.js', win);
+
+  elements['rule-new-fixed'].fire('click');
+  assert.equal(elements['fixed-rule-editor'].hidden, false);
+  elements['fixed-rule-pattern'].value = '市消防救援支队';
+  elements['fixed-rule-replacement'].value = '市消防救援局';
+  elements['fixed-rule-name'].value = '机构名称规范';
+  elements['fixed-rule-notes'].value = '人工确认后建立';
+  assert.equal(win.WpsRulesCenter.getRules().length, 0);
+  elements['fixed-rule-editor'].fire('submit');
+
+  const saved = win.WpsRulesCenter.getRules()[0];
+  assert.equal(saved.pattern, '市消防救援支队');
+  assert.equal(saved.replacement, '市消防救援局');
+  assert.equal(saved.name, '机构名称规范');
+  assert.equal(saved.notes, '人工确认后建立');
+  assert.equal(saved.type, 'replace');
+  assert.equal(saved.autoFix, false);
+  assert.equal(elements['fixed-rule-editor'].hidden, true);
+});
+
 test('top toolbar and rules center expose the expected controls', () => {
   const html = read('ui/taskpane.html');
   assert.match(html, /<div class="toolbar">/);
@@ -185,6 +346,8 @@ test('top toolbar and rules center expose the expected controls', () => {
   assert.match(html, /aria-label="设置" title="设置"/);
   assert.equal(html.slice(0, html.indexOf('<div id="settings-popover"')).includes('id="rules-toggle"'), false);
   assert.match(html, /<div id="settings-popover" class="settings-popover" hidden>/);
+  assert.match(html, /id="rule-new-fixed"/);
+  assert.equal(html.includes("高级规则编辑"), false);
   assert.equal(/id="page-header"|id="selection-heading"|id="selected-text"|id="selection-meta"|id="refresh-selection"|<details/.test(html), false);
   assert.equal((html.match(/id="run-proofreading"/g) || []).length, 1);
   assert.equal((html.match(/id="proofreading-progress"/g) || []).length, 1);
@@ -206,7 +369,9 @@ test('top toolbar and rules center expose the expected controls', () => {
   assert.match(html, /id="rerun-proofreading"/);
   assert.match(html, /id="proofreading-progress"/);
   assert.match(html, /id="progress-fill"/);
-  ['rules-center', 'rules-status', 'rules-list', 'rule-new', 'rule-test-document',
+  ['rules-center', 'rules-status', 'rules-list', 'rule-new-fixed',
+    'fixed-rule-editor', 'fixed-rule-pattern', 'fixed-rule-replacement', 'fixed-rule-name',
+    'fixed-rule-notes', 'rule-test-document',
     'rule-import', 'rule-export', 'builtin-rule-pack', 'builtin-rule-install',
     'builtin-rule-description', 'rule-editor', 'rule-name', 'rule-group', 'rule-type',
     'rule-pattern', 'rule-match-mode', 'rule-instruction', 'rule-replacement',
@@ -241,6 +406,7 @@ test('top toolbar and rules center expose the expected controls', () => {
   assert.match(read('js/rules-ui.js'), /testCurrentDocument/);
   assert.match(read('js/rules-ui.js'), /loadBuiltinCatalog/);
   assert.match(read('js/rules-ui.js'), /installBuiltinPack/);
+  assert.match(read('js/rules-ui.js'), /textContent = "编辑"/);
   assert.match(read('rules/catalog.json'), /chinese-writing-basic\.json/);
   assert.match(read('rules/catalog.json'), /party-government-document\.json/);
   assert.match(read('rules/catalog.json'), /work-safety\.json/);
@@ -462,14 +628,14 @@ test('issue cards locate on body click, keep buttons independent, and offer undo
   const accepted = processedSection.children[1].children[0];
   pending.fire('click');
   assert.deepEqual(calls, [['locate', 'pending']]);
-  pending.children[0].children[1].children[0].fire('click');
-  assert.deepEqual(calls, [['locate', 'pending'], ['locate', 'pending']]);
   pending.children[0].children[1].children[1].fire('click');
+  assert.deepEqual(calls, [['locate', 'pending'], ['locate', 'pending']]);
+  pending.children[0].children[1].children[0].fire('click');
   assert.deepEqual(calls.at(-1), ['apply', 'pending']);
   const analysis = pending.children.find((child) => child.tag === 'details');
   analysis.children[0].fire('click');
   assert.equal(calls.length, 3);
-  const undo = accepted.children[0].children[1].children[1];
+  const undo = accepted.children[0].children[1].children[0];
   assert.equal(undo.textContent, '撤销');
   assert.equal(undo.disabled, false);
   undo.fire('click');
@@ -526,9 +692,9 @@ test('result summaries count pending review, processed, stale, and strict safe-f
   assert.equal(processedSection.children[1].children.length, 2);
   processedSection.open = true;
   const acceptedCard = processedSection.children[1].children.find((card) =>
-    card.children[0].children[1].children[1].textContent === '撤销');
+    card.children[0].children[1].children[0].textContent === '撤销');
   assert.ok(acceptedCard);
-  const undo = acceptedCard.children[0].children[1].children[1];
+  const undo = acceptedCard.children[0].children[1].children[0];
   undo.fire('click');
   assert.deepEqual(calls.at(-1), ['undo', 'accepted']);
 
@@ -539,7 +705,7 @@ test('result summaries count pending review, processed, stale, and strict safe-f
 
   win.setProofreadingBusy(true);
   const waitingCard = elements['proofreading-issues'].children.find((card) =>
-    card.className === 'issue-card' && card.children[0].children[1].children[1].textContent === '修正');
+    card.className === 'issue-card' && card.children[0].children[1].children[0].textContent === '修正');
   assert.ok(waitingCard);
   assert.equal(waitingCard.children[0].children[1].children[0].disabled, true);
   win.setProofreadingBusy(false);
@@ -646,21 +812,22 @@ test('action busy locks issue controls without rebuilding cards and catches reje
   assert.equal(pendingActions[0].disabled, false);
   assert.equal(pendingActions[1].disabled, false);
   assert.equal(pendingActions[2].disabled, false);
-  assert.equal(acceptedActions[0].disabled, true);
-  assert.equal(acceptedActions[1].disabled, false);
-  assert.equal(acceptedActions[2].disabled, true);
+  assert.equal(acceptedActions[0].disabled, false);
+  assert.equal(acceptedActions[1].disabled, true);
+  assert.equal(acceptedActions[2].disabled, false);
+  assert.equal(acceptedActions[3].disabled, true);
   assert.equal(staleActions[0].disabled, true);
   assert.equal(staleActions[1].disabled, true);
   assert.equal(staleActions[2].disabled, true);
-  assert.equal(reviewActions[0].disabled, false);
-  assert.equal(reviewActions[1].disabled, true);
+  assert.equal(reviewActions[0].disabled, true);
+  assert.equal(reviewActions[1].disabled, false);
   assert.equal(reviewActions[2].disabled, false);
 
   cardsBeforeLock[0].fire('click');
   assert.deepEqual(calls, [['locate', 'pending']]);
 
   applyResult = Promise.reject(new Error('正文内容不应出现在错误提示中'));
-  pendingActions[1].fire('click');
+  pendingActions[0].fire('click');
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(calls.at(-1)[0], 'apply');
   assert.equal(win.getProofreadingStatus().text.includes('正文内容不应出现在错误提示中'), false);

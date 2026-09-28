@@ -3,6 +3,7 @@
 
     var lastTestCounts = Object.create(null);
     var builtinCatalog = [];
+    var simpleDraftIssueId = "";
 
     function byId(id) {
         return root.document && root.document.getElementById
@@ -140,6 +141,102 @@
         var editor = byId("rule-editor");
         if (editor) editor.hidden = true;
         clearEditor();
+    }
+
+    function closeFixedEditor() {
+        var editor = byId("fixed-rule-editor");
+        if (editor) editor.hidden = true;
+        ["fixed-rule-pattern", "fixed-rule-replacement", "fixed-rule-name", "fixed-rule-notes"]
+            .forEach(function (id) {
+                var field = byId(id);
+                if (field) field.value = "";
+            });
+        var context = byId("fixed-rule-context");
+        if (context) {
+            context.hidden = true;
+            context.textContent = "";
+        }
+        simpleDraftIssueId = "";
+    }
+
+    function openFixedEditor(issue) {
+        var editor = byId("fixed-rule-editor");
+        if (!editor || !api()) return false;
+        closeEditor();
+        closeFixedEditor();
+        var value = issue || {};
+        var fromIssue = Boolean(issue);
+        if (fromIssue && (!value.hasOriginal || !value.hasSuggestion ||
+            value.original === value.suggestion || value.actionable === false ||
+            value.origin === "rule" ||
+            (value.origin === "rule+ai" && value.ruleType === "replace"))) return false;
+
+        var pattern = byId("fixed-rule-pattern");
+        var replacement = byId("fixed-rule-replacement");
+        var name = byId("fixed-rule-name");
+        var notes = byId("fixed-rule-notes");
+        if (pattern) pattern.value = fromIssue ? value.original : "";
+        if (replacement) replacement.value = fromIssue ? value.suggestion : "";
+        if (name) name.value = fromIssue
+            ? (value.original + " → " + (value.suggestion || "删除"))
+            : "";
+        if (notes) notes.value = "";
+        var context = byId("fixed-rule-context");
+        if (context) {
+            context.hidden = !fromIssue;
+            context.textContent = fromIssue
+                ? "校对建议：" + value.original + " → " + (value.suggestion === "" ? "建议删除" : value.suggestion)
+                : "";
+        }
+        simpleDraftIssueId = fromIssue ? String(value.id || "") : "";
+        editor.hidden = false;
+        if (typeof editor.scrollIntoView === "function") editor.scrollIntoView({ block: "nearest" });
+        if (pattern && !fromIssue && typeof pattern.focus === "function") pattern.focus();
+        return true;
+    }
+
+    function saveFixedEditor(event) {
+        if (event && typeof event.preventDefault === "function") event.preventDefault();
+        if (!api() || typeof api().saveUserReplacementRule !== "function") return false;
+        function value(id) {
+            var field = byId(id);
+            return field ? field.value : "";
+        }
+        try {
+            api().saveUserReplacementRule({
+                pattern: value("fixed-rule-pattern"),
+                replacement: value("fixed-rule-replacement"),
+                name: value("fixed-rule-name"),
+                notes: value("fixed-rule-notes")
+            });
+            var issueId = simpleDraftIssueId;
+            closeFixedEditor();
+            lastTestCounts = Object.create(null);
+            renderRules();
+            setStatus("规则已保存。", "success");
+            if (issueId && typeof root.markProofreadingIssueRuleSaved === "function") {
+                root.markProofreadingIssueRuleSaved(issueId);
+                if (typeof root.setProofreadingStatus === "function") {
+                    root.setProofreadingStatus("已保存为固定替换规则，下次校对时生效。", "success");
+                }
+            }
+            return true;
+        } catch (error) {
+            var message = error && error.message ? error.message : "规则保存失败。";
+            if (message === "已有相同匹配内容但不同替换结果的规则，请到规则中心确认。") {
+                closeFixedEditor();
+                renderRules();
+            }
+            setStatus(message, "warning");
+            return false;
+        }
+    }
+
+    function openIssueRuleDraft(issue) {
+        setOpen(true);
+        var opened = openFixedEditor(issue);
+        if (!opened) setStatus("这条建议不能保存为固定替换规则。", "warning");
+        return opened;
     }
 
     function readEditor() {
@@ -482,7 +579,9 @@
 
     function bind() {
         var toggle = byId("rules-toggle");
-        var newButton = byId("rule-new");
+        var newFixedButton = byId("rule-new-fixed");
+        var fixedEditor = byId("fixed-rule-editor");
+        var fixedCancel = byId("fixed-rule-cancel");
         var editor = byId("rule-editor");
         var cancel = byId("rule-cancel");
         var remove = byId("rule-delete");
@@ -498,7 +597,9 @@
             var panel = byId("rules-center");
             setOpen(panel ? panel.hidden : true);
         });
-        if (newButton) newButton.addEventListener("click", function () { openEditor(null); });
+        if (newFixedButton) newFixedButton.addEventListener("click", function () { openFixedEditor(null); });
+        if (fixedEditor) fixedEditor.addEventListener("submit", saveFixedEditor);
+        if (fixedCancel) fixedCancel.addEventListener("click", closeFixedEditor);
         if (editor) editor.addEventListener("submit", saveEditor);
         if (cancel) cancel.addEventListener("click", closeEditor);
         if (remove) remove.addEventListener("click", deleteCurrentRule);
@@ -528,6 +629,7 @@
     root.closeRulesCenter = function () { return setOpen(false); };
     root.renderRulesCenter = renderRules;
     root.testRulesAgainstCurrentDocument = testDocument;
+    root.openIssueRuleDraft = openIssueRuleDraft;
 
     if (root.document) {
         if (root.document.readyState === "loading") {

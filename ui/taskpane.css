@@ -911,6 +911,30 @@ h2 {
     border-top: 1px solid var(--line);
 }
 
+.fixed-rule-editor {
+    margin-top: 12px;
+    padding: 12px;
+    border: 1px solid #dbe5f8;
+    border-radius: 8px;
+    background: #f8fbff;
+}
+
+.fixed-rule-editor h3 {
+    margin: 0 0 8px;
+    font-size: 14px;
+}
+
+.fixed-rule-context {
+    margin: 0 0 10px;
+    color: var(--muted);
+    font-size: 12px;
+    overflow-wrap: anywhere;
+}
+
+.rule-saved-feedback {
+    color: var(--success, #26734d);
+}
+
 .rule-textarea {
     resize: vertical;
     min-height: 52px;

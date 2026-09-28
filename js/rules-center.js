@@ -202,6 +202,42 @@
         return rule;
     }
 
+    function saveUserReplacementRule(candidate) {
+        var value = candidate && typeof candidate === "object" ? candidate : {};
+        var pattern = trim(value.pattern, 500);
+        var replacement = text(value.replacement).slice(0, 1000);
+        if (!pattern) throw new Error("查找文字不能为空。");
+        if (pattern === replacement) throw new Error("查找文字和替换文字不能完全相同。");
+
+        var rules = getRules();
+        var exact = rules.some(function (rule) {
+            return rule.type === "replace" && rule.pattern === pattern &&
+                rule.replacement === replacement;
+        });
+        if (exact) throw new Error("这条固定替换规则已经存在。");
+        var conflicting = rules.some(function (rule) {
+            return rule.type === "replace" && rule.pattern === pattern &&
+                rule.replacement !== replacement;
+        });
+        if (conflicting) {
+            throw new Error("已有相同匹配内容但不同替换结果的规则，请到规则中心确认。");
+        }
+
+        var rule = createRule({
+            name: trim(value.name, 120) || (pattern + " → " + (replacement || "删除")),
+            group: "我的规则",
+            type: "replace",
+            pattern: pattern,
+            replacement: replacement,
+            severity: "medium",
+            autoFix: false,
+            priority: 50,
+            source: "用户自定义",
+            notes: value.notes
+        });
+        return saveRule(rule);
+    }
+
     function removeRule(id) {
         var key = text(id);
         var state = readState();
@@ -282,6 +318,7 @@
                 ruleName: rule.name,
                 ruleGroup: rule.group,
                 ruleSource: rule.source,
+                ruleType: rule.type,
                 severity: rule.severity,
                 priority: rule.priority,
                 original: original,
@@ -511,6 +548,7 @@
         setRuleEnabled: setRuleEnabled,
         clearRules: clearRules,
         createRule: createRule,
+        saveUserReplacementRule: saveUserReplacementRule,
         evaluate: evaluate,
         collectAiReviewCandidates: collectAiReviewCandidates,
         summarizeMatches: summarizeMatches,
