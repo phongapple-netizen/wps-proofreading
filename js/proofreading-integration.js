@@ -297,6 +297,32 @@
         };
     }
 
+    function validateModelOptions(options) {
+        options = options || {};
+        if (options.provider === "opencode") {
+            if (!root.WpsOpenCodeClient ||
+                typeof root.WpsOpenCodeClient.normalizeEndpoint !== "function" ||
+                typeof root.WpsOpenCodeClient.parseModelName !== "function") {
+                throw new Error("OpenCode 客户端模块没有加载。");
+            }
+            root.WpsOpenCodeClient.normalizeEndpoint(options.endpoint);
+            root.WpsOpenCodeClient.parseModelName(options.model);
+            return options;
+        }
+        if (!root.WpsProofreadingCore ||
+            typeof root.WpsProofreadingCore.createModelRequest !== "function") {
+            throw new Error("模型请求模块没有加载。");
+        }
+        root.WpsProofreadingCore.createModelRequest(
+            options.provider === "ollama" ? "ollama" : "openai",
+            options.endpoint,
+            options.model,
+            options.apiKey,
+            ""
+        );
+        return options;
+    }
+
     function isDeepMode() {
         return currentSettings().deep === true;
     }
@@ -745,7 +771,7 @@
                 await root.WpsRulesReady;
             }
             snapshot = captureSnapshot();
-            var options = modelOptions();
+            var options = validateModelOptions(modelOptions());
             var providerLabel = providerDisplayName(options.provider);
             var scopeLabel = snapshot.mode === "full" ? "全文" : "选区";
             if (snapshot.mode === "full") {
