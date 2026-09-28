@@ -7,6 +7,11 @@ const core = require('../js/rewrite-core.js');
 
 const projectRoot = path.resolve(__dirname, '..');
 
+test('rewrite action controls have the DOM id used to toggle them after replacement and undo', () => {
+  const html = fs.readFileSync(path.join(projectRoot, 'ui/taskpane.html'), 'utf8');
+  assert.match(html, /<div\s+id="rewrite-result-actions"\s+class="rewrite-actions rewrite-result-actions">/);
+});
+
 function makeElement(id) {
   const listeners = {};
   return {
@@ -88,8 +93,45 @@ test('rewrite generation previews only selected text and replacement can be undo
   assert.equal(harness.win.replaceRewriteSelection(), true);
   assert.equal(harness.getBody(), '前文。市安委办拟于2026年9月完成17项整改工作。后文。');
   assert.equal(harness.elements['rewrite-completed'].hidden, false);
+  assert.equal(harness.elements['rewrite-result-actions'].hidden, true);
   assert.equal(harness.win.undoRewrite(), true);
   assert.equal(harness.getBody(), before);
+  assert.equal(harness.elements['rewrite-completed'].hidden, true);
+  assert.equal(harness.elements['rewrite-result-actions'].hidden, false);
+});
+
+test('a failed second generation cannot pair an earlier preview with the new selection', async () => {
+  const first = '甲公司拟完成17项整改。';
+  const second = '乙公司拟完成18项整改。';
+  const source = `前文。${first}中间。${second}后文。`;
+  const harness = createHarness({ source, selectedText: first });
+  harness.win.setResponse(JSON.stringify({ rewrittenText: '甲公司拟完成17项整改工作。' }));
+  assert.equal(await harness.win.generateRewrite(), true);
+  harness.app.Selection.Range = { Text: second, Start: source.indexOf(second), End: source.indexOf(second) + second.length };
+  harness.win.setResponse('invalid JSON');
+  assert.equal(await harness.win.generateRewrite(), false);
+  assert.equal(harness.elements['rewrite-result'].hidden, true);
+  assert.equal(harness.elements['replace-rewrite'].disabled, true);
+  assert.equal(harness.win.replaceRewriteSelection(), false);
+  assert.equal(harness.getBody(), source);
+});
+
+test('cancelling a second generation leaves no earlier replaceable preview', async () => {
+  const first = '甲公司拟完成17项整改。';
+  const second = '乙公司拟完成18项整改。';
+  const source = `${first}${second}`;
+  const harness = createHarness({ source, selectedText: first, defer: true });
+  const firstRun = harness.win.generateRewrite();
+  harness.win.resolveModel(JSON.stringify({ rewrittenText: '甲公司拟完成17项整改工作。' }));
+  assert.equal(await firstRun, true);
+  harness.app.Selection.Range = { Text: second, Start: source.indexOf(second), End: source.indexOf(second) + second.length };
+  const secondRun = harness.win.generateRewrite();
+  assert.equal(harness.elements['rewrite-result'].hidden, true);
+  assert.equal(harness.win.cancelRewrite(), true);
+  harness.win.resolveModel(JSON.stringify({ rewrittenText: '乙公司拟完成18项整改工作。' }));
+  assert.equal(await secondRun, false);
+  assert.equal(harness.win.replaceRewriteSelection(), false);
+  assert.equal(harness.getBody(), source);
 });
 
 test('rewriting is unavailable without a selection and a generated result is invalidated by document edits', async () => {
@@ -120,6 +162,20 @@ test('hard fact changes cannot be replaced and soft warnings require explicit co
   soft.elements['rewrite-risk-confirm'].checked = true;
   soft.elements['rewrite-risk-confirm'].fire('change');
   assert.equal(soft.elements['replace-rewrite'].disabled, false);
+
+  const modelWarning = createHarness();
+  modelWarning.win.setResponse(JSON.stringify({
+    rewrittenText: '市安委办拟于2026年9月完成17项整改工作。',
+    warnings: ['请核对责任主体']
+  }));
+  assert.equal(await modelWarning.win.generateRewrite(), true);
+  assert.equal(modelWarning.elements['rewrite-risk-confirm-row'].hidden, false);
+  assert.equal(modelWarning.elements['replace-rewrite'].disabled, true);
+  assert.equal(modelWarning.win.replaceRewriteSelection(), false);
+  modelWarning.elements['rewrite-risk-confirm'].checked = true;
+  modelWarning.elements['rewrite-risk-confirm'].fire('change');
+  assert.equal(modelWarning.elements['replace-rewrite'].disabled, false);
+  assert.equal(modelWarning.win.replaceRewriteSelection(), true);
 });
 
 test('replacement and undo both reject stale text or changed surrounding anchors', async () => {

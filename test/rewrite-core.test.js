@@ -32,6 +32,35 @@ test('hard fact changes block replacement while status, strength, and actor chan
   assert.match(soft.warnings.map((item) => item.message).join('\n'), /拟|督促|市安委办/);
 });
 
+test('new policy strength, completion status, and responsibility language require review', () => {
+  const original = core.extractRewriteGuards('甲公司推进整改。');
+  const changed = core.compareRewriteGuards(original, '甲公司必须确保责任主体已完成整改。');
+  assert.equal(changed.hardRisks.length, 0);
+  assert.equal(changed.requiresConfirmation, true);
+  assert.match(changed.warnings.map((item) => item.message).join('\n'), /必须/);
+  assert.match(changed.warnings.map((item) => item.message).join('\n'), /已完成/);
+  assert.match(changed.warnings.map((item) => item.message).join('\n'), /责任主体/);
+});
+
+test('organization extraction omits leading instructions and recognizes short company names', () => {
+  const original = core.extractRewriteGuards('由市安委办督促甲公司，请乙公司落实。');
+  assert.deepEqual(original.organizations, ['市安委办', '甲公司', '乙公司']);
+  assert.deepEqual(core.extractRewriteGuards('该事项由甲公司负责。').organizations, ['甲公司']);
+  const changed = core.compareRewriteGuards(original, '由市安委办督促丙公司，请乙公司落实。');
+  assert.match(changed.warnings.map((item) => item.message).join('\n'), /甲公司/);
+  assert.match(changed.warnings.map((item) => item.message).join('\n'), /丙公司/);
+});
+
+test('signed percentages and ratios are indivisible hard facts', () => {
+  const original = core.extractRewriteGuards('同比下降-5%，投入产出比为1:2。');
+  assert.deepEqual(original.numbers, ['-5%', '1:2']);
+  for (const rewritten of ['同比下降5%，投入产出比为1:2。', '同比下降-5%，投入产出比为2:1。']) {
+    const changed = core.compareRewriteGuards(original, rewritten);
+    assert.equal(changed.canReplace, false);
+    assert.ok(changed.hardRisks.length > 0);
+  }
+});
+
 test('rewrite prompts are independent, preserve optional requirements as data, and demand strict JSON', () => {
   const prompt = core.buildRewritePrompt('原文：拟于2026年9月完成。', '篇幅不要增加');
   assert.match(prompt, /严格 JSON/);
@@ -52,7 +81,9 @@ test('rewrite response parser accepts only a JSON object with rewrittenText', ()
 test('model warnings always require explicit review, while hard risks cannot be overridden', () => {
   const unchanged = core.compareRewriteGuards(core.extractRewriteGuards('17项任务'), '17项工作');
   assert.equal(core.summarizeRewriteRisk(unchanged, []).level, 'safe');
-  assert.equal(core.summarizeRewriteRisk(unchanged, ['主体需要核实']).canReplace, false);
+  const warned = core.summarizeRewriteRisk(unchanged, ['主体需要核实']);
+  assert.equal(warned.canReplace, false);
+  assert.equal(warned.requiresConfirmation, true);
 
   const changed = core.compareRewriteGuards(core.extractRewriteGuards('17项任务'), '16项任务');
   assert.equal(core.summarizeRewriteRisk(changed, []).level, 'blocked');

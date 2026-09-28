@@ -2,11 +2,12 @@
     "use strict";
 
     var MAX_SELECTION_CHARACTERS = 5000;
-    var NUMBER_FACT_PATTERN = /(?:\d{4}\s*年(?:\s*\d{1,2}\s*月(?:\s*\d{1,2}\s*[日号])?)?|\d{1,2}\s*月\s*\d{1,2}\s*[日号]|\d+(?:,\d{3})*(?:\.\d+)?\s*(?:万亿元|亿元|万元|万美元|万|亿|元|美元|百分比|百分点|%|％|GW|MW|kW|KW|W|kV|KV|V|mA|A|Hz|TB|GB|MB|公里\/小时|公里|千米|米|吨|公斤|千克|克|小时|分钟|秒|天|日|月|年|项|个|人次|人|家|次|台|套|件|座|条|处|户|平方米|平方公里|升|毫升|度)?|[零〇一二三四五六七八九十百千万亿两]+\s*(?:万亿元|亿元|万元|元|%|％|年|月|日|号|项|个|人次|人|家|次|台|套|件|公里|千米|米|吨|小时|分钟|天|处|户))/g;
-    var STATUS_WORDS = ["拟", "计划", "将", "正在", "已", "完成", "持续", "进一步"];
+    var NUMBER_FACT_PATTERN = /(?:\d{4}\s*年(?:\s*\d{1,2}\s*月(?:\s*\d{1,2}\s*[日号])?)?|\d{1,2}\s*月\s*\d{1,2}\s*[日号]|[-+−－]?\d+(?:,\d{3})*(?:\.\d+)?\s*[:：]\s*[-+−－]?\d+(?:,\d{3})*(?:\.\d+)?|[-+−－]?\d+(?:,\d{3})*(?:\.\d+)?\s*(?:万亿元|亿元|万元|万美元|万|亿|元|美元|百分比|百分点|%|％|GW|MW|kW|KW|W|kV|KV|V|mA|A|Hz|TB|GB|MB|公里\/小时|公里|千米|米|吨|公斤|千克|克|小时|分钟|秒|天|日|月|年|项|个|人次|人|家|次|台|套|件|座|条|处|户|平方米|平方公里|升|毫升|度)?|[零〇一二三四五六七八九十百千万亿两]+\s*(?:万亿元|亿元|万元|元|%|％|年|月|日|号|项|个|人次|人|家|次|台|套|件|公里|千米|米|吨|小时|分钟|天|处|户))/g;
+    var STATUS_WORDS = ["拟", "计划", "将", "正在", "已", "已完成", "完成", "持续", "进一步"];
     var STRENGTH_WORDS = ["可", "建议", "应", "应当", "不得", "严禁", "必须", "原则上", "视情"];
-    var RESPONSIBILITY_WORDS = ["负责", "督促", "牵头", "组织", "推动", "落实", "承担", "要求"];
-    var ORGANIZATION_PATTERN = /[\u4e00-\u9fffA-Za-z0-9·]{2,20}(?:委员会|管理局|应急局|安委办|办公室|支队|大队|总队|政府|厅|局|部|委|办|处|科|中心|公司|集团|法院|检察院)/g;
+    var RESPONSIBILITY_WORDS = ["负责", "督促", "牵头", "组织", "推动", "落实", "承担", "要求", "责任主体"];
+    var ORGANIZATION_PATTERN = /[\u4e00-\u9fffA-Za-z0-9·]{1,20}?(?:委员会|管理局|应急局|安委办|办公室|支队|大队|总队|政府|中心|公司|集团|法院|检察院|厅|局|部|委|办|处|科)/g;
+    var ORGANIZATION_LEADING_WORDS = /^(?:由|请|对|向|与|和|及|让|将|拟|已|要求|督促|责成|协调|通知|组织|推动|交由|联合|会同)+/;
 
     function text(value) {
         return String(value == null ? "" : value);
@@ -32,6 +33,15 @@
         return matches;
     }
 
+    function extractOrganizations(source) {
+        return extractMatches(source, ORGANIZATION_PATTERN).map(function (name) {
+            // The regex can start in preceding prose without punctuation, e.g. “该事项由甲公司”.
+            var cue = Math.max(name.lastIndexOf("由"), name.lastIndexOf("请"));
+            if (cue >= 0 && name.length - cue > 3) name = name.slice(cue + 1);
+            return name.replace(ORGANIZATION_LEADING_WORDS, "");
+        }).filter(function (name) { return name.length > 0; });
+    }
+
     function extractRewriteGuards(value) {
         var source = text(value);
         return {
@@ -40,7 +50,7 @@
             statuses: STATUS_WORDS.filter(function (word) { return source.indexOf(word) >= 0; }),
             strengths: STRENGTH_WORDS.filter(function (word) { return source.indexOf(word) >= 0; }),
             responsibilities: RESPONSIBILITY_WORDS.filter(function (word) { return source.indexOf(word) >= 0; }),
-            organizations: extractMatches(source, ORGANIZATION_PATTERN)
+            organizations: extractOrganizations(source)
         };
     }
 
@@ -94,6 +104,19 @@
         }
     }
 
+    function addedTerms(originalItems, rewrittenItems, kind, label, warnings) {
+        var added = (rewrittenItems || []).filter(function (item) {
+            return (originalItems || []).indexOf(item) < 0;
+        });
+        if (added.length) {
+            warnings.push({
+                type: kind,
+                terms: added,
+                message: "建议人工核对：改写结果新增了原文没有的" + label + "“" + added.join("、") + "”。"
+            });
+        }
+    }
+
     function compareRewriteGuards(guards, rewrittenValue) {
         var rewritten = text(rewrittenValue);
         var current = guards || {};
@@ -104,9 +127,13 @@
         compareFactSet(current.numbers, after.numbers, "number", "数字、日期或单位", hardRisks);
         compareFactSet(current.titles, after.titles, "title", "书名号内的文件或政策名称", hardRisks);
         missingTerms(current.statuses, rewritten, "status", "事项状态词", warnings);
+        addedTerms(current.statuses, after.statuses, "status", "事项状态词", warnings);
         missingTerms(current.strengths, rewritten, "strength", "政策强度词", warnings);
+        addedTerms(current.strengths, after.strengths, "strength", "政策强度词", warnings);
         missingTerms(current.responsibilities, rewritten, "responsibility", "责任动作词", warnings);
+        addedTerms(current.responsibilities, after.responsibilities, "responsibility", "责任动作词", warnings);
         missingTerms(current.organizations, rewritten, "organization", "机构或责任主体名称", warnings);
+        addedTerms(current.organizations, after.organizations, "organization", "机构或责任主体名称", warnings);
 
         return {
             hardRisks: hardRisks,
@@ -162,6 +189,7 @@
                 level: "blocked",
                 title: "改写结果改变了原文中的关键事实",
                 details: value.hardRisks.map(function (item) { return item.message; }),
+                requiresConfirmation: false,
                 canReplace: false
             };
         }
@@ -171,6 +199,7 @@
             level: details.length ? "review" : "safe",
             title: details.length ? "建议人工核对改写结果" : "数字、日期、单位和文件名称未发现变化",
             details: details,
+            requiresConfirmation: details.length > 0,
             canReplace: details.length === 0
         };
     }

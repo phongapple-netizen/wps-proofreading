@@ -5,7 +5,6 @@
     var REWRITE_SYSTEM_PROMPT = "你是一名中文正式文稿编辑，专门对用户选中的文字进行理顺改写。" +
         "只处理用户提供的选区，不续写、不补充常识、不调用工具。宁可少改，也不要为了语言流畅而改变任何事实。" +
         "必须只按要求返回严格 JSON。";
-    var snapshot = null;
     var result = null;
     var undoRecord = null;
     var controller = null;
@@ -273,8 +272,22 @@
             (result.risk.requiresConfirmation && !checked("rewrite-risk-confirm"));
     }
 
+    function clearResult() {
+        result = null;
+        var panel = byId("rewrite-result");
+        var actions = byId("rewrite-result-actions");
+        var completed = byId("rewrite-completed");
+        var confirm = byId("rewrite-risk-confirm");
+        if (panel) panel.hidden = true;
+        if (actions) actions.hidden = false;
+        if (completed) completed.hidden = true;
+        if (confirm) confirm.checked = false;
+        updateReplaceButton();
+    }
+
     async function generateRewrite(savedSnapshot) {
         if (busy) return false;
+        clearResult();
         var nextSnapshot;
         try {
             nextSnapshot = savedSnapshot || captureSnapshot();
@@ -287,12 +300,11 @@
             return false;
         }
 
-        snapshot = nextSnapshot;
-        var guards = root.WpsRewriteCore.extractRewriteGuards(snapshot.original);
+        var guards = root.WpsRewriteCore.extractRewriteGuards(nextSnapshot.original);
         var prompt;
         var options;
         try {
-            prompt = root.WpsRewriteCore.buildRewritePrompt(snapshot.original, readRequirements());
+            prompt = root.WpsRewriteCore.buildRewritePrompt(nextSnapshot.original, readRequirements());
             options = modelOptions();
             if (options.provider === "opencode") {
                 root.WpsOpenCodeClient.normalizeEndpoint(options.endpoint);
@@ -315,7 +327,7 @@
         try {
             var response = await requestRewriteModel(options, prompt);
             if (controller && controller.signal.aborted) throw new Error("改写已取消。");
-            if (!contextMatches(snapshot.original, snapshot, snapshot.end)) {
+            if (!contextMatches(nextSnapshot.original, nextSnapshot, nextSnapshot.end)) {
                 throw new Error("原文在生成改写后已发生变化，请重新选择并生成。");
             }
             var parsed = root.WpsRewriteCore.parseRewriteResponse(response);
@@ -323,7 +335,7 @@
             var risk = root.WpsRewriteCore.summarizeRewriteRisk(comparison, parsed.warnings);
             undoRecord = null;
             renderResult({
-                snapshot: snapshot,
+                snapshot: nextSnapshot,
                 rewrittenText: parsed.rewrittenText,
                 summary: parsed.summary,
                 modelWarnings: parsed.warnings,
@@ -346,18 +358,19 @@
     }
 
     function replaceOriginal() {
-        if (!result || !snapshot || result.risk.hardRisks.length ||
+        if (!result || result.risk.hardRisks.length ||
             (result.risk.requiresConfirmation && !checked("rewrite-risk-confirm"))) return false;
-        var validation = contextMatches(snapshot.original, snapshot, snapshot.end);
+        var saved = result.snapshot;
+        var validation = contextMatches(saved.original, saved, saved.end);
         if (!validation) {
             setStatus("原文在生成改写后已发生变化，请重新生成。", "warning");
             return false;
         }
         try {
-            var range = validation.document.Range(snapshot.start, snapshot.end);
+            var range = validation.document.Range(saved.start, saved.end);
             range.Text = result.rewrittenText;
-            var rewrittenEnd = snapshot.start + result.rewrittenText.length;
-            if (!contextMatches(result.rewrittenText, snapshot, rewrittenEnd)) {
+            var rewrittenEnd = saved.start + result.rewrittenText.length;
+            if (!contextMatches(result.rewrittenText, saved, rewrittenEnd)) {
                 setStatus("WPS 未能验证替换结果，请检查正文；为安全起见，暂不可撤销。", "warning");
                 undoRecord = null;
                 return false;
@@ -365,7 +378,7 @@
             operationCounter += 1;
             undoRecord = {
                 operationId: "rewrite-" + Date.now().toString(36) + "-" + operationCounter,
-                snapshot: snapshot,
+                snapshot: saved,
                 rewrittenText: result.rewrittenText,
                 rewrittenEnd: rewrittenEnd
             };
@@ -400,7 +413,10 @@
             }
             undoRecord = null;
             var completed = byId("rewrite-completed");
+            var actions = byId("rewrite-result-actions");
             if (completed) completed.hidden = true;
+            if (actions) actions.hidden = false;
+            updateReplaceButton();
             setStatus("已撤销本次改写。", "success");
             return true;
         } catch (error) {
@@ -411,17 +427,8 @@
 
     function discardRewrite() {
         if (busy) return false;
-        result = null;
-        snapshot = null;
+        clearResult();
         undoRecord = null;
-        var panel = byId("rewrite-result");
-        var complete = byId("rewrite-completed");
-        var replaceActions = byId("rewrite-result-actions");
-        if (panel) panel.hidden = true;
-        if (complete) complete.hidden = true;
-        if (replaceActions) replaceActions.hidden = false;
-        var confirm = byId("rewrite-risk-confirm");
-        if (confirm) confirm.checked = false;
         setStatus("已放弃改写，正文没有变化。", "idle");
         return true;
     }
@@ -444,7 +451,7 @@
         if (cancel) cancel.addEventListener("click", cancelRewrite);
         if (replace) replace.addEventListener("click", replaceOriginal);
         if (regenerate) regenerate.addEventListener("click", function () {
-            if (snapshot) generateRewrite(snapshot);
+            if (result) generateRewrite(result.snapshot);
         });
         if (discard) discard.addEventListener("click", discardRewrite);
         if (undo) undo.addEventListener("click", undoRewrite);
