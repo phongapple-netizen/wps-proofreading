@@ -225,17 +225,22 @@
             </div>
             <div class="tab-bar" role="tablist">
                 <button id="tab-issues" class="tab is-active" type="button" role="tab" aria-selected="true">
-                    错误更正 <span id="result-count" class="count-badge">0</span>
+                    校对建议 <span id="result-count" class="count-badge">0</span>
                 </button>
                 <button id="tab-history" class="tab" type="button" role="tab" aria-selected="false">修改记录</button>
             </div>
             <div id="proofreading-status" class="status status-idle" role="status" aria-live="polite">等待开始</div>
+            <div id="result-summary" class="result-summary" role="status" aria-live="polite">待处理 0（其中需复核 0）· 已处理 0</div>
+            <div id="result-stale-summary" class="result-stale-summary" role="status" aria-live="polite" hidden>需重查 0</div>
             <div id="empty-state" class="empty-state">校对结果会显示在这里。</div>
             <div id="proofreading-issues" class="issue-list" hidden></div>
             <div id="history-empty" class="empty-state" hidden>本次会话还没有处理记录。</div>
             <div id="proofreading-history" class="history-list" hidden></div>
             <div class="result-footer">
-                <button id="apply-all" class="button button-primary" type="button" disabled>一键修正</button>
+                <div class="apply-all-wrap">
+                    <button id="apply-all" class="button button-primary" type="button" disabled>修正安全格式项（0）</button>
+                    <p class="apply-all-note">仅处理低风险格式规则</p>
+                </div>
                 <button id="rerun-proofreading" class="button button-secondary" type="button">重新校对</button>
             </div>
         </section>

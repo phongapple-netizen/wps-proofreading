@@ -447,6 +447,17 @@ h2 {
     color: var(--error);
 }
 
+.result-summary,
+.result-stale-summary {
+    margin: 0 0 8px;
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.result-stale-summary {
+    color: var(--warning);
+}
+
 .empty-state {
     padding: 20px 8px 7px;
     color: var(--muted);
@@ -494,6 +505,27 @@ h2 {
 
 .issue-card.is-locatable {
     cursor: pointer;
+}
+
+.processed-issues {
+    margin-top: 9px;
+}
+
+.processed-issues > summary {
+    padding: 7px 9px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    background: #fbfcfe;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.processed-issues-list {
+    display: grid;
+    gap: 9px;
+    margin-top: 8px;
 }
 
 .issue-card-header {
@@ -656,11 +688,29 @@ h2 {
 
 .result-footer {
     display: flex;
+    align-items: flex-start;
     gap: 8px;
     margin-top: 12px;
 }
 
-.result-footer .button {
+.apply-all-wrap {
+    flex: 1;
+    min-width: 0;
+}
+
+.apply-all-wrap .button {
+    width: 100%;
+}
+
+.apply-all-note {
+    margin: 4px 2px 0;
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.4;
+    text-align: center;
+}
+
+.result-footer > .button {
     flex: 1;
 }
 

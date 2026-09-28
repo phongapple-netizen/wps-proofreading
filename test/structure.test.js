@@ -22,6 +22,89 @@ function loadBrowserScript(relativePath, windowObject) {
   return windowObject;
 }
 
+function makeTaskPaneElement(tag) {
+  const node = {
+    tag: tag || 'div',
+    children: [],
+    parent: null,
+    listeners: {},
+    attributes: {},
+    className: '',
+    hidden: false,
+    disabled: false,
+    value: '',
+    open: false,
+    style: {}
+  };
+  node.appendChild = (child) => {
+    child.parent = node;
+    node.children.push(child);
+    return child;
+  };
+  node.setAttribute = (name, value) => { node.attributes[name] = String(value); };
+  node.getAttribute = (name) => node.attributes[name] || null;
+  node.classList = {
+    toggle(name, enabled) {
+      const names = node.className.split(/\s+/).filter(Boolean);
+      const has = names.includes(name);
+      const shouldHave = enabled === undefined ? !has : enabled;
+      if (shouldHave && !has) names.push(name);
+      if (!shouldHave && has) names.splice(names.indexOf(name), 1);
+      node.className = names.join(' ');
+    },
+    add(name) { this.toggle(name, true); },
+    remove(name) { this.toggle(name, false); }
+  };
+  node.addEventListener = (type, fn) => {
+    (node.listeners[type] = node.listeners[type] || []).push(fn);
+  };
+  node.fire = (type, event) => {
+    let stopped = false;
+    const value = event || {};
+    if (typeof value.stopPropagation !== 'function') value.stopPropagation = () => { stopped = true; };
+    const originalStop = value.stopPropagation;
+    value.stopPropagation = () => { stopped = true; originalStop(); };
+    let current = node;
+    while (current && !stopped) {
+      (current.listeners[type] || []).forEach((fn) => fn(value));
+      current = current.parent;
+    }
+  };
+  Object.defineProperty(node, 'textContent', {
+    get() { return node._textContent || ''; },
+    set(value) { node._textContent = String(value == null ? '' : value); node.children = []; }
+  });
+  node.focus = () => {};
+  return node;
+}
+
+function createResultHarness() {
+  const ids = ['issue-filter', 'tab-issues', 'tab-history', 'proofreading-issues', 'empty-state',
+    'history-empty', 'proofreading-history', 'result-count', 'result-summary', 'result-stale-summary',
+    'apply-all', 'rerun-proofreading'];
+  const elements = {};
+  ids.forEach((id) => { elements[id] = makeTaskPaneElement(id === 'proofreading-issues' ? 'section' : 'div'); });
+  elements['issue-filter'].value = 'all';
+  const documentListeners = {};
+  const calls = [];
+  const win = {
+    document: {
+      readyState: 'complete',
+      activeElement: null,
+      getElementById: (id) => elements[id] || null,
+      createElement: (tag) => makeTaskPaneElement(tag),
+      addEventListener(type, fn) { (documentListeners[type] = documentListeners[type] || []).push(fn); }
+    },
+    locateProofreadingIssue: (id) => { calls.push(['locate', id]); return true; },
+    applyProofreadingIssue: (id) => { calls.push(['apply', id]); return true; },
+    undoProofreadingIssue: (id) => { calls.push(['undo', id]); return true; },
+    ignoreProofreadingIssue: (id) => { calls.push(['ignore', id]); return true; },
+    applyAllProofreadingIssues: () => { calls.push(['apply-all']); return true; }
+  };
+  loadBrowserScript('js/taskpane.js', win);
+  return { win, elements, calls };
+}
+
 test('WPS root files and ribbon callbacks are present', () => {
   const ribbon = read('ribbon.xml');
   assert.ok(ribbon.startsWith('<customUI '));
@@ -113,8 +196,13 @@ test('top toolbar and rules center expose the expected controls', () => {
   });
   assert.match(html, /id="tab-issues"/);
   assert.match(html, /id="tab-history"/);
+  assert.match(html, /校对建议/);
+  assert.match(html, /id="result-summary"/);
+  assert.match(html, /id="result-stale-summary"/);
   assert.match(html, /id="proofreading-history"/);
   assert.match(html, /id="apply-all"/);
+  assert.match(html, /修正安全格式项（0）/);
+  assert.match(html, /仅处理低风险格式规则/);
   assert.match(html, /id="rerun-proofreading"/);
   assert.match(html, /id="proofreading-progress"/);
   assert.match(html, /id="progress-fill"/);
@@ -131,6 +219,7 @@ test('top toolbar and rules center expose the expected controls', () => {
   const taskpane = read('js/taskpane.js');
   assert.match(taskpane, /applyAllProofreadingIssues/);
   assert.match(taskpane, /pushProofreadingRecord/);
+  assert.match(taskpane, /beginProofreadingRun/);
   assert.match(taskpane, /switchTab/);
   assert.match(taskpane, /setProofreadingProgress/);
   assert.match(taskpane, /syncFormFromStore/);
@@ -365,7 +454,12 @@ test('issue cards locate on body click, keep buttons independent, and offer undo
     { id: 'stale', category: 'typo', original: '旧字', suggestion: '正字',
       status: 'stale' }
   ]);
-  const [pending, accepted, stale] = list.children;
+  const pending = list.children.find((child) => child.className.includes('is-locatable'));
+  const stale = list.children.find((child) => child.className === 'issue-card');
+  const processedSection = list.children.find((child) => child.tag === 'details');
+  assert.ok(processedSection);
+  assert.equal(processedSection.open, false);
+  const accepted = processedSection.children[1].children[0];
   pending.fire('click');
   assert.deepEqual(calls, [['locate', 'pending']]);
   pending.children[0].children[1].children[0].fire('click');
@@ -382,6 +476,78 @@ test('issue cards locate on body click, keep buttons independent, and offer undo
   assert.deepEqual(calls.at(-1), ['undo', 'accepted']);
   stale.fire('click');
   assert.equal(calls.length, 4);
+});
+
+test('a new proofreading run resets filter and tab while preserving session history', () => {
+  const { win, elements } = createResultHarness();
+  win.setProofreadingIssues([{
+    id: 'done', category: 'typo', original: '原字', suggestion: '新字', status: 'accepted'
+  }]);
+  elements['issue-filter'].value = 'typo';
+  elements['issue-filter'].fire('change');
+  elements['tab-history'].fire('click');
+  assert.equal(elements['proofreading-history'].children.length, 1);
+
+  assert.equal(win.beginProofreadingRun(), true);
+  assert.equal(elements['issue-filter'].value, 'all');
+  assert.equal(elements['tab-issues'].attributes['aria-selected'], 'true');
+  assert.equal(elements['tab-history'].attributes['aria-selected'], 'false');
+  assert.equal(elements['proofreading-history'].hidden, true);
+  assert.equal(elements['result-count'].textContent, '0');
+
+  elements['tab-history'].fire('click');
+  assert.equal(elements['proofreading-history'].children.length, 1);
+  assert.equal(elements['proofreading-history'].hidden, false);
+});
+
+test('result summaries count pending review, processed, stale, and strict safe-format actions', () => {
+  const { win, elements, calls } = createResultHarness();
+  win.setProofreadingIssues([
+    { id: 'pending', category: 'typo', original: '错字', suggestion: '正字', status: 'pending' },
+    { id: 'review', category: 'wording', original: '待核对', suggestion: '规范写法', status: 'pending',
+      needsReview: true, autoFixable: true, confidence: 0.99 },
+    { id: 'safe', category: 'punctuation', original: '，', suggestion: '。', status: 'pending',
+      autoFixable: true, confidence: 0.95 },
+    { id: 'accepted', category: 'typo', original: '原字', suggestion: '新字', status: 'accepted' },
+    { id: 'ignored', category: 'grammar', original: '原句', suggestion: '新句', status: 'ignored' },
+    { id: 'stale', category: 'typo', original: '旧字', suggestion: '正字', status: 'stale' }
+  ]);
+
+  assert.equal(elements['result-count'].textContent, '3');
+  assert.equal(elements['result-summary'].textContent, '待处理 3（其中需复核 1）· 已处理 2');
+  assert.equal(elements['result-stale-summary'].textContent, '需重查 1');
+  assert.equal(elements['result-stale-summary'].hidden, false);
+  assert.equal(elements['apply-all'].textContent, '修正安全格式项（1）');
+  assert.equal(elements['apply-all'].disabled, false);
+
+  const processedSection = elements['proofreading-issues'].children.find((child) => child.tag === 'details');
+  assert.ok(processedSection);
+  assert.equal(processedSection.open, false);
+  assert.equal(processedSection.children[1].children.length, 2);
+  processedSection.open = true;
+  const acceptedCard = processedSection.children[1].children.find((card) =>
+    card.children[0].children[1].children[1].textContent === '撤销');
+  assert.ok(acceptedCard);
+  const undo = acceptedCard.children[0].children[1].children[1];
+  undo.fire('click');
+  assert.deepEqual(calls.at(-1), ['undo', 'accepted']);
+
+  win.setProofreadingActionBusy(true);
+  assert.equal(elements['apply-all'].disabled, true);
+  win.setProofreadingActionBusy(false);
+  assert.equal(elements['apply-all'].disabled, false);
+
+  win.setProofreadingBusy(true);
+  const waitingCard = elements['proofreading-issues'].children.find((card) =>
+    card.className === 'issue-card' && card.children[0].children[1].children[1].textContent === '修正');
+  assert.ok(waitingCard);
+  assert.equal(waitingCard.children[0].children[1].children[0].disabled, true);
+  win.setProofreadingBusy(false);
+
+  win.setProofreadingIssues([]);
+  assert.equal(elements['proofreading-issues'].hidden, true);
+  assert.equal(elements['empty-state'].textContent, '校对结果会显示在这里。');
+  assert.equal(elements['result-stale-summary'].hidden, true);
 });
 
 test('action busy locks issue controls without rebuilding cards and catches rejected actions safely', async () => {
@@ -440,11 +606,14 @@ test('action busy locks issue controls without rebuilding cards and catches reje
       autoFixable: true, confidence: 0.95 }
   ]);
 
-  const cardsBeforeLock = list.children.slice();
+  const cardsBeforeLock = list.children.filter((child) => child.className === 'issue-card' ||
+    child.className.includes('is-locatable'));
+  const processedSection = list.children.find((child) => child.tag === 'details');
+  const acceptedCard = processedSection.children[1].children[0];
   const pendingActions = cardsBeforeLock[0].children[0].children[1].children;
-  const acceptedActions = cardsBeforeLock[1].children[0].children[1].children;
-  const staleActions = cardsBeforeLock[2].children[0].children[1].children;
-  const reviewActions = cardsBeforeLock[3].children[0].children[1].children;
+  const acceptedActions = acceptedCard.children[0].children[1].children;
+  const staleActions = cardsBeforeLock[1].children[0].children[1].children;
+  const reviewActions = cardsBeforeLock[2].children[0].children[1].children;
 
   assert.equal(typeof win.setProofreadingActionBusy, 'function');
   assert.equal(controls['run-proofreading'].disabled, false);

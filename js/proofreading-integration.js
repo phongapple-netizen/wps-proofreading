@@ -451,9 +451,10 @@
 
     async function refreshProviderModels() {
         setConnectionStatus("正在检测…", "working");
-        var options = modelOptions();
+        var options;
         var api = settingsStore();
         try {
+            options = modelOptions();
             if (!root.WpsModelCatalog) throw new Error("模型检测模块没有加载。");
             var result = await root.WpsModelCatalog.detect(options, root.fetch);
             saveCatalogResult(result.provider, result, result.models.length ? "success" : "error");
@@ -467,21 +468,22 @@
             // Detection changes the UI even when the stored catalog is unchanged.
             renderModelSummary();
             if (!result.models.length) {
-                setStatus("模型服务可以访问，但没有返回可用模型。请先在服务端配置模型。", "warning");
+                setConnectionStatus("模型服务已连接，但未读取到可用模型。", "warning");
                 return { models: [], defaultModel: "" };
             }
-            setStatus("模型服务检测成功，已读取 " + result.models.length + " 个模型。", "success");
             return { models: result.models, defaultModel: result.defaultModel };
         } catch (error) {
             var existing = api && typeof api.loadCatalog === "function" ? api.loadCatalog() : null;
-            saveCatalogResult(options.provider, {
-                models: existing ? existing.models : [],
-                defaultModel: existing ? existing.defaultModel : "",
-                detail: "连接失败"
-            }, "error");
+            if (options) {
+                saveCatalogResult(options.provider, {
+                    models: existing ? existing.models : [],
+                    defaultModel: existing ? existing.defaultModel : "",
+                    detail: "连接失败"
+                }, "error");
+            }
             syncFromStore();
             renderModelSummary();
-            setStatus(error && error.message
+            setConnectionStatus(error && error.message
                 ? error.message
                 : "模型服务检测失败。请确认服务已启动并允许加载项跨域访问。", "error");
             return { models: [], defaultModel: "", error: true };
@@ -734,11 +736,6 @@
         if (busy) return { accepted: false, reason: "busy" };
         currentController = makeAbortController();
         setBusy(true);
-        currentSnapshot = null;
-        currentIssues = [];
-        runCounter += 1;
-        viewIssues();
-        if (typeof root.clearProofreadingIssues === "function") root.clearProofreadingIssues();
 
         var snapshot = null;
         var collected = [];
@@ -772,6 +769,17 @@
                     setStatus("等待确认期间文档内容已变化，文档内容没有发送。请重新开始校对。", "warning");
                     return { accepted: false, reason: "document-changed-before-request" };
                 }
+            }
+            // Replace the previous run only after the new range and any full-document
+            // confirmation have succeeded. Cancellations leave old findings usable.
+            currentSnapshot = null;
+            currentIssues = [];
+            runCounter += 1;
+            if (typeof root.beginProofreadingRun === "function") {
+                root.beginProofreadingRun();
+            } else {
+                viewIssues();
+                if (typeof root.clearProofreadingIssues === "function") root.clearProofreadingIssues();
             }
             setStatus("正在通过 " + providerLabel + " 校对" + scopeLabel +
                 "（按段落分批发送，只发送待校对的文字）…", "working");

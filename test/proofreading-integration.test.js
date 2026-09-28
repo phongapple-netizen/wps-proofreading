@@ -233,7 +233,7 @@ function createHarness(options = {}) {
     };
 }
 
-test("repeated successful model detection clears the working status even when the catalog is unchanged", async () => {
+test("repeated successful model detection updates only connection status", async () => {
     const harness = createHarness({ seed: JSON.stringify(Object.assign({}, DEFAULT_SETTINGS, { provider: "opencode" })) });
     const connection = [];
     harness.window.setModelConnectionStatus = (text, tone) => connection.push({ text, tone });
@@ -245,6 +245,7 @@ test("repeated successful model detection clears the working status even when th
     const first = await harness.window.refreshProviderModels();
     assert.equal(first.models.length, 1);
     const catalog = JSON.stringify(harness.window.WpsSettingsStore.loadCatalog());
+    harness.window.setProofreadingStatus({ text: "校对完成，结果仍可处理", tone: "success" });
     connection.length = 0;
     const second = await harness.window.refreshProviderModels();
     assert.equal(second.models.length, 1);
@@ -252,9 +253,10 @@ test("repeated successful model detection clears the working status even when th
     assert.equal(connection[0].tone, "working");
     assert.equal(connection[connection.length - 1].tone, "success");
     assert.equal(connection[connection.length - 1].text, "OpenCode 已连接 · 1 个模型");
+    assert.equal(harness.status.text, "校对完成，结果仍可处理");
 });
 
-test("repeated failed model detection clears the working status even when the error catalog is unchanged", async () => {
+test("repeated failed model detection updates only connection status", async () => {
     const harness = createHarness();
     const connection = [];
     harness.window.setModelConnectionStatus = (text, tone) => connection.push({ text, tone });
@@ -262,14 +264,15 @@ test("repeated failed model detection clears the working status even when the er
 
     await harness.window.refreshProviderModels();
     const catalog = JSON.stringify(harness.window.WpsSettingsStore.loadCatalog());
+    harness.window.setProofreadingStatus({ text: "校对完成，结果仍可处理", tone: "success" });
     connection.length = 0;
     const second = await harness.window.refreshProviderModels();
     assert.equal(second.error, true);
     assert.equal(JSON.stringify(harness.window.WpsSettingsStore.loadCatalog()), catalog);
     assert.equal(connection[0].tone, "working");
     assert.equal(connection[connection.length - 1].tone, "error");
-    assert.equal(connection[connection.length - 1].text, "连接失败 · 0 个模型");
-    assert.equal(harness.status.text, "测试连接失败");
+    assert.equal(connection[connection.length - 1].text, "测试连接失败");
+    assert.equal(harness.status.text, "校对完成，结果仍可处理");
 });
 
 test("only selected text is sent and a verified suggestion updates the WPS range", async () => {
@@ -1151,6 +1154,79 @@ test("declining whole-document confirmation sends no model request", async () =>
     assert.equal(harness.confirmationDetails.length, 1);
     assert.match(harness.status.text, /没有发送/);
     assert.equal(harness.busy, false);
+});
+
+test("cancelling a rerun keeps the previous suggestions and does not reset the view", async () => {
+    const options = { deferConfirmation: true };
+    const harness = createHarness(options);
+    let begun = 0;
+    harness.window.beginProofreadingRun = () => {
+        begun += 1;
+        harness.window.clearProofreadingIssues();
+    };
+    assert.equal((await harness.window.runProofreading()).accepted, true);
+    const previousIssue = harness.window.getWpsProofreadingState().issues[0];
+    const previousSnapshot = harness.window.getWpsProofreadingState().snapshot;
+    assert.equal(begun, 1);
+
+    options.noSelection = true;
+    const rerun = harness.window.runProofreading();
+    await harness.confirmationRequested;
+    assert.equal(begun, 1);
+    assert.equal(harness.renderedIssues.length, 1);
+    assert.equal(harness.window.getWpsProofreadingState().snapshot, previousSnapshot);
+    harness.resolveConfirmation(false);
+    assert.equal((await rerun).reason, "full-document-not-confirmed");
+    assert.equal(begun, 1);
+    assert.equal(harness.requests.length, 1);
+    assert.equal(harness.renderedIssues[0].id, previousIssue.id);
+    assert.equal(harness.window.getWpsProofreadingState().snapshot, previousSnapshot);
+});
+
+test("failed rerun capture and model configuration preserve the previous suggestions", async () => {
+    const options = {};
+    const harness = createHarness(options);
+    assert.equal((await harness.window.runProofreading()).accepted, true);
+    const previousSnapshot = harness.window.getWpsProofreadingState().snapshot;
+    const previousIssue = harness.window.getWpsProofreadingState().issues[0];
+    const previousRequestCount = harness.requests.length;
+
+    options.noSelection = true;
+    options.requireSelection = true;
+    assert.equal((await harness.window.runProofreading()).accepted, false);
+    assert.equal(harness.window.getWpsProofreadingState().snapshot, previousSnapshot);
+    assert.equal(harness.renderedIssues[0].id, previousIssue.id);
+
+    options.noSelection = false;
+    options.requireSelection = false;
+    const loadSettings = harness.window.WpsSettingsStore.loadSettings;
+    harness.window.WpsSettingsStore.loadSettings = () => { throw new Error("模型配置不可用"); };
+    assert.equal((await harness.window.runProofreading()).accepted, false);
+    harness.window.WpsSettingsStore.loadSettings = loadSettings;
+    assert.equal(harness.requests.length, previousRequestCount);
+    assert.equal(harness.window.getWpsProofreadingState().snapshot, previousSnapshot);
+    assert.equal(harness.renderedIssues[0].id, previousIssue.id);
+});
+
+test("a confirmed rerun resets suggestions only when the new run starts", async () => {
+    const options = { deferConfirmation: true };
+    const harness = createHarness(options);
+    let begun = 0;
+    harness.window.beginProofreadingRun = () => {
+        begun += 1;
+        harness.window.clearProofreadingIssues();
+    };
+    assert.equal((await harness.window.runProofreading()).accepted, true);
+    options.noSelection = true;
+    const rerun = harness.window.runProofreading();
+    await harness.confirmationRequested;
+    assert.equal(begun, 1);
+    assert.equal(harness.renderedIssues.length, 1);
+    harness.resolveConfirmation(true);
+    assert.equal((await rerun).accepted, true);
+    assert.equal(begun, 2);
+    assert.equal(harness.requests.length, 2);
+    assert.equal(harness.window.getWpsProofreadingState().snapshot.mode, "full");
 });
 
 test("a legacy parenthesized deletion explanation removes only the original text and can be undone", async () => {
