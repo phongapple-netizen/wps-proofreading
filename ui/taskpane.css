@@ -828,6 +828,20 @@ h2 {
 }
 
 @media (max-width: 330px) {
+    .toolbar {
+        flex-wrap: wrap;
+    }
+
+    .toolbar-deep {
+        order: 4;
+        flex: 0 0 100%;
+        margin: 0;
+    }
+
+    #settings-toggle {
+        margin-left: auto;
+    }
+
     .result-heading-row {
         align-items: stretch;
         flex-direction: column;

@@ -7,6 +7,7 @@
         filter: "all",
         busy: false,
         actionBusy: false,
+        rewriteBusy: false,
         appMode: "proofread",
         tab: "issues",
         history: [],
@@ -53,6 +54,7 @@
 
     function setProofreadingBusy(value) {
         state.busy = value === true;
+        updateModeTabs();
         var cancelButton = byId("cancel-proofreading");
         if (cancelButton) {
             cancelButton.hidden = !state.busy || !!pendingFullDocumentConfirmation;
@@ -81,8 +83,27 @@
 
     function setProofreadingActionBusy(value) {
         state.actionBusy = value === true;
+        updateModeTabs();
         updateActionControls();
         return state.actionBusy;
+    }
+
+    function taskBusyState() {
+        return { proofreading: state.busy, actionBusy: state.actionBusy, rewrite: state.rewriteBusy };
+    }
+
+    function updateModeTabs() {
+        var locked = state.busy || state.actionBusy || state.rewriteBusy;
+        var proofreadingTab = byId("mode-proofread");
+        var rewriteTab = byId("mode-rewrite");
+        if (proofreadingTab) proofreadingTab.disabled = locked;
+        if (rewriteTab) rewriteTab.disabled = locked;
+    }
+
+    function setRewriteBusy(value) {
+        state.rewriteBusy = value === true;
+        updateModeTabs();
+        return state.rewriteBusy;
     }
 
     function finishFullDocumentConfirmation(confirmed) {
@@ -762,6 +783,8 @@
     }
 
     function setAppMode(mode) {
+        if ((state.busy || state.actionBusy || state.rewriteBusy) &&
+            (mode === "rewrite" ? "rewrite" : "proofread") !== state.appMode) return state.appMode;
         var rewriteMode = mode === "rewrite";
         state.appMode = rewriteMode ? "rewrite" : "proofread";
         var proofreadingView = byId("proofreading-view");
@@ -815,6 +838,8 @@
     root.setModelConnectionStatus = root.setModelConnectionStatus || setModelConnectionStatus;
     root.setProofreadingBusy = root.setProofreadingBusy || setProofreadingBusy;
     root.setProofreadingActionBusy = root.setProofreadingActionBusy || setProofreadingActionBusy;
+    root.setRewriteBusy = setRewriteBusy;
+    root.getTaskBusyState = taskBusyState;
     root.requestFullDocumentConfirmation = root.requestFullDocumentConfirmation || requestFullDocumentConfirmation;
     root.dismissFullDocumentConfirmation = root.dismissFullDocumentConfirmation || dismissFullDocumentConfirmation;
     root.setProofreadingProgress = root.setProofreadingProgress || setProofreadingProgress;
@@ -1068,6 +1093,7 @@
             });
         }
         bindResultTabs();
+        updateModeTabs();
         bindSettingsToggle();
         bindSettingsForm();
         syncFormFromStore();

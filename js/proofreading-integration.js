@@ -762,6 +762,9 @@
     async function runProofreading() {
         if (issueActionBusy) return { accepted: false, reason: "action-busy" };
         if (busy) return { accepted: false, reason: "busy" };
+        if (typeof root.getTaskBusyState === "function" && root.getTaskBusyState().rewrite) {
+            return { accepted: false, reason: "rewrite-busy" };
+        }
         currentController = makeAbortController();
         setBusy(true);
 

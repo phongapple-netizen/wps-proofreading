@@ -5,6 +5,7 @@
     var REWRITE_SYSTEM_PROMPT = "你是一名中文正式文稿编辑，专门对用户选中的文字进行理顺改写。" +
         "只处理用户提供的选区，不续写、不补充常识、不调用工具。宁可少改，也不要为了语言流畅而改变任何事实。" +
         "必须只按要求返回严格 JSON。";
+    var COMPLEX_SELECTION_MESSAGE = "当前选区包含表格、图片或非普通文本结构，为避免破坏文档格式，暂不支持直接改写。请只选择普通正文文字。";
     var result = null;
     var undoRecord = null;
     var controller = null;
@@ -56,9 +57,30 @@
             var start = Number(range.Start);
             var end = Number(range.End);
             if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
-            return { app: app, document: document, range: range, selectedText: selectedText,
+            return { app: app, document: document, selection: selection, range: range, selectedText: selectedText,
                 start: start, end: end };
         } catch (error) { return null; }
+    }
+
+    function hasSelectedObjects(host, property) {
+        try {
+            var collection = host && host[property];
+            return collection && Number(collection.Count) > 0;
+        } catch (error) { return false; }
+    }
+
+    function isComplexSelection(selected) {
+        try {
+            var type = selected.selection.Type;
+            if (type !== undefined && type !== null && type !== "" &&
+                type !== 2 && type !== "2" && type !== "wdSelectionNormal") return true;
+        } catch (error) { /* Older WPS versions may not expose Type. */ }
+        return [selected.selection, selected.range].some(function (host) {
+            return hasSelectedObjects(host, "Tables") || hasSelectedObjects(host, "InlineShapes") ||
+                hasSelectedObjects(host, "Shapes") || hasSelectedObjects(host, "ShapeRange") ||
+                hasSelectedObjects(host, "Rows") || hasSelectedObjects(host, "Columns") ||
+                hasSelectedObjects(host, "Cells");
+        });
     }
 
     function captureSnapshot() {
@@ -67,6 +89,7 @@
         var core = root.WpsRewriteCore;
         if (!core) throw new Error("改写模块尚未加载，请重新打开插件。");
         var original = core.validateRewriteSelection(selected.selectedText);
+        if (isComplexSelection(selected)) throw new Error(COMPLEX_SELECTION_MESSAGE);
         if (selected.end - selected.start !== original.length) {
             throw new Error("选区位置与文字长度不一致，请重新选择后重试。");
         }
@@ -194,6 +217,7 @@
 
     function setBusy(value) {
         busy = value === true;
+        if (typeof root.setRewriteBusy === "function") root.setRewriteBusy(busy);
         var generate = byId("run-rewrite");
         var cancel = byId("cancel-rewrite");
         var replace = byId("replace-rewrite");
@@ -287,9 +311,22 @@
 
     async function generateRewrite(savedSnapshot) {
         if (busy) return false;
+        if (typeof root.getTaskBusyState === "function") {
+            var tasks = root.getTaskBusyState();
+            if (tasks.proofreading || tasks.actionBusy) {
+                setStatus("校对任务正在进行，请等待完成后再生成改写。", "warning");
+                return false;
+            }
+        }
         clearResult();
         var nextSnapshot;
         try {
+            if (savedSnapshot) {
+                var currentSelection = activeSelection();
+                if (currentSelection && isComplexSelection(currentSelection)) {
+                    throw new Error(COMPLEX_SELECTION_MESSAGE);
+                }
+            }
             nextSnapshot = savedSnapshot || captureSnapshot();
             root.WpsRewriteCore.validateRewriteSelection(nextSnapshot.original);
             if (savedSnapshot && !contextMatches(savedSnapshot.original, savedSnapshot, savedSnapshot.end)) {

@@ -1369,6 +1369,14 @@ test("no request is sent while pane confirmation is pending, and confirming resu
     assert.equal(harness.busy, false);
 });
 
+test("proofreading does not start while rewrite is busy", async () => {
+    const harness = createHarness();
+    harness.window.getTaskBusyState = () => ({ rewrite: true });
+    assert.equal((await harness.window.runProofreading()).reason, "rewrite-busy");
+    assert.equal(harness.requests.length, 0);
+    assert.equal(harness.busy, false);
+});
+
 test("cancelling while pane confirmation is pending sends nothing and returns to idle without AbortController", async () => {
     const harness = createHarness({ noSelection: true, deferConfirmation: true });
     const run = harness.window.runProofreading();

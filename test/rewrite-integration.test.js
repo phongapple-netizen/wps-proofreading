@@ -53,6 +53,7 @@ function createHarness(options = {}) {
   };
   let response = JSON.stringify({ rewrittenText: '市安委办拟于2026年9月完成17项整改工作。', summary: ['理顺表达'], warnings: [] });
   let resolveModel;
+  let requestCount = 0;
   const win = {
     document: {
       readyState: 'complete',
@@ -70,7 +71,10 @@ function createHarness(options = {}) {
     WpsOpenCodeClient: {
       normalizeEndpoint: () => 'http://127.0.0.1:4096',
       parseModelName: () => 'm',
-      request: () => options.defer ? new Promise((resolve) => { resolveModel = resolve; }) : Promise.resolve(response)
+      request: () => {
+        requestCount += 1;
+        return options.defer ? new Promise((resolve) => { resolveModel = resolve; }) : Promise.resolve(response);
+      }
     },
     getBody: () => body,
     getResponse: () => response,
@@ -80,8 +84,58 @@ function createHarness(options = {}) {
   };
   const context = vm.createContext({ window: win, console, AbortController, Date, setTimeout, clearTimeout });
   vm.runInContext(fs.readFileSync(path.join(projectRoot, 'js/rewrite-integration.js'), 'utf8'), context);
-  return { win, elements, app, document, getBody: () => body, setBody: (value) => { body = value; }, source };
+  return { win, elements, app, document, getBody: () => body, setBody: (value) => { body = value; },
+    getRequestCount: () => requestCount, source };
 }
+
+test('ordinary text and unavailable WPS selection properties remain eligible', async () => {
+  const ordinary = createHarness();
+  ordinary.app.Selection.Type = 2;
+  ordinary.app.Selection.Tables = { Count: 0 };
+  ordinary.app.Selection.InlineShapes = { Count: 0 };
+  assert.equal(await ordinary.win.generateRewrite(), true);
+  assert.equal(ordinary.getRequestCount(), 1);
+
+  const legacy = createHarness();
+  for (const property of ['Type', 'Tables', 'InlineShapes', 'ShapeRange']) {
+    Object.defineProperty(legacy.app.Selection, property, { get() { throw new Error('unavailable'); } });
+  }
+  assert.equal(await legacy.win.generateRewrite(), true);
+  assert.equal(legacy.getRequestCount(), 1);
+});
+
+test('table, inline shape, and non-text selections are rejected before model requests', async () => {
+  for (const configure of [
+    (selection) => { selection.Type = 2; selection.Tables = { Count: 1 }; },
+    (selection) => { selection.Type = 2; selection.InlineShapes = { Count: 1 }; },
+    (selection) => { selection.Type = 8; },
+    (selection) => { selection.Type = 4; },
+    (selection) => { selection.Type = 5; },
+    (selection) => { selection.Type = 6; },
+    (selection) => { selection.Rows = { Count: 1 }; }
+  ]) {
+    const harness = createHarness();
+    configure(harness.app.Selection);
+    assert.equal(await harness.win.generateRewrite(), false);
+    assert.match(harness.elements['rewrite-status'].textContent, /当前选区包含表格、图片或非普通文本结构/);
+    assert.equal(harness.getRequestCount(), 0);
+  }
+  const regenerate = createHarness();
+  assert.equal(await regenerate.win.generateRewrite(), true);
+  regenerate.app.Selection.Type = 8;
+  regenerate.elements['regenerate-rewrite'].fire('click');
+  assert.equal(regenerate.getRequestCount(), 1);
+  assert.match(regenerate.elements['rewrite-status'].textContent, /非普通文本结构/);
+});
+
+test('rewrite does not start while proofreading or a proofreading action is busy', async () => {
+  for (const state of [{ proofreading: true, actionBusy: false }, { proofreading: false, actionBusy: true }]) {
+    const harness = createHarness();
+    harness.win.getTaskBusyState = () => state;
+    assert.equal(await harness.win.generateRewrite(), false);
+    assert.equal(harness.getRequestCount(), 0);
+  }
+});
 
 test('rewrite generation previews only selected text and replacement can be undone safely', async () => {
   const harness = createHarness();

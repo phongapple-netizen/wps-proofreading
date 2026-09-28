@@ -174,6 +174,35 @@ test('top-level mode switch separates rewrite from proofreading and hides deep e
   assert.equal(elements['deep-enhance-control'].hidden, false);
 });
 
+test('mode tabs stay locked for rewrite, proofreading, and proofreading actions, then recover', () => {
+  const { win, elements } = createResultHarness();
+  assert.equal(win.setAppMode('rewrite'), 'rewrite');
+  win.setRewriteBusy(true);
+  assert.equal(elements['mode-proofread'].disabled, true);
+  assert.equal(elements['mode-rewrite'].disabled, true);
+  assert.equal(win.setAppMode('proofread'), 'rewrite');
+  elements['mode-proofread'].fire('click');
+  assert.equal(win.getAppMode(), 'rewrite');
+  win.setRewriteBusy(false);
+  assert.equal(elements['mode-proofread'].disabled, false);
+  assert.equal(win.setAppMode('proofread'), 'proofread');
+
+  for (const [start, finish] of [
+    [() => win.setProofreadingBusy(true), () => win.setProofreadingBusy(false)],
+    [() => win.setProofreadingActionBusy(true), () => win.setProofreadingActionBusy(false)]
+  ]) {
+    start();
+    assert.equal(elements['mode-proofread'].disabled, true);
+    assert.equal(elements['mode-rewrite'].disabled, true);
+    assert.equal(win.setAppMode('rewrite'), 'proofread');
+    elements['mode-rewrite'].fire('click');
+    assert.equal(win.getAppMode(), 'proofread');
+    finish();
+    assert.equal(elements['mode-proofread'].disabled, false);
+    assert.equal(elements['mode-rewrite'].disabled, false);
+  }
+});
+
 test('ribbon callback opens one task pane and stores its id', () => {
   let createdUrl = '';
   const storage = new Map();
