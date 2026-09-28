@@ -1258,12 +1258,19 @@ test("empty compatible API model preserves previous suggestions before rerun sta
     const previousIssue = harness.window.getWpsProofreadingState().issues[0];
     const previousRequestCount = harness.requests.length;
 
-    harness.window.WpsSettingsStore.updateSettings({
+    const loadSettings = harness.window.WpsSettingsStore.loadSettings;
+    harness.window.WpsSettingsStore.loadSettings = () => ({
         provider: "openai",
-        profile: { endpoint: "https://models.example/v1/chat/completions", model: "" }
+        deep: false,
+        profiles: {
+            ollama: { endpoint: "http://127.0.0.1:11434", model: "qwen3:8b" },
+            opencode: { endpoint: "http://127.0.0.1:4096", model: "opencode/mimo-v2.6-flash-free" },
+            openai: { endpoint: "https://models.example/v1/chat/completions", model: "" }
+        }
     });
 
     const rerun = await harness.window.runProofreading();
+    harness.window.WpsSettingsStore.loadSettings = loadSettings;
     assert.equal(rerun.accepted, false);
     assert.equal(rerun.reason, "error");
     assert.match(harness.status.text, /模型名称/);
