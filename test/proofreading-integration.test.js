@@ -531,23 +531,29 @@ test("post-write COM failures cannot publish a successful correction or undo", a
     assert.equal(harness.window.getWpsProofreadingState().actionBusy, false);
 });
 
-test("an empty post-write context cannot falsely verify deletion of a whole document", async () => {
-    for (const nativeUndo of [false, true]) {
-        const harness = createHarness({ manualActions: true, prefix: "", suffix: "", noSelection: true,
+test("deleting the whole proofreading range without anchors is refused before WPS writes", async () => {
+    for (const noSelection of [false, true]) {
+        const harness = createHarness({ manualActions: true, prefix: "", suffix: "", noSelection,
             selectedText: "多余内容", issues: [{ category: "redundancy", paragraphIndex: 1,
                 original: "多余内容", action: "delete", suggestion: "", reason: "应删除",
                 confidence: 0.99, needsReview: false }] });
         await harness.window.runProofreading();
         const id = harness.window.getWpsProofreadingState().issues[0].id;
-        const operation = harness.window.applyProofreadingIssue(id);
-        assert.equal(harness.readDocument(), "");
-        if (nativeUndo) harness.changeDocument("多余内容");
-        await harness.flushAction();
-        assert.equal(await operation, false, "zero-length context cannot prove an empty deletion result still exists");
-        assert.equal(harness.window.getWpsProofreadingState().snapshot, null);
-        assert.equal(harness.window.getWpsProofreadingState().issues[0].status, "stale");
+        const readsBefore = harness.rangeReads.length;
+        const rangesBefore = harness.rangeCreations.length;
+        assert.equal(await harness.window.applyProofreadingIssue(id), false);
+        assert.equal(harness.readDocument(), "多余内容");
+        assert.equal(harness.rangeReads.length, readsBefore);
+        assert.equal(harness.rangeCreations.length, rangesBefore);
+        assert.equal(harness.actionTimers.length, 0);
         assert.equal(harness.records.length, 0);
-        assert.equal(harness.readDocument(), nativeUndo ? "多余内容" : "");
+        const state = harness.window.getWpsProofreadingState();
+        assert.equal(state.snapshot.selectedText, "多余内容");
+        assert.equal(state.issues[0].status, "pending");
+        assert.equal(state.issues[0].actionable, false);
+        assert.equal(state.issues[0].needsReview, true);
+        assert.equal(state.actionBusy, false);
+        assert.match(harness.status.text, /未修改正文/);
     }
 });
 

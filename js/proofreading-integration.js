@@ -1062,12 +1062,21 @@
         var range = actionStage(perf, "validation", function () {
             try {
                 context = issueContext(issue, change.expected);
+                if (context && change.replacement === "" && !context.before && !context.after) {
+                    change.unverifiableDeletion = true;
+                    return null;
+                }
                 return checkedIssueRange(issue, change.expected, perf, null, context);
             }
             catch (error) { return null; }
         });
         if (!range) {
-            issue.status = "stale";
+            if (change.unverifiableDeletion) {
+                issue.actionable = false;
+                issue.needsReview = true;
+            } else {
+                issue.status = "stale";
+            }
             return false;
         }
         // Keep only immutable snapshot-derived data across the deferred turn.
@@ -1195,7 +1204,9 @@
                 replacement: undo ? issue.original : issue.suggestion, action: undo ? "undone" : "applied" };
             if (!writeIssueReplacement(change, perf)) {
                 actionStage(perf, "render", viewIssues);
-                setStatus("原文或上下文已变化，未写入这条修改。请重新校对。", "warning");
+                setStatus(change.unverifiableDeletion
+                    ? "这条删除建议没有可校验的前后文，未修改正文，请手动处理。"
+                    : "原文或上下文已变化，未写入这条修改。请重新校对。", "warning");
                 return false;
             }
             var writtenAt = perf ? actionClock() : 0;
