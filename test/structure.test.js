@@ -256,7 +256,7 @@ test('AI issue can open a fixed-rule draft without applying text and shows saved
     (node) => node.textContent === '已保存为固定替换规则，下次校对时生效。') !== null, true);
 });
 
-test('review-only cards show neutral text and only locate and ignore actions', () => {
+test('review-only cards show neutral text and keep card location with ignore action', () => {
   const { win, elements, calls } = createResultHarness();
   win.setProofreadingIssues([{
     id: 'review-only', action: 'review', actionable: false, needsReview: true,
@@ -269,9 +269,9 @@ test('review-only cards show neutral text and only locate and ignore actions', (
   assert.equal(findNode(card, (node) => node.className === 'issue-review-text').textContent, '电信信号视频连线');
   assert.ok(findNode(card, (node) => node.textContent === '错误分析'));
   const actions = card.children[0].children[1].children;
-  assert.deepEqual(actions.map((button) => button.textContent), ['定位', '忽略']);
+  assert.deepEqual(actions.map((button) => button.textContent), ['忽略']);
+  card.fire('click');
   actions[0].fire('click');
-  actions[1].fire('click');
   assert.deepEqual(calls, [['locate', 'review-only'], ['ignore', 'review-only']]);
 
   win.setProofreadingIssues([{
@@ -721,7 +721,9 @@ test('issue cards locate on body click, keep buttons independent, and offer undo
     },
     locateProofreadingIssue: (id) => { calls.push(['locate', id]); return true; },
     applyProofreadingIssue: (id) => { calls.push(['apply', id]); return true; },
-    undoProofreadingIssue: (id) => { calls.push(['undo', id]); return true; }
+    undoProofreadingIssue: (id) => { calls.push(['undo', id]); return true; },
+    ignoreProofreadingIssue: (id) => { calls.push(['ignore', id]); return true; },
+    openIssueRuleDraft: (issue) => { calls.push(['save', issue.id]); return true; }
   };
   loadBrowserScript('js/taskpane.js', win);
   win.setProofreadingIssues([
@@ -738,22 +740,27 @@ test('issue cards locate on body click, keep buttons independent, and offer undo
   assert.ok(processedSection);
   assert.equal(processedSection.open, false);
   const accepted = processedSection.children[1].children[0];
+  assert.equal(!!findNode(list, (node) => node.tag === 'button' && node.textContent === '定位'), false);
   pending.fire('click');
   assert.deepEqual(calls, [['locate', 'pending']]);
-  pending.children[0].children[1].children[1].fire('click');
-  assert.deepEqual(calls, [['locate', 'pending'], ['locate', 'pending']]);
-  pending.children[0].children[1].children[0].fire('click');
+  findNode(pending, (node) => node.tag === 'button' && node.textContent === '修正').fire('click');
   assert.deepEqual(calls.at(-1), ['apply', 'pending']);
+  findNode(pending, (node) => node.tag === 'button' && node.textContent === '忽略').fire('click');
+  assert.deepEqual(calls.at(-1), ['ignore', 'pending']);
+  const save = findNode(pending, (node) => node.tag === 'button' && node.textContent === '保存为规则');
+  assert.ok(save);
+  save.fire('click');
+  assert.deepEqual(calls.at(-1), ['save', 'pending']);
   const analysis = pending.children.find((child) => child.tag === 'details');
   analysis.children[0].fire('click');
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 4);
   const undo = accepted.children[0].children[1].children[0];
   assert.equal(undo.textContent, '撤销');
   assert.equal(undo.disabled, false);
   undo.fire('click');
   assert.deepEqual(calls.at(-1), ['undo', 'accepted']);
   stale.fire('click');
-  assert.equal(calls.length, 4);
+  assert.equal(calls.length, 5);
 });
 
 test('a new proofreading run resets filter and tab while preserving session history', () => {
@@ -925,15 +932,12 @@ test('action busy locks issue controls without rebuilding cards and catches reje
   assert.equal(pendingActions[1].disabled, false);
   assert.equal(pendingActions[2].disabled, false);
   assert.equal(acceptedActions[0].disabled, false);
-  assert.equal(acceptedActions[1].disabled, true);
-  assert.equal(acceptedActions[2].disabled, false);
-  assert.equal(acceptedActions[3].disabled, true);
+  assert.equal(acceptedActions[1].disabled, false);
+  assert.equal(acceptedActions[2].disabled, true);
   assert.equal(staleActions[0].disabled, true);
   assert.equal(staleActions[1].disabled, true);
-  assert.equal(staleActions[2].disabled, true);
-  assert.deepEqual(Array.from(reviewActions).map((button) => button.textContent), ['定位', '忽略']);
+  assert.deepEqual(Array.from(reviewActions).map((button) => button.textContent), ['忽略']);
   assert.equal(reviewActions[0].disabled, false);
-  assert.equal(reviewActions[1].disabled, false);
 
   cardsBeforeLock[0].fire('click');
   assert.deepEqual(calls, [['locate', 'pending']]);
@@ -969,7 +973,7 @@ test('settings form persists safe settings while provider secrets stay memory-on
 
   const ids = ['model-provider', 'model-endpoint', 'model-name', 'model-suggestions',
     'model-api-key', 'model-api-key-row', 'model-endpoint-label', 'model-name-label',
-    'model-api-key-label', 'provider-help', 'deep-enhance', 'refresh-models',
+    'model-api-key-label', 'provider-help', 'deep-enhance', 'auto-advance', 'refresh-models',
     'model-summary', 'connection-status', 'selected-text', 'selection-meta'];
   const elements = {};
   ids.forEach((id) => { elements[id] = makeField(); });
@@ -991,6 +995,11 @@ test('settings form persists safe settings while provider secrets stay memory-on
   loadBrowserScript('js/taskpane.js', win);
 
   assert.equal(elements['model-provider'].value, 'opencode');
+  assert.equal(win.WpsSettingsStore.defaultSettings().autoAdvance, true);
+  assert.equal(elements['auto-advance'].checked, true);
+  elements['auto-advance'].checked = false;
+  elements['auto-advance'].fire('change');
+  assert.equal(win.WpsSettingsStore.loadSettings().autoAdvance, false);
 
   elements['model-provider'].value = 'ollama';
   elements['model-provider'].fire('change');
@@ -1029,4 +1038,8 @@ test('settings form persists safe settings while provider secrets stay memory-on
   const storedText = Array.from(storage.values()).join('\n');
   assert.equal(storedText.includes('session-secret'), false);
   assert.equal(storedText.includes('openai-secret'), false);
+  storage.set('wps_text_proofreading_model_settings_v1', JSON.stringify({ provider: 'ollama' }));
+  assert.equal(win.WpsSettingsStore.loadSettings().autoAdvance, true);
+  win.WpsSettingsStore.saveSettings({ provider: 'ollama', autoAdvance: false });
+  assert.equal(win.WpsSettingsStore.loadSettings().autoAdvance, false);
 });

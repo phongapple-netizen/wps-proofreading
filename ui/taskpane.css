@@ -321,6 +321,14 @@ h2 {
     max-width: 45%;
 }
 
+.settings-option {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 2px;
+    font-size: 13px;
+}
+
 .settings-body {
     display: block;
 }

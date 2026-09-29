@@ -673,7 +673,6 @@
                         (pending && issue.actionable === false)
                 ));
             }
-            actions.appendChild(actionButton("定位", "issue-action-secondary", issue, "locateProofreadingIssue", state.busy || !pending));
             if (canSaveIssueAsRule(issue) || issue.ruleSaved) {
                 actions.appendChild(saveRuleButton(issue, state.busy ||
                     (!pending && issue.status !== "accepted")));
@@ -988,6 +987,7 @@
         var modelField = byId("model-name");
         var keyField = byId("model-api-key");
         var deepField = byId("deep-enhance");
+        var autoAdvanceField = byId("auto-advance");
 
         if (providerField && providerField.value !== provider) providerField.value = provider;
         applyProviderUi(provider);
@@ -1003,6 +1003,7 @@
                 : api.loadPassword(provider);
         }
         if (deepField) deepField.checked = settings.deep === true;
+        if (autoAdvanceField) autoAdvanceField.checked = settings.autoAdvance !== false;
         syncModelSuggestions(settings);
     }
 
@@ -1013,6 +1014,7 @@
         var suggestionField = byId("model-suggestions");
         var keyField = byId("model-api-key");
         var deepField = byId("deep-enhance");
+        var autoAdvanceField = byId("auto-advance");
         var refreshButton = byId("refresh-models");
         var api = store();
 
@@ -1066,6 +1068,12 @@
             deepField.addEventListener("change", function () {
                 if (!api) return;
                 api.updateSettings({ deep: deepField.checked === true });
+            });
+        }
+        if (autoAdvanceField) {
+            autoAdvanceField.addEventListener("change", function () {
+                if (!api) return;
+                api.updateSettings({ autoAdvance: autoAdvanceField.checked === true });
             });
         }
         if (refreshButton) {
