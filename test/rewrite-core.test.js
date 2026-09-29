@@ -115,6 +115,34 @@ test('rewrite prompts are independent, preserve optional requirements as data, a
   assert.throws(() => core.buildRewritePrompt('', ''), /请先选中/);
 });
 
+test('rewrite prompt supports reordered information, merged repetition, and split long sentences without new facts', () => {
+  const examples = [
+    '要加强值班值守。近期进入第四季度，部分企业赶工期、抢进度现象增多。各地要深入排查重大事故隐患。同时要加强重点行业监管。',
+    '要加强检查。要加强排查。要强化检查。要深入开展排查。',
+    '各地要结合实际情况深入排查重大事故隐患并加强重点行业监管同时严格落实值班值守要求确保各项措施落到实处。',
+    '市安委办拟于2026年9月开展17项工作，完成比例为89.82%。'
+  ];
+  for (const original of examples) {
+    const prompt = core.buildRewritePrompt(original, '理顺逻辑');
+    assert.ok(prompt.includes(JSON.stringify(original)));
+    assert.match(prompt, /主动调整句子前后顺序/);
+    assert.match(prompt, /合并无意义重复/);
+    assert.match(prompt, /拆分过长句/);
+    assert.match(prompt, /重新划分自然段/);
+    assert.match(prompt, /事实不变不等于句序不变/);
+    assert.match(prompt, /不得新增事实或删除关键事实/);
+    assert.doesNotMatch(prompt, /宁可少改/);
+  }
+  const facts = core.extractRewriteGuards(examples[3]);
+  const reordered = core.compareRewriteGuards(facts,
+    '2026年9月，市安委办拟开展17项工作；完成比例为89.82%。');
+  assert.equal(reordered.hardRisks.length, 0);
+  assert.equal(reordered.requiresConfirmation, false);
+  const invented = core.compareRewriteGuards(facts,
+    '2026年9月，市安委办拟开展18项工作；完成比例为89.82%。');
+  assert.ok(invented.hardRisks.length > 0);
+});
+
 test('rewrite response parser accepts only a JSON object with rewrittenText', () => {
   assert.deepEqual(core.parseRewriteResponse(JSON.stringify({
     rewrittenText: '改写正文', summary: ['理顺层次'], warnings: ['核对主体']

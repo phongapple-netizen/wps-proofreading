@@ -37,13 +37,25 @@ function createHarness(options = {}) {
     ? '市安委办拟于2026年9月完成17项整改。' : options.selectedText;
   const start = source.indexOf(selectedText);
   let body = source;
+  const documentEvents = [];
+  const undoTimers = [];
+  const perfLogs = [];
+  let failNextWrite = false;
   const document = {
     Name: 'test.docx', FullName: '/tmp/test.docx',
-    get Content() { return { Start: 0, End: body.length }; },
+    get Content() { documentEvents.push('content'); return { Start: 0, End: body.length }; },
     Range(from, to) {
+      documentEvents.push('range');
       return {
-        get Text() { return body.slice(from, to); },
-        set Text(value) { body = body.slice(0, from) + String(value) + body.slice(to); }
+        get Text() { documentEvents.push('read'); return body.slice(from, to); },
+        set Text(value) {
+          documentEvents.push('write');
+          body = body.slice(0, from) + String(value) + body.slice(to);
+          if (failNextWrite) {
+            failNextWrite = false;
+            throw new Error('WPS write result is unknown');
+          }
+        }
       };
     }
   };
@@ -54,6 +66,7 @@ function createHarness(options = {}) {
   let response = JSON.stringify({ rewrittenText: '市安委办拟于2026年9月完成17项整改工作。', summary: ['理顺表达'], warnings: [] });
   let resolveModel;
   let requestCount = 0;
+  let lastSystemPrompt = '';
   const win = {
     document: {
       readyState: 'complete',
@@ -61,6 +74,9 @@ function createHarness(options = {}) {
       createElement() { return makeElement('li'); },
       addEventListener() {}
     },
+    console: { info: (...args) => perfLogs.push(args) },
+    location: options.devPerf ? { hostname: '127.0.0.1' } : undefined,
+    setTimeout: options.manualUndoTurn ? (callback) => { undoTimers.push(callback); } : undefined,
     AbortController,
     WpsNativeDocument: { getApplication: () => app },
     WpsRewriteCore: core,
@@ -71,8 +87,9 @@ function createHarness(options = {}) {
     WpsOpenCodeClient: {
       normalizeEndpoint: () => 'http://127.0.0.1:4096',
       parseModelName: () => 'm',
-      request: () => {
+      request: (requestOptions) => {
         requestCount += 1;
+        lastSystemPrompt = requestOptions.systemPrompt;
         return options.defer ? new Promise((resolve) => { resolveModel = resolve; }) : Promise.resolve(response);
       }
     },
@@ -85,7 +102,12 @@ function createHarness(options = {}) {
   const context = vm.createContext({ window: win, console, AbortController, Date, setTimeout, clearTimeout });
   vm.runInContext(fs.readFileSync(path.join(projectRoot, 'js/rewrite-integration.js'), 'utf8'), context);
   return { win, elements, app, document, getBody: () => body, setBody: (value) => { body = value; },
-    getRequestCount: () => requestCount, source };
+    getRequestCount: () => requestCount, getDocumentEvents: () => documentEvents.slice(),
+    getSystemPrompt: () => lastSystemPrompt,
+    clearDocumentEvents: () => { documentEvents.length = 0; },
+    failNextWrite: () => { failNextWrite = true; },
+    flushUndoTurn: () => { const callback = undoTimers.shift(); if (callback) callback(); },
+    getUndoTimerCount: () => undoTimers.length, perfLogs, source };
 }
 
 test('ordinary text and unavailable WPS selection properties remain eligible', async () => {
@@ -137,6 +159,16 @@ test('rewrite does not start while proofreading or a proofreading action is busy
   }
 });
 
+test('the rewrite system prompt permits restructuring while preserving facts', async () => {
+  const harness = createHarness();
+  assert.equal(await harness.win.generateRewrite(), true);
+  const prompt = harness.getSystemPrompt();
+  assert.match(prompt, /主动重组句子和段落/);
+  assert.match(prompt, /不必沿用原文顺序/);
+  assert.match(prompt, /不得改变事实含义/);
+  assert.doesNotMatch(prompt, /宁可少改/);
+});
+
 test('rewrite generation previews only selected text and replacement can be undone safely', async () => {
   const harness = createHarness();
   const before = harness.getBody();
@@ -148,10 +180,86 @@ test('rewrite generation previews only selected text and replacement can be undo
   assert.equal(harness.getBody(), '前文。市安委办拟于2026年9月完成17项整改工作。后文。');
   assert.equal(harness.elements['rewrite-completed'].hidden, false);
   assert.equal(harness.elements['rewrite-result-actions'].hidden, true);
-  assert.equal(harness.win.undoRewrite(), true);
+  assert.equal(await harness.win.undoRewrite(), true);
   assert.equal(harness.getBody(), before);
   assert.equal(harness.elements['rewrite-completed'].hidden, true);
   assert.equal(harness.elements['rewrite-result-actions'].hidden, false);
+});
+
+test('undo writes before yielding and defers postcheck and UI work', async () => {
+  const harness = createHarness({ manualUndoTurn: true, devPerf: true });
+  const original = harness.getBody();
+  assert.equal(await harness.win.generateRewrite(), true);
+  assert.equal(harness.win.replaceRewriteSelection(), true);
+  harness.clearDocumentEvents();
+
+  const operation = harness.win.undoRewrite();
+  assert.equal(harness.getBody(), original, 'the document write occurs before the timer turn');
+  assert.deepEqual(harness.getDocumentEvents(), [
+    'range', 'read', 'range', 'read', 'range', 'read', 'range', 'write'
+  ]);
+  assert.equal(harness.getUndoTimerCount(), 1);
+  assert.equal(harness.elements['rewrite-completed'].hidden, false, 'UI finalization is deferred');
+  assert.equal(await harness.win.undoRewrite(), false, 'a second undo cannot overlap the first');
+  assert.equal(harness.win.discardRewrite(), false);
+
+  harness.flushUndoTurn();
+  assert.equal(await operation, true);
+  assert.equal(harness.elements['rewrite-completed'].hidden, true);
+  assert.equal(harness.elements['rewrite-result-actions'].hidden, false);
+  assert.equal(await harness.win.undoRewrite(), false, 'the undo record is cleared');
+  assert.equal(harness.perfLogs.length, 1);
+  assert.equal(harness.perfLogs[0][0], 'rewrite undo perf:');
+  for (const field of ['precheck', 'write', 'postcheck', 'ui', 'total']) {
+    assert.equal(typeof harness.perfLogs[0][1][field], 'number');
+  }
+  assert.equal(JSON.stringify(harness.perfLogs).includes('市安委办'), false);
+});
+
+test('undo rejects changed text, either surrounding anchor, and a switched document', async () => {
+  for (const change of [
+    (harness) => harness.setBody(harness.getBody().replace('整改工作', '整改任务')),
+    (harness) => harness.setBody(harness.getBody().replace('前文', '新前文')),
+    (harness) => harness.setBody(harness.getBody().replace('后文', '新后文')),
+    (harness) => { harness.app.ActiveDocument = { Name: 'other.docx', FullName: '/tmp/other.docx' }; }
+  ]) {
+    const harness = createHarness();
+    assert.equal(await harness.win.generateRewrite(), true);
+    assert.equal(harness.win.replaceRewriteSelection(), true);
+    const written = harness.getBody();
+    change(harness);
+    const expected = harness.getBody();
+    assert.equal(await harness.win.undoRewrite(), false);
+    assert.equal(harness.getBody(), expected);
+    assert.equal(await harness.win.undoRewrite(), false);
+    assert.equal(harness.elements['rewrite-result'].hidden, true);
+    assert.match(harness.elements['rewrite-status'].textContent, /无法安全撤销/);
+    assert.notEqual(written, '', 'the replacement was present before the stale condition');
+  }
+});
+
+test('undo does not publish success when text changes during the deferred turn', async () => {
+  const harness = createHarness({ manualUndoTurn: true });
+  assert.equal(await harness.win.generateRewrite(), true);
+  assert.equal(harness.win.replaceRewriteSelection(), true);
+  const operation = harness.win.undoRewrite();
+  harness.setBody(harness.getBody().replace('17项', '18项'));
+  harness.flushUndoTurn();
+  assert.equal(await operation, false);
+  assert.equal(await harness.win.undoRewrite(), false);
+  assert.equal(harness.elements['rewrite-result'].hidden, true);
+  assert.match(harness.elements['rewrite-status'].textContent, /未能验证撤销结果/);
+});
+
+test('an unconfirmed undo write invalidates the undo record', async () => {
+  const harness = createHarness();
+  assert.equal(await harness.win.generateRewrite(), true);
+  assert.equal(harness.win.replaceRewriteSelection(), true);
+  harness.failNextWrite();
+  assert.equal(await harness.win.undoRewrite(), false);
+  assert.equal(await harness.win.undoRewrite(), false);
+  assert.equal(harness.elements['rewrite-result'].hidden, true);
+  assert.match(harness.elements['rewrite-status'].textContent, /未能验证撤销结果/);
 });
 
 test('a failed second generation cannot pair an earlier preview with the new selection', async () => {
@@ -243,7 +351,7 @@ test('replacement and undo both reject stale text or changed surrounding anchors
   assert.equal(await staleUndo.win.generateRewrite(), true);
   assert.equal(staleUndo.win.replaceRewriteSelection(), true);
   staleUndo.setBody(staleUndo.getBody().replace('整改工作', '整改任务'));
-  assert.equal(staleUndo.win.undoRewrite(), false);
+  assert.equal(await staleUndo.win.undoRewrite(), false);
   assert.match(staleUndo.elements['rewrite-status'].textContent, /无法安全撤销/);
 });
 

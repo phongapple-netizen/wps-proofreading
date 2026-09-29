@@ -3,14 +3,57 @@
 
     var ANCHOR_CHARACTERS = 40;
     var REWRITE_SYSTEM_PROMPT = "你是一名中文正式文稿编辑，专门对用户选中的文字进行理顺改写。" +
-        "只处理用户提供的选区，不续写、不补充常识、不调用工具。宁可少改，也不要为了语言流畅而改变任何事实。" +
+        "只处理用户提供的选区，不续写、不补充常识、不调用工具。" +
+        "在事实完全不变的前提下主动重组句子和段落，不必沿用原文顺序；不得改变事实含义。" +
         "必须只按要求返回严格 JSON。";
     var COMPLEX_SELECTION_MESSAGE = "当前选区包含表格、图片或非普通文本结构，为避免破坏文档格式，暂不支持直接改写。请只选择普通正文文字。";
     var result = null;
     var undoRecord = null;
     var controller = null;
     var busy = false;
+    var undoBusy = false;
     var operationCounter = 0;
+
+    function actionClock() {
+        return root.performance && typeof root.performance.now === "function"
+            ? root.performance.now() : Date.now();
+    }
+
+    function startUndoPerf() {
+        var hostname = root.location && root.location.hostname;
+        if (root.WpsRewriteUndoPerf === false) return null;
+        if (root.WpsRewriteUndoPerf !== true && hostname !== "127.0.0.1" &&
+            hostname !== "localhost" && hostname !== "[::1]") return null;
+        return { started: actionClock(), timings: { precheck: 0, write: 0, postcheck: 0, ui: 0 } };
+    }
+
+    function undoStage(perf, name, callback) {
+        if (!perf) return callback();
+        var started = actionClock();
+        try { return callback(); }
+        finally { perf.timings[name] += actionClock() - started; }
+    }
+
+    function finishUndoPerf(perf, outcome) {
+        if (!perf) return;
+        var report = { outcome: outcome };
+        Object.keys(perf.timings).forEach(function (name) {
+            report[name] = Math.round(perf.timings[name] * 100) / 100;
+        });
+        report.total = Math.round((actionClock() - perf.started) * 100) / 100;
+        try {
+            if (root.console && typeof root.console.info === "function") {
+                root.console.info("rewrite undo perf:", report);
+            }
+        } catch (error) { /* Diagnostics must not affect document operations. */ }
+    }
+
+    function nextActionTurn() {
+        return new Promise(function (resolve) {
+            if (typeof root.setTimeout === "function") root.setTimeout(resolve, 0);
+            else setTimeout(resolve, 0);
+        });
+    }
 
     function byId(id) {
         return root.document && root.document.getElementById
@@ -149,6 +192,21 @@
             normalizedText(actualBefore) === normalizedText(saved.before) &&
             normalizedText(actualAfter) === normalizedText(saved.after)
             ? { document: document } : false;
+    }
+
+    function validateRewriteUndoContext(record) {
+        var saved = record.snapshot;
+        var document = activeDocument(application());
+        if (!document || documentKey(document) !== saved.documentKey) return null;
+        // Three distinct spans are needed to keep selection and both anchors independent.
+        // Reuse this document and omit the separate Content read before the write.
+        var current = readRange(document, saved.start, record.rewrittenEnd);
+        if (current === null || normalizedText(current) !== normalizedText(record.rewrittenText)) return null;
+        var before = readRange(document, saved.beforeStart, saved.start);
+        if (before === null || normalizedText(before) !== normalizedText(saved.before)) return null;
+        var after = readRange(document, record.rewrittenEnd, record.rewrittenEnd + saved.after.length);
+        if (after === null || normalizedText(after) !== normalizedText(saved.after)) return null;
+        return { document: document };
     }
 
     function selectionCount(value) {
@@ -310,7 +368,7 @@
     }
 
     async function generateRewrite(savedSnapshot) {
-        if (busy) return false;
+        if (busy || undoBusy) return false;
         if (typeof root.getTaskBusyState === "function") {
             var tasks = root.getTaskBusyState();
             if (tasks.proofreading || tasks.actionBusy) {
@@ -395,7 +453,7 @@
     }
 
     function replaceOriginal() {
-        if (!result || result.risk.hardRisks.length ||
+        if (undoBusy || !result || result.risk.hardRisks.length ||
             (result.risk.requiresConfirmation && !checked("rewrite-risk-confirm"))) return false;
         var saved = result.snapshot;
         var validation = contextMatches(saved.original, saved, saved.end);
@@ -431,39 +489,89 @@
         }
     }
 
-    function undoRewrite() {
-        if (!undoRecord) return false;
+    async function undoRewrite() {
+        if (!undoRecord || undoBusy) return false;
+        undoBusy = true;
+        var perf = startUndoPerf();
+        var outcome = "rejected";
         var record = undoRecord;
         var saved = record.snapshot;
-        var validation = contextMatches(record.rewrittenText, saved, record.rewrittenEnd);
-        if (!validation) {
-            setStatus("当前文字已经再次修改，无法安全撤销。", "warning");
-            undoRecord = null;
-            return false;
-        }
+        var wrote = false;
+        var writeAttempted = false;
         try {
-            validation.document.Range(saved.start, record.rewrittenEnd).Text = saved.original;
-            if (!contextMatches(saved.original, saved, saved.end)) {
-                setStatus("WPS 未能验证撤销结果，请检查正文。", "warning");
+            var validation = undoStage(perf, "precheck", function () {
+                return validateRewriteUndoContext(record);
+            });
+            if (!validation) {
                 undoRecord = null;
+                undoStage(perf, "ui", function () {
+                    clearResult();
+                    setStatus("当前文字已经再次修改，无法安全撤销。", "warning");
+                });
+                return false;
+            }
+            undoStage(perf, "write", function () {
+                writeAttempted = true;
+                validation.document.Range(saved.start, record.rewrittenEnd).Text = saved.original;
+            });
+            wrote = true;
+            validation = null; // Never retain a live WPS document or Range across the deferred turn.
+            try {
+                undoStage(perf, "ui", function () {
+                    if (typeof root.setRewriteBusy === "function") root.setRewriteBusy(true);
+                });
+            }
+            catch (error) { /* The local lock remains authoritative. */ }
+            await nextActionTurn();
+            var verified = undoStage(perf, "postcheck", function () {
+                return contextMatches(saved.original, saved, saved.end);
+            });
+            if (!verified) {
+                undoRecord = null;
+                undoStage(perf, "ui", function () {
+                    clearResult();
+                    setStatus("WPS 未能验证撤销结果，请检查正文。", "warning");
+                });
+                outcome = "post-write-changed";
                 return false;
             }
             undoRecord = null;
-            var completed = byId("rewrite-completed");
-            var actions = byId("rewrite-result-actions");
-            if (completed) completed.hidden = true;
-            if (actions) actions.hidden = false;
-            updateReplaceButton();
-            setStatus("已撤销本次改写。", "success");
+            undoStage(perf, "ui", function () {
+                var completed = byId("rewrite-completed");
+                var actions = byId("rewrite-result-actions");
+                if (completed) completed.hidden = true;
+                if (actions) actions.hidden = false;
+                updateReplaceButton();
+                setStatus("已撤销本次改写。", "success");
+            });
+            outcome = "completed";
             return true;
         } catch (error) {
-            setStatus("WPS 未能安全撤销本次改写。", "warning");
+            if (writeAttempted) {
+                undoRecord = null;
+                undoStage(perf, "ui", function () {
+                    clearResult();
+                    setStatus("WPS 未能验证撤销结果，请检查正文。", "warning");
+                });
+            } else {
+                setStatus("WPS 未能安全撤销本次改写。", "warning");
+            }
+            outcome = wrote ? "post-write-error" : writeAttempted ? "write-unconfirmed" : "precheck-error";
             return false;
+        } finally {
+            undoBusy = false;
+            try {
+                undoStage(perf, "ui", function () {
+                    if (typeof root.setRewriteBusy === "function") root.setRewriteBusy(false);
+                });
+            }
+            catch (error) { /* The local lock remains authoritative. */ }
+            finishUndoPerf(perf, outcome);
         }
     }
 
     function discardRewrite() {
-        if (busy) return false;
+        if (busy || undoBusy) return false;
         clearResult();
         undoRecord = null;
         setStatus("已放弃改写，正文没有变化。", "idle");
