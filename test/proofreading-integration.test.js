@@ -1143,6 +1143,55 @@ test("tracked bulk safe rules reanchor between writes without navigating", async
     assert.equal(harness.selectedRange, null);
 });
 
+test("tracked bulk reports a later stale safe rule as failed", async () => {
+    let harness;
+    harness = createHarness({
+        trackRevisions: true,
+        selectedText: "本段,有错字。" + "说明".repeat(30) + "\n后段有多余句号。。",
+        issues: [],
+        rules: [basicRule("basic-ascii-comma-between-hanzi"), basicRule("basic-duplicate-period")],
+        onWrite: () => harness.changeDocument(
+            harness.readDocument().replace("后段有多余句号", "后段内容已修改"))
+    });
+    await harness.window.runProofreading();
+    assert.equal(harness.window.getWpsProofreadingState().issues.length, 2);
+
+    const result = harness.window.applyAllProofreadingIssues();
+    assert.equal(result.applied, 1);
+    assert.equal(result.failed, 1);
+    assert.equal(result.skipped, 0);
+    assert.equal(result.stale, true);
+    assert.match(harness.status.text, /已修正 1 条，请重新校对/);
+    assert.equal(harness.status.tone, "warning");
+    const issues = harness.window.getWpsProofreadingState().issues;
+    assert.equal(issues[0].status, "accepted");
+    assert.equal(issues[1].status, "stale");
+    assert.match(harness.readDocument(), /后段内容已修改。。/);
+});
+
+test("tracked bulk counts every remaining safe rule when reanchoring stops the batch", async () => {
+    let harness;
+    harness = createHarness({
+        trackRevisions: true,
+        selectedText: "本段,有错字。" + "说明".repeat(30) +
+            "\n后段有多余句号。。" + "补充".repeat(30) + "\n末段也有多余句号。。",
+        issues: [],
+        rules: [basicRule("basic-ascii-comma-between-hanzi"), basicRule("basic-duplicate-period")],
+        onWrite: () => harness.changeDocument(
+            harness.readDocument().replace("后段有多余句号", "后段内容已修改"))
+    });
+    await harness.window.runProofreading();
+    assert.equal(harness.window.getWpsProofreadingState().issues.length, 3);
+
+    const result = harness.window.applyAllProofreadingIssues();
+    assert.equal(result.applied, 1);
+    assert.equal(result.failed, 2);
+    assert.equal(result.stale, true);
+    assert.deepEqual(Array.from(harness.window.getWpsProofreadingState().issues,
+        (issue) => issue.status),
+        ["accepted", "stale", "stale"]);
+});
+
 test("tracked selection ignores identical context outside the proofreading range", async () => {
     const harness = createHarness({
         trackRevisions: true,

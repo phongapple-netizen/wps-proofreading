@@ -1126,7 +1126,7 @@
             var finalTone = consistencyWarning ? "warning" : "success";
             setStatus(currentIssues.length
                 ? "校对完成，共发现 " + currentIssues.length + " 项（" +
-                    batches.length + " 批" + consistencyText + "）。可先定位，再选择应用或忽略。" +
+                    batches.length + " 批" + consistencyText + "）。点击问题卡片可定位，再选择修正或忽略。" +
                     (consistencyWarning ? " " + consistencyWarning : "")
                 : "校对完成，没有发现可精确定位的问题" + consistencyText + "。" +
                     (consistencyWarning ? " " + consistencyWarning : ""), finalTone);
@@ -1620,7 +1620,12 @@
         var failed = 0;
         for (var index = 0; index < pendingIds.length; index += 1) {
             var issue = findPendingIssue(pendingIds[index]);
-            if (!issue || !isAutoFixableIssue(issue)) continue;
+            if (!issue || !isAutoFixableIssue(issue)) {
+                failed = pendingIds.length - applied;
+                markAllPendingStale("原文或上下文已变化，剩余建议未写入。已修正 " +
+                    applied + " 条，请重新校对。");
+                return { applied: applied, failed: failed, skipped: skipped, stale: true };
+            }
             var result;
             try {
                 result = applyOneIssue(issue, true);
@@ -1636,6 +1641,7 @@
                     setStatus("WPS 未能写入剩余建议，已停止批量修正；已修正 " + applied + " 条。", "error");
                     return { applied: applied, failed: failed, skipped: skipped };
                 }
+                failed = pendingIds.length - applied;
                 markAllPendingStale("原文已变化，剩余建议未写入。已修正 " + applied + " 条，请重新校对。");
                 return { applied: applied, failed: failed, skipped: skipped, stale: true };
             }
