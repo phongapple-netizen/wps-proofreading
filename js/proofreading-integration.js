@@ -361,6 +361,7 @@
                 stateLabel: issueStateLabel(issue),
                 confidence: issue.confidence,
                 message: (issue.reason ? "原因：" + issue.reason + "\n" : "") + "状态：" + issueStateLabel(issue),
+                action: issue.action || "",
                 suggestion: issue.suggestion,
                 status: issue.status,
                 needsReview: issue.needsReview,

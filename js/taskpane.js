@@ -254,6 +254,7 @@
             stateLabel: String(value.stateLabel || ""),
             confidence: typeof value.confidence === "number" ? value.confidence : null,
             message: String(value.message || value.reason || ""),
+            action: String(value.action || ""),
             suggestion: typeof value.suggestion === "string"
                 ? value.suggestion
                 : String(value.replacement || ""),
@@ -547,6 +548,17 @@
         return issue.status === "accepted" || issue.status === "ignored";
     }
 
+    function isDeleteIssue(issue) {
+        return issue.actionable !== false && issue.action !== "review" &&
+            issue.suggestion === "" &&
+            (issue.action === "delete" || (!issue.action && issue.hasSuggestion));
+    }
+
+    function isReviewOnlyIssue(issue) {
+        return issue.action === "review" || issue.actionable === false ||
+            (issue.suggestion === "" && !isDeleteIssue(issue));
+    }
+
     function renderIssues(issues) {
         if (Array.isArray(issues)) {
             var previous = state.issues;
@@ -603,6 +615,8 @@
 
         shown.forEach(function (issue) {
             var pending = issue.status === "pending";
+            var reviewOnly = isReviewOnlyIssue(issue);
+            var deleteIssue = isDeleteIssue(issue);
             var card = root.document.createElement("article");
             card.className = "issue-card" + (pending && !state.busy ? " is-locatable" : "");
             if (pending && !state.busy) {
@@ -647,16 +661,18 @@
 
             var actions = root.document.createElement("div");
             actions.className = "issue-actions";
-            actions.appendChild(actionButton(
-                issue.status === "accepted" ? "撤销" :
-                    issue.status === "ignored" ? "已忽略" :
-                        issue.status === "stale" ? "需重查" : "修正",
-                "",
-                issue,
-                issue.status === "accepted" ? "undoProofreadingIssue" : "applyProofreadingIssue",
-                state.busy || (!pending && issue.status !== "accepted") ||
-                    (pending && issue.actionable === false)
-            ));
+            if (!pending || !reviewOnly) {
+                actions.appendChild(actionButton(
+                    issue.status === "accepted" ? "撤销" :
+                        issue.status === "ignored" ? "已忽略" :
+                            issue.status === "stale" ? "需重查" : "修正",
+                    "",
+                    issue,
+                    issue.status === "accepted" ? "undoProofreadingIssue" : "applyProofreadingIssue",
+                    state.busy || (!pending && issue.status !== "accepted") ||
+                        (pending && issue.actionable === false)
+                ));
+            }
             actions.appendChild(actionButton("定位", "issue-action-secondary", issue, "locateProofreadingIssue", state.busy || !pending));
             if (canSaveIssueAsRule(issue) || issue.ruleSaved) {
                 actions.appendChild(saveRuleButton(issue, state.busy ||
@@ -669,18 +685,27 @@
             if (issue.original || issue.suggestion) {
                 var diff = root.document.createElement("p");
                 diff.className = "issue-diff";
-                var old = root.document.createElement("span");
-                old.className = "diff-old";
-                old.textContent = issue.original;
-                diff.appendChild(old);
-                if (issue.actionable !== false) {
+                if (reviewOnly) {
+                    var reviewLabel = root.document.createElement("span");
+                    reviewLabel.className = "issue-review-label";
+                    reviewLabel.textContent = "需核对";
+                    diff.appendChild(reviewLabel);
+                    var reviewText = root.document.createElement("span");
+                    reviewText.className = "issue-review-text";
+                    reviewText.textContent = issue.original || issue.suggestion;
+                    diff.appendChild(reviewText);
+                } else {
+                    var old = root.document.createElement("span");
+                    old.className = "diff-old";
+                    old.textContent = issue.original;
+                    diff.appendChild(old);
                     var arrow = root.document.createElement("span");
                     arrow.className = "diff-arrow";
                     arrow.textContent = " → ";
                     diff.appendChild(arrow);
                     var fresh = root.document.createElement("span");
                     fresh.className = "diff-new";
-                    fresh.textContent = issue.suggestion === "" ? "建议删除" : issue.suggestion;
+                    fresh.textContent = deleteIssue ? "建议删除" : issue.suggestion;
                     diff.appendChild(fresh);
                 }
                 card.appendChild(diff);

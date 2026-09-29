@@ -292,6 +292,21 @@ test("only selected text is sent and a verified suggestion updates the WPS range
     assert.equal(harness.window.getWpsProofreadingState().issues[0].status, "accepted");
 });
 
+test("proofreading passes edit action to the card view without changing editability", async () => {
+    for (const [action, actionable] of [["review", false], ["delete", true]]) {
+        const harness = createHarness({ issues: [{
+            category: "wording", paragraphIndex: 1, original: "错字",
+            action, suggestion: "", reason: "测试展示分类",
+            confidence: 0.95, needsReview: action === "review"
+        }] });
+        await harness.window.runProofreading();
+        assert.equal(harness.renderedIssues.length, 1);
+        assert.equal(harness.renderedIssues[0].action, action);
+        assert.equal(harness.renderedIssues[0].actionable, actionable);
+        assert.equal(harness.renderedIssues[0].suggestion, "");
+    }
+});
+
 test("OpenCode proofreading uses the built-in agent and retains the selection-only workflow", async () => {
     const harness = createHarness({
         requireSelection: true,

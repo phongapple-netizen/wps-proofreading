@@ -256,6 +256,69 @@ test('AI issue can open a fixed-rule draft without applying text and shows saved
     (node) => node.textContent === '已保存为固定替换规则，下次校对时生效。') !== null, true);
 });
 
+test('review-only cards show neutral text and only locate and ignore actions', () => {
+  const { win, elements, calls } = createResultHarness();
+  win.setProofreadingIssues([{
+    id: 'review-only', action: 'review', actionable: false, needsReview: true,
+    category: 'wording', original: '电信信号视频连线', suggestion: '',
+    reason: '搭配需人工核对。', status: 'pending'
+  }]);
+  const card = elements['proofreading-issues'].children[0];
+  assert.equal(findNode(card, (node) => node.className === 'diff-old'), null);
+  assert.equal(findNode(card, (node) => node.className === 'issue-review-label').textContent, '需核对');
+  assert.equal(findNode(card, (node) => node.className === 'issue-review-text').textContent, '电信信号视频连线');
+  assert.ok(findNode(card, (node) => node.textContent === '错误分析'));
+  const actions = card.children[0].children[1].children;
+  assert.deepEqual(actions.map((button) => button.textContent), ['定位', '忽略']);
+  actions[0].fire('click');
+  actions[1].fire('click');
+  assert.deepEqual(calls, [['locate', 'review-only'], ['ignore', 'review-only']]);
+
+  win.setProofreadingIssues([{
+    id: 'review-action', action: 'review', original: '待核对原文', suggestion: '未验证候选', status: 'pending'
+  }]);
+  const actionOnlyCard = elements['proofreading-issues'].children[0];
+  assert.equal(findNode(actionOnlyCard, (node) => node.className === 'diff-old'), null);
+  assert.equal(findNode(actionOnlyCard, (node) => node.textContent === '修正'), null);
+  const css = read('ui/taskpane.css');
+  assert.match(css, /\.issue-review-text\s*\{[^}]*text-decoration:\s*none/);
+  assert.match(css, /\.issue-review-text\s*\{[^}]*overflow-wrap:\s*anywhere/);
+});
+
+test('replace and delete cards retain distinct diffs and writable correction actions', () => {
+  const { win, elements, calls } = createResultHarness();
+  win.setProofreadingIssues([
+    { id: 'replace', action: 'replace', actionable: true, original: '高空作业',
+      suggestion: '高处作业', status: 'pending' },
+    { id: 'delete', action: 'delete', actionable: true, original: '多余文字',
+      suggestion: '', status: 'pending' }
+  ]);
+  const [replaceCard, deleteCard] = elements['proofreading-issues'].children;
+  assert.equal(findNode(replaceCard, (node) => node.className === 'diff-old').textContent, '高空作业');
+  assert.equal(findNode(replaceCard, (node) => node.className === 'diff-arrow').textContent, ' → ');
+  assert.equal(findNode(replaceCard, (node) => node.className === 'diff-new').textContent, '高处作业');
+  assert.equal(findNode(deleteCard, (node) => node.className === 'diff-old').textContent, '多余文字');
+  assert.equal(findNode(deleteCard, (node) => node.className === 'diff-new').textContent, '建议删除');
+  const replaceButton = findNode(replaceCard, (node) => node.textContent === '修正');
+  const deleteButton = findNode(deleteCard, (node) => node.textContent === '修正');
+  assert.equal(replaceButton.disabled, false);
+  assert.equal(deleteButton.disabled, false);
+  replaceButton.fire('click');
+  deleteButton.fire('click');
+  assert.deepEqual(calls, [['apply', 'replace'], ['apply', 'delete']]);
+
+  win.setProofreadingIssues([{
+    id: 'replace', action: 'replace', actionable: true, original: '高空作业',
+    suggestion: '高处作业', status: 'accepted'
+  }]);
+  const processed = elements['proofreading-issues'].children.find((node) => node.tag === 'details');
+  const acceptedCard = processed.children[1].children[0];
+  const undoButton = findNode(acceptedCard, (node) => node.textContent === '撤销');
+  assert.equal(undoButton.disabled, false);
+  undoButton.fire('click');
+  assert.deepEqual(calls.at(-1), ['undo', 'replace']);
+});
+
 test('accepted AI issues can save a rule without applying again or changing accepted status', () => {
   const { win, elements, calls, ruleDrafts } = createResultHarness();
   let documentText = '市消防救援支队';
@@ -868,9 +931,9 @@ test('action busy locks issue controls without rebuilding cards and catches reje
   assert.equal(staleActions[0].disabled, true);
   assert.equal(staleActions[1].disabled, true);
   assert.equal(staleActions[2].disabled, true);
-  assert.equal(reviewActions[0].disabled, true);
+  assert.deepEqual(Array.from(reviewActions).map((button) => button.textContent), ['定位', '忽略']);
+  assert.equal(reviewActions[0].disabled, false);
   assert.equal(reviewActions[1].disabled, false);
-  assert.equal(reviewActions[2].disabled, false);
 
   cardsBeforeLock[0].fire('click');
   assert.deepEqual(calls, [['locate', 'pending']]);
