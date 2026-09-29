@@ -104,6 +104,52 @@ test('status and strength guards compare semantic groups', () => {
   assert.deepEqual(core.extractRewriteGuards('已完成整改，应当落实').strengths, ['obligation']);
 });
 
+test('equivalent policy strength terms stay in the same semantic group', () => {
+  for (const [original, rewritten] of [
+    ['应落实整改', '应当落实整改'],
+    ['不得进入', '严禁进入'],
+    ['严禁进入', '禁止进入'],
+    ['可开展', '可以开展'],
+    ['不应进入', '不应当进入'],
+    ['不可使用', '不可以使用']
+  ]) {
+    for (const [before, after] of [[original, rewritten], [rewritten, original]]) {
+      const comparison = core.compareRewriteGuards(core.extractRewriteGuards(before), after);
+      assert.equal(comparison.hardRisks.length, 0, before + ' → ' + after);
+      assert.equal(comparison.warnings.some((item) => item.type === 'strength'), false,
+        before + ' → ' + after);
+    }
+  }
+});
+
+test('policy direction changes require review in both directions', () => {
+  for (const [original, rewritten] of [
+    ['必须进入', '不得进入'],
+    ['不得进入', '必须进入'],
+    ['严禁使用', '必须使用'],
+    ['不应进入', '应进入'],
+    ['应进入', '不应进入'],
+    ['不可使用', '可使用'],
+    ['可使用', '不可使用'],
+    ['可开展', '必须开展'],
+    ['必须开展', '可开展']
+  ]) {
+    const comparison = core.compareRewriteGuards(core.extractRewriteGuards(original), rewritten);
+    assert.equal(comparison.hardRisks.length, 0, original + ' → ' + rewritten);
+    assert.equal(comparison.requiresConfirmation, true, original + ' → ' + rewritten);
+    assert.ok(comparison.warnings.some((item) => item.type === 'strength'),
+      original + ' → ' + rewritten);
+  }
+});
+
+test('longer negative strength terms do not also count as positive terms', () => {
+  assert.deepEqual(core.extractRewriteGuards('不应进入').strengths, ['negative-obligation']);
+  assert.deepEqual(core.extractRewriteGuards('不应当进入').strengths, ['negative-obligation']);
+  assert.deepEqual(core.extractRewriteGuards('不可使用').strengths, ['negative-permissive']);
+  assert.deepEqual(core.extractRewriteGuards('不可以使用').strengths, ['negative-permissive']);
+  assert.deepEqual(core.extractRewriteGuards('应该研究可能原因，不可能使用许可材料响应请求。').strengths, []);
+});
+
 test('rewrite prompts are independent, preserve optional requirements as data, and demand strict JSON', () => {
   const prompt = core.buildRewritePrompt('原文：拟于2026年9月完成。', '篇幅不要增加');
   assert.match(prompt, /严格 JSON/);

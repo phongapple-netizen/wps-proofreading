@@ -9,11 +9,22 @@
         { name: "completed", label: "已完成", words: ["已完成", "完成", "已"] }
     ];
     var STRENGTH_GROUPS = [
-        { name: "permissive", label: "可/建议", words: ["可", "建议"] },
+        { name: "permissive", label: "可/可以/建议", words: ["可", "可以", "建议"] },
         { name: "obligation", label: "应/应当", words: ["应当", "应"] },
-        { name: "mandatory", label: "必须/不得/严禁", words: ["必须", "不得", "严禁"] },
+        { name: "strong-obligation", label: "必须", words: ["必须"] },
+        { name: "prohibition", label: "不得/严禁/禁止", words: ["不得", "严禁", "禁止"] },
+        { name: "negative-obligation", label: "不应/不应当", words: ["不应", "不应当"] },
+        { name: "negative-permissive", label: "不可/不可以", words: ["不可", "不可以"] },
         { name: "conditional", label: "原则上/视情", words: ["原则上", "视情"] }
     ];
+    var STRENGTH_TERMS = [];
+    STRENGTH_GROUPS.forEach(function (group) {
+        group.words.forEach(function (word) {
+            STRENGTH_TERMS.push({ word: word, group: group.name });
+        });
+    });
+    STRENGTH_TERMS.sort(function (left, right) { return right.word.length - left.word.length; });
+    var STRENGTH_PATTERN = new RegExp(STRENGTH_TERMS.map(function (term) { return term.word; }).join("|"), "g");
     var RESPONSIBILITY_WORDS = ["负责", "督促", "牵头", "组织", "推动", "落实", "承担", "要求", "责任主体"];
     var ORGANIZATION_PATTERN = /[\u4e00-\u9fffA-Za-z0-9·]{1,20}?(?:委员会|管理局|应急局|安委办|办公室|支队|大队|总队|政府|中心|公司|集团|法院|检察院|厅|局|部|委|办|处|科)/g;
     var ORGANIZATION_LEADING_WORDS = /^(?:由|请|对|向|与|和|及|让|将|拟|已|要求|督促|责成|协调|通知|组织|推动|负责|牵头|落实|承担|交由|联合|会同)+/;
@@ -57,13 +68,32 @@
         }).map(function (group) { return group.name; });
     }
 
+    function extractStrengthGroups(source) {
+        var found = Object.create(null);
+        var pattern = new RegExp(STRENGTH_PATTERN.source, "g");
+        var match;
+        while ((match = pattern.exec(source)) !== null) {
+            var word = match[0];
+            var next = source.charAt(match.index + word.length);
+            var previous = source.charAt(match.index - 1);
+            // These ordinary words contain policy characters but are not policy strength.
+            if ((word === "应" && (next === "该" || previous === "响")) ||
+                (word === "可" && (next === "能" || previous === "许")) ||
+                (word === "不可" && next === "能")) continue;
+            var term = STRENGTH_TERMS.filter(function (item) { return item.word === word; })[0];
+            found[term.group] = true;
+        }
+        return STRENGTH_GROUPS.filter(function (group) { return found[group.name]; })
+            .map(function (group) { return group.name; });
+    }
+
     function extractRewriteGuards(value) {
         var source = text(value);
         return {
             numbers: extractMatches(source, NUMBER_FACT_PATTERN),
             titles: extractMatches(source, /《[^》\r\n]{1,120}》/g),
             statuses: extractGroups(source, STATUS_GROUPS),
-            strengths: extractGroups(source, STRENGTH_GROUPS),
+            strengths: extractStrengthGroups(source),
             responsibilities: RESPONSIBILITY_WORDS.filter(function (word) { return source.indexOf(word) >= 0; }),
             organizations: extractOrganizations(source)
         };
