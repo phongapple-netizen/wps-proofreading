@@ -227,11 +227,167 @@
         }
     }
 
+    function revisionSnapshotMatches(snapshot) {
+        try {
+            var document = activeDocument(app());
+            if (!document || documentKey(document) !== snapshot.documentKey) return false;
+            var bounds = revisionSearchBounds(document);
+            return !!bounds && text(document.Range(0, snapshot.start).Text) === snapshot.prefixText &&
+                text(document.Range(snapshot.start, bounds.end).Text) === snapshot.selectedText;
+        } catch (error) { return false; }
+    }
+
+    function isTrackRevisionsEnabled(document) {
+        try {
+            var value = document && document.TrackRevisions;
+            if (value === false || value === 0 || value === "false" || value === "0") return false;
+            if (value === true || value === 1 || value === -1 ||
+                value === "true" || value === "1" || value === "-1") return true;
+        } catch (error) { /* An unreadable flag must not make delta-based coordinates trusted. */ }
+        return true;
+    }
+
+    function revisionSearchBounds(document, selectedText, allowMissingTail) {
+        var content = document.Content;
+        var start = Number(content && content.Start);
+        var end = Number(content && content.End);
+        if (!Number.isInteger(start) || !Number.isInteger(end) || end < start) return null;
+        if (!currentSnapshot || currentSnapshot.mode !== "selection") return { start: start, end: end };
+        var scopeStart = Math.max(start, currentSnapshot.start - ANCHOR_CHARACTERS);
+        var selected = selectedText === undefined ? currentSnapshot.selectedText : selectedText;
+        if (!selected) return null;
+        // Find the first occurrence of the selection's tail after its original start.
+        // Later copies outside the selection must not make an issue ambiguous.
+        var tail = selected.slice(-Math.min(160, selected.length));
+        var tailRange = firstRevisionTextRange(document, tail, currentSnapshot.start, end);
+        return tailRange ? { start: scopeStart, end: tailRange.end }
+            : allowMissingTail ? { start: scopeStart, end: end } : null;
+    }
+
+    function firstRevisionTextRange(document, needle, start, end) {
+        if (!needle || end <= start) return null;
+        try {
+            var range = document.Range(start, end);
+            var finder = range && range.Find;
+            if (finder && typeof finder.Execute === "function") {
+                if (typeof finder.ClearFormatting === "function") finder.ClearFormatting();
+                finder.MatchCase = true;
+                finder.MatchWildcards = false;
+                finder.Wrap = 0;
+                var result = finder.Execute(needle);
+                if (!(result === true || result === 1 || result === -1 || finder.Found === true)) return null;
+                return text(range.Text) === needle ? { start: Number(range.Start), end: Number(range.End) } : null;
+            }
+            // Without Find, inspect only a bounded area around the expected end.
+            // If revision coordinates have moved farther, fail closed instead of
+            // scanning the whole document for every pending issue.
+            var nearStart = Math.max(start, currentSnapshot.end - 2048);
+            var nearEnd = Math.min(end, currentSnapshot.end + 2048);
+            var source = text(document.Range(nearStart, nearEnd).Text);
+            var offset = source.indexOf(needle);
+            if (offset < 0) return null;
+            var candidate = document.Range(nearStart + offset, nearStart + offset + needle.length);
+            return text(candidate.Text) === needle
+                ? { start: Number(candidate.Start), end: Number(candidate.End) } : null;
+        } catch (error) { return null; }
+    }
+
+    function uniqueRevisionTextRange(document, needle, start, end, hint) {
+        if (!needle || end <= start) return null;
+        var cursor = start;
+        var found = null;
+        try {
+            while (cursor < end) {
+                var range = document.Range(cursor, end);
+                var finder = range && range.Find;
+                if (!finder || typeof finder.Execute !== "function") {
+                    if (found) return null;
+                    break;
+                }
+                if (typeof finder.ClearFormatting === "function") finder.ClearFormatting();
+                finder.MatchCase = true;
+                finder.MatchWildcards = false;
+                finder.Wrap = 0;
+                var result = finder.Execute(needle);
+                if (!(result === true || result === 1 || result === -1 || finder.Found === true)) {
+                    return found;
+                }
+                var matchStart = Number(range.Start);
+                var matchEnd = Number(range.End);
+                if (!Number.isInteger(matchStart) || !Number.isInteger(matchEnd) ||
+                    matchStart < cursor || matchEnd > end || matchEnd <= matchStart ||
+                    text(range.Text) !== needle || found) return null;
+                found = { start: matchStart, end: matchEnd };
+                cursor = matchStart + 1;
+            }
+            if (found) return found;
+            // Older WPS versions may omit Range.Find. A text-offset fallback is
+            // accepted only when a fresh Range independently confirms its position.
+            if (Number.isInteger(hint)) {
+                start = Math.max(start, hint - 512);
+                end = Math.min(end, hint + needle.length + 512);
+            }
+            var source = text(document.Range(start, end).Text);
+            var offset = source.indexOf(needle);
+            if (offset < 0 || source.indexOf(needle, offset + 1) >= 0) return null;
+            var fallback = document.Range(start + offset, start + offset + needle.length);
+            return text(fallback.Text) === needle
+                ? { start: Number(fallback.Start), end: Number(fallback.End) } : null;
+        } catch (error) {
+            return null;
+        }
+    }
+
+    function findAnchoredRevisionRange(document, expected, before, after, selectedText, hint, allowMissingTail) {
+        var bounds = revisionSearchBounds(document, selectedText, allowMissingTail);
+        var query = before + expected + after;
+        if (!bounds || !query) return null;
+        var context = uniqueRevisionTextRange(document, query, bounds.start, bounds.end, hint);
+        if (!context) return null;
+        var beforeRange = before
+            ? firstRevisionTextRange(document, before, context.start, context.end) : null;
+        if (before && (!beforeRange || beforeRange.start !== context.start)) return null;
+        var innerStart = beforeRange ? beforeRange.end : context.start;
+        var inner;
+        if (expected) {
+            inner = firstRevisionTextRange(document, expected, innerStart, context.end);
+        } else if (after) {
+            inner = firstRevisionTextRange(document, after, innerStart, context.end);
+            if (inner) inner = { start: inner.start, end: inner.start };
+        } else if (before) {
+            inner = { start: innerStart, end: innerStart };
+        }
+        if (!inner || inner.start < context.start || inner.end > context.end) return null;
+        try {
+            if (text(document.Range(context.start, inner.start).Text) !== before ||
+                text(document.Range(inner.start, inner.end).Text) !== expected ||
+                text(document.Range(inner.end, context.end).Text) !== after) return null;
+            return inner;
+        } catch (error) {
+            return null;
+        }
+    }
+
+    function revisionAnchors(snapshot, relativeStart, expected) {
+        if (!snapshot || relativeStart < 0 ||
+            snapshot.selectedText.slice(relativeStart, relativeStart + expected.length) !== expected) return null;
+        var before = snapshot.selectedText.slice(
+            Math.max(0, relativeStart - ANCHOR_CHARACTERS), relativeStart);
+        if (relativeStart < ANCHOR_CHARACTERS) {
+            before = snapshot.prefixText.slice(-(ANCHOR_CHARACTERS - relativeStart)) + before;
+        }
+        var after = snapshot.selectedText.slice(
+            relativeStart + expected.length,
+            relativeStart + expected.length + ANCHOR_CHARACTERS);
+        return before || after || expected ? { before: before, after: after } : null;
+    }
+
     function issueContext(issue, expected) {
         if (!currentSnapshot || !Number.isInteger(issue.start) || !Number.isInteger(issue.end) ||
-            issue.start < 0 || issue.end - issue.start !== expected.length) return null;
-        var relativeStart = issue.start - currentSnapshot.start;
-        var relativeEnd = issue.end - currentSnapshot.start;
+            issue.start < 0) return null;
+        var relativeStart = Number.isInteger(issue.textOffset)
+            ? issue.textOffset : issue.start - currentSnapshot.start;
+        var relativeEnd = relativeStart + expected.length;
         var snapshotText = currentSnapshot.selectedText;
         if (relativeStart < 0 || relativeEnd > snapshotText.length ||
             snapshotText.slice(relativeStart, relativeEnd) !== expected) return null;
@@ -243,10 +399,12 @@
         var after = snapshotText.slice(relativeEnd, relativeEnd + ANCHOR_CHARACTERS);
         if (expected === "" && !before && !after) return null;
         var start = Math.max(0, issue.start - before.length);
-        var end = Math.min(currentSnapshot.end, issue.end + after.length);
+        var end = Number.isInteger(issue.textOffset)
+            ? issue.end + after.length : Math.min(currentSnapshot.end, issue.end + after.length);
         return {
             start: start,
             end: end,
+            relativeStart: relativeStart,
             before: before,
             after: after,
             text: before + expected + after
@@ -259,6 +417,11 @@
             documentKey(document) !== currentSnapshot.documentKey) return null;
         var context = contextOverride || issueContext(issue, expected);
         if (!context) return null;
+        if (isTrackRevisionsEnabled(document) || Number.isInteger(issue.textOffset)) {
+            var anchored = findAnchoredRevisionRange(document, expected, context.before, context.after,
+                undefined, issue.start);
+            return anchored ? document.Range(anchored.start, anchored.end) : null;
+        }
         var contextRange = document.Range(context.start, context.end);
         if (actionStage(perf, "rangeRead", function () { return text(contextRange.Text); }) !== context.text) return null;
         // Keep the write/selection Range short-lived; do not reuse it after a write or timer.
@@ -266,13 +429,15 @@
             ? contextRange : document.Range(issue.start, issue.end);
     }
 
-    function updateSnapshotAfterReplacement(start, end, replacement) {
-        var relativeStart = start - currentSnapshot.start;
-        var relativeEnd = end - currentSnapshot.start;
+    function updateSnapshotAfterReplacement(start, end, replacement, relativeStart, expectedLength) {
+        if (!Number.isInteger(relativeStart)) relativeStart = start - currentSnapshot.start;
+        var relativeEnd = relativeStart + (Number.isInteger(expectedLength)
+            ? expectedLength : end - start);
         return Object.assign({}, currentSnapshot, {
             selectedText: currentSnapshot.selectedText.slice(0, relativeStart) +
                 replacement + currentSnapshot.selectedText.slice(relativeEnd),
-            end: currentSnapshot.end + replacement.length - (end - start)
+            end: currentSnapshot.end + replacement.length - (Number.isInteger(expectedLength)
+                ? expectedLength : end - start)
         });
     }
 
@@ -961,7 +1126,7 @@
             var finalTone = consistencyWarning ? "warning" : "success";
             setStatus(currentIssues.length
                 ? "校对完成，共发现 " + currentIssues.length + " 项（" +
-                    batches.length + " 批" + consistencyText + "）。可先定位，再选择应用或忽略。" +
+                    batches.length + " 批" + consistencyText + "）。点击问题卡片可定位，再选择修正或忽略。" +
                     (consistencyWarning ? " " + consistencyWarning : "")
                 : "校对完成，没有发现可精确定位的问题" + consistencyText + "。" +
                     (consistencyWarning ? " " + consistencyWarning : ""), finalTone);
@@ -1101,12 +1266,18 @@
         var context;
         var range = actionStage(perf, "validation", function () {
             try {
+                var operationDocument = activeDocument(app());
+                change.trackRevisionsAtWrite = isTrackRevisionsEnabled(operationDocument);
+                change.revisionMode = change.trackRevisionsAtWrite ||
+                    Number.isInteger(issue.textOffset) || currentIssues.some(function (candidate) {
+                        return Number.isInteger(candidate.textOffset);
+                    });
                 context = issueContext(issue, change.expected);
                 if (context && change.replacement === "" && !context.before && !context.after) {
                     change.unverifiableDeletion = true;
                     return null;
                 }
-                return checkedIssueRange(issue, change.expected, perf, null, context);
+                return checkedIssueRange(issue, change.expected, perf, operationDocument, context);
             }
             catch (error) { return null; }
         });
@@ -1127,8 +1298,11 @@
         change.before = context.before;
         change.after = context.after;
         change.delta = change.replacement.length - change.expected.length;
-        change.start = issue.start;
-        change.end = issue.end;
+        change.snapshotOffset = context.relativeStart;
+        change.start = Number(range.Start);
+        change.end = Number(range.End);
+        if (!Number.isInteger(change.start) || !Number.isInteger(change.end) ||
+            change.end < change.start) return false;
         change.attempted = true;
         actionStage(perf, "write", function () { range.Text = change.replacement; });
         change.written = true;
@@ -1137,6 +1311,58 @@
     }
 
     function completeIssueReplacement(change, perf) {
+        if (change.revisionMode) {
+            var document = activeDocument(app());
+            if (!document || documentKey(document) !== change.documentKey) {
+                throw new Error("document-changed");
+            }
+            var revisedSnapshot = actionStage(perf, "snapshotUpdate", function () {
+                return updateSnapshotAfterReplacement(change.start, change.end,
+                    change.replacement, change.snapshotOffset, change.expected.length);
+            });
+            var revisedIssues = actionStage(perf, "stateShift", function () {
+                return currentIssues.map(function (issue) {
+                    var updated = Object.assign({}, issue);
+                    if (issue.id === change.issue.id) {
+                        updated.start = change.verifiedStart;
+                        updated.end = change.verifiedEnd;
+                        updated.textOffset = change.snapshotOffset;
+                        updated.status = change.action === "undone" ? "pending" : "accepted";
+                        return updated;
+                    }
+                    if (issue.status !== "pending" && issue.status !== "accepted") return updated;
+                    var expected = issue.status === "accepted" ? issue.suggestion : issue.original;
+                    var relative = Number.isInteger(issue.textOffset)
+                        ? issue.textOffset : issue.start - currentSnapshot.start;
+                    if (relative >= change.snapshotOffset + change.expected.length) {
+                        relative += change.delta;
+                    } else if (relative + expected.length > change.snapshotOffset) {
+                        updated.status = "stale";
+                        return updated;
+                    }
+                    var anchors = revisionAnchors(revisedSnapshot, relative, expected);
+                    var location = null;
+                    if (anchors) {
+                        try {
+                            location = findAnchoredRevisionRange(
+                                document, expected, anchors.before, anchors.after,
+                                revisedSnapshot.selectedText, issue.start);
+                        } catch (error) { /* A failed WPS lookup leaves this issue stale. */ }
+                    }
+                    if (!location) {
+                        updated.status = "stale";
+                    } else {
+                        updated.start = location.start;
+                        updated.end = location.end;
+                        updated.textOffset = relative;
+                    }
+                    return updated;
+                });
+            });
+            currentIssues = revisedIssues;
+            currentSnapshot = revisedSnapshot;
+            return;
+        }
         var nextIssues = actionStage(perf, "stateShift", function () {
             return root.WpsProofreadingCore.shiftIssuesAfterReplacement(
                 currentIssues, change.issue.id, change.start, change.end, change.replacement.length);
@@ -1173,6 +1399,20 @@
                 var document = activeDocument(app());
                 if (!document || !change.documentKey ||
                     documentKey(document) !== change.documentKey) return false;
+                if (isTrackRevisionsEnabled(document) !== change.trackRevisionsAtWrite) return false;
+                if (change.revisionMode) {
+                    var revisedText = updateSnapshotAfterReplacement(change.start, change.end,
+                        change.replacement, change.snapshotOffset, change.expected.length).selectedText;
+                    var revised = findAnchoredRevisionRange(
+                        document, change.replacement, change.before, change.after,
+                        revisedText, change.start, true);
+                    if (!revised || findAnchoredRevisionRange(
+                        document, change.expected, change.before, change.after,
+                        revisedText, change.start, true)) return false;
+                    change.verifiedStart = revised.start;
+                    change.verifiedEnd = revised.end;
+                    return true;
+                }
                 var contextEnd = change.contextEnd + change.delta;
                 if (!Number.isInteger(change.contextStart) || !Number.isInteger(contextEnd) ||
                     contextEnd < change.contextStart) return false;
@@ -1193,6 +1433,11 @@
     function applyOneIssue(issue, deferRender) {
         var change = { issue: issue, expected: issue.original, replacement: issue.suggestion, action: "applied" };
         if (!writeIssueReplacement(change)) {
+            if (!deferRender) viewIssues();
+            return { ok: false, reason: "changed" };
+        }
+        if (change.revisionMode && !verifyWrittenChange(change)) {
+            invalidateWrittenAction(change);
             if (!deferRender) viewIssues();
             return { ok: false, reason: "changed" };
         }
@@ -1273,21 +1518,30 @@
             try { actionStage(perf, "historyRecord", function () { recordAction(change.action, issue); }); }
             catch (error) { warning = true; }
             var navigation = { located: false, hadPending: false };
-            if (!undo) {
+            var autoAdvance = !undo && currentSettings().autoAdvance !== false;
+            if (autoAdvance) {
                 try {
                     navigation = actionStage(perf, "locateNext", function () {
                         return locateNextPendingIssue(issue.id, perf);
                     });
                 } catch (error) { warning = true; }
+            } else if (!undo) {
+                navigation.hadPending = currentIssues.some(function (candidate) {
+                    return candidate.status === "pending";
+                });
             }
             try { actionStage(perf, "render", viewIssues); }
             catch (error) { warning = true; }
             outcome = warning ? "written-with-warning" : "completed";
+            var hasStale = currentIssues.some(function (candidate) {
+                return candidate.status === "stale";
+            });
             setStatus(warning
                 ? "正文修改已完成，但部分记录或界面收尾失败。请检查正文后重新校对。"
                 : undo ? "已撤销这条修改，建议恢复为待确认。"
+                    : !autoAdvance && navigation.hadPending ? "已应用一条建议，其余建议待确认。"
                     : navigation.located ? "已应用一条建议，并定位到下一条待处理问题。"
-                        : navigation.hadPending ? "已应用一条建议；其他原文已变化，请重新校对。"
+                        : navigation.hadPending || hasStale ? "已应用一条建议；其他原文已变化，请重新校对。"
                             : "本轮待处理问题已经处理完成。", warning ? "warning" : "success");
             return true;
         } catch (error) {
@@ -1352,7 +1606,12 @@
             setStatus("当前没有符合安全格式规则的一键修正项，请逐条确认。", "warning");
             return { applied: 0, failed: 0, skipped: skipped };
         }
-        if (!currentDocumentMatches(currentSnapshot)) {
+        var document = activeDocument(app());
+        var uncertainCoordinates = isTrackRevisionsEnabled(document) || currentIssues.some(function (issue) {
+            return Number.isInteger(issue.textOffset);
+        });
+        if (!(uncertainCoordinates ? revisionSnapshotMatches(currentSnapshot)
+            : currentDocumentMatches(currentSnapshot))) {
             markAllPendingStale("选区内容已变化，未写入任何建议。请重新校对。");
             return { applied: 0, failed: pendingIds.length, skipped: skipped, stale: true };
         }
@@ -1361,7 +1620,12 @@
         var failed = 0;
         for (var index = 0; index < pendingIds.length; index += 1) {
             var issue = findPendingIssue(pendingIds[index]);
-            if (!issue || !isAutoFixableIssue(issue)) continue;
+            if (!issue || !isAutoFixableIssue(issue)) {
+                failed = pendingIds.length - applied;
+                markAllPendingStale("原文或上下文已变化，剩余建议未写入。已修正 " +
+                    applied + " 条，请重新校对。");
+                return { applied: applied, failed: failed, skipped: skipped, stale: true };
+            }
             var result;
             try {
                 result = applyOneIssue(issue, true);
@@ -1377,6 +1641,7 @@
                     setStatus("WPS 未能写入剩余建议，已停止批量修正；已修正 " + applied + " 条。", "error");
                     return { applied: applied, failed: failed, skipped: skipped };
                 }
+                failed = pendingIds.length - applied;
                 markAllPendingStale("原文已变化，剩余建议未写入。已修正 " + applied + " 条，请重新校对。");
                 return { applied: applied, failed: failed, skipped: skipped, stale: true };
             }

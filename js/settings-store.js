@@ -137,6 +137,7 @@
         return {
             provider: normalizeProvider(parsed.provider) || "opencode",
             deep: parsed.deep === true,
+            autoAdvance: parsed.autoAdvance !== false,
             profiles: {
                 ollama: safeProfile(parsed.profiles && parsed.profiles.ollama, PROVIDER_DEFAULTS.ollama),
                 opencode: safeProfile(parsed.profiles && parsed.profiles.opencode, PROVIDER_DEFAULTS.opencode),
@@ -149,6 +150,7 @@
         return {
             provider: "opencode",
             deep: false,
+            autoAdvance: true,
             profiles: {
                 ollama: Object.assign({}, PROVIDER_DEFAULTS.ollama),
                 opencode: Object.assign({}, PROVIDER_DEFAULTS.opencode),
@@ -163,6 +165,7 @@
         return writeJson(SETTINGS_KEY, {
             provider: provider,
             deep: value.deep === true,
+            autoAdvance: value.autoAdvance !== false,
             profiles: {
                 ollama: safeProfile(value.profiles && value.profiles.ollama, PROVIDER_DEFAULTS.ollama),
                 opencode: safeProfile(value.profiles && value.profiles.opencode, PROVIDER_DEFAULTS.opencode),
@@ -176,6 +179,8 @@
         var next = {
             provider: patch && patch.provider != null ? patch.provider : current.provider,
             deep: patch && patch.deep != null ? patch.deep === true : current.deep,
+            autoAdvance: patch && patch.autoAdvance != null
+                ? patch.autoAdvance !== false : current.autoAdvance,
             profiles: Object.assign({}, current.profiles)
         };
         if (patch && patch.profile && normalizeProvider(patch.provider || next.provider)) {
