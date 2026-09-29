@@ -92,11 +92,11 @@ test("government pack normalizes a square-bracket document year", () => {
     const engine = createEngine();
     engine.importPack(readPack("party-government-document.json"), "merge");
 
-    const issues = engine.evaluate("韶府[2026]12号", 0);
+    const issues = engine.evaluate("甲文[2026]12号", 0);
     const documentNumber = issues.find((issue) => issue.ruleId === "gov-doc-number-square-brackets");
 
     assert.ok(documentNumber);
-    assert.equal(documentNumber.suggestion, "韶府〔2026〕12号");
+    assert.equal(documentNumber.suggestion, "甲文〔2026〕12号");
     assert.equal(documentNumber.needsReview, true);
 });
 

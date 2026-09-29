@@ -1506,8 +1506,8 @@ test("runtime secrets and external endpoints are provider-scoped and memory-only
 
 
 test("multi-batch proofreading runs a second consistency pass and keeps its findings review-only", async () => {
-    const first = "市安委办负责统筹。" + "第一部分工作内容。".repeat(180);
-    const second = "市安委会办公室负责统筹。" + "第二部分工作内容。".repeat(180);
+    const first = "甲市综协办负责统筹。" + "第一部分工作内容。".repeat(180);
+    const second = "甲市综合协调办公室负责统筹。" + "第二部分工作内容。".repeat(180);
     const harness = createHarness({
         selectedText: first + "\n" + second,
         issuesForRequest: ({ body }) => {
@@ -1516,8 +1516,8 @@ test("multi-batch proofreading runs a second consistency pass and keeps its find
                 return [{
                     category: "consistency",
                     paragraphIndex: 2,
-                    original: "市安委会办公室",
-                    suggestion: "市安委办",
+                    original: "甲市综合协调办公室",
+                    suggestion: "甲市综协办",
                     reason: "与第1段机构称谓不一致，需核实正式名称后统一",
                     confidence: 0.97,
                     needsReview: false
@@ -1554,8 +1554,8 @@ test("multi-batch proofreading runs a second consistency pass and keeps its find
 });
 
 test("consistency-pass failure keeps completed first-pass findings", async () => {
-    const first = "第一段由市安委办统筹，有错字。" + "第一部分工作内容。".repeat(180);
-    const second = "第二段由市安委会办公室协调。" + "第二部分工作内容。".repeat(180);
+    const first = "第一段由甲市综协办统筹，有错字。" + "第一部分工作内容。".repeat(180);
+    const second = "第二段由甲市综合协调办公室协调。" + "第二部分工作内容。".repeat(180);
     let call = 0;
     const harness = createHarness({
         selectedText: first + "\n" + second,
@@ -1595,7 +1595,7 @@ test("consistency-pass failure keeps completed first-pass findings", async () =>
 });
 
 test("long text with no conflicting variants skips the second model pass", async () => {
-    const selectedText = Array(200).fill("市安委办负责统筹普通工作内容。").join("\n");
+    const selectedText = Array(200).fill("甲市综协办负责统筹普通工作内容。").join("\n");
     const harness = createHarness({ selectedText, issues: [] });
 
     const result = await harness.window.runProofreading();
@@ -1634,7 +1634,7 @@ test("many global candidates are reviewed in batches without losing distant grou
 });
 
 test("a document edit during global consistency review discards old findings", async () => {
-    const selectedText = "市安委办负责统筹，有错字。\n市安委会办公室负责协调。";
+    const selectedText = "甲市综协办负责统筹，有错字。\n甲市综合协调办公室负责协调。";
     let requestCount = 0;
     let harness;
     harness = createHarness({
@@ -1651,7 +1651,7 @@ test("a document edit during global consistency review discards old findings", a
             if (prompt.includes("第二遍跨段落一致性复核")) {
                 return [{
                     category: "consistency", paragraphIndex: 2,
-                    original: "市安委会办公室", suggestion: "市安委办",
+                    original: "甲市综合协调办公室", suggestion: "甲市综协办",
                     reason: "请核实", confidence: 0.9, needsReview: false
                 }];
             }

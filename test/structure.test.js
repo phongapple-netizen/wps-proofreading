@@ -237,15 +237,15 @@ test('AI issue can open a fixed-rule draft without applying text and shows saved
   const { win, elements, calls, ruleDrafts } = createResultHarness();
   win.setProofreadingIssues([{
     id: 'ai-issue', category: 'wording', origin: 'ai',
-    original: '高空作业', suggestion: '高处作业', actionable: true, status: 'pending'
+    original: '旧表述', suggestion: '新表述', actionable: true, status: 'pending'
   }]);
 
   const saveButton = findNode(elements['proofreading-issues'], (node) => node.textContent === '保存为规则');
   assert.ok(saveButton);
   saveButton.fire('click');
   assert.equal(ruleDrafts.length, 1);
-  assert.equal(ruleDrafts[0].original, '高空作业');
-  assert.equal(ruleDrafts[0].suggestion, '高处作业');
+  assert.equal(ruleDrafts[0].original, '旧表述');
+  assert.equal(ruleDrafts[0].suggestion, '新表述');
   assert.equal(calls.some((call) => call[0] === 'apply'), false);
 
   win.markProofreadingIssueRuleSaved('ai-issue');
@@ -288,15 +288,15 @@ test('review-only cards show neutral text and only locate and ignore actions', (
 test('replace and delete cards retain distinct diffs and writable correction actions', () => {
   const { win, elements, calls } = createResultHarness();
   win.setProofreadingIssues([
-    { id: 'replace', action: 'replace', actionable: true, original: '高空作业',
-      suggestion: '高处作业', status: 'pending' },
+    { id: 'replace', action: 'replace', actionable: true, original: '旧表述',
+      suggestion: '新表述', status: 'pending' },
     { id: 'delete', action: 'delete', actionable: true, original: '多余文字',
       suggestion: '', status: 'pending' }
   ]);
   const [replaceCard, deleteCard] = elements['proofreading-issues'].children;
-  assert.equal(findNode(replaceCard, (node) => node.className === 'diff-old').textContent, '高空作业');
+  assert.equal(findNode(replaceCard, (node) => node.className === 'diff-old').textContent, '旧表述');
   assert.equal(findNode(replaceCard, (node) => node.className === 'diff-arrow').textContent, ' → ');
-  assert.equal(findNode(replaceCard, (node) => node.className === 'diff-new').textContent, '高处作业');
+  assert.equal(findNode(replaceCard, (node) => node.className === 'diff-new').textContent, '新表述');
   assert.equal(findNode(deleteCard, (node) => node.className === 'diff-old').textContent, '多余文字');
   assert.equal(findNode(deleteCard, (node) => node.className === 'diff-new').textContent, '建议删除');
   const replaceButton = findNode(replaceCard, (node) => node.textContent === '修正');
@@ -308,8 +308,8 @@ test('replace and delete cards retain distinct diffs and writable correction act
   assert.deepEqual(calls, [['apply', 'replace'], ['apply', 'delete']]);
 
   win.setProofreadingIssues([{
-    id: 'replace', action: 'replace', actionable: true, original: '高空作业',
-    suggestion: '高处作业', status: 'accepted'
+    id: 'replace', action: 'replace', actionable: true, original: '旧表述',
+    suggestion: '新表述', status: 'accepted'
   }]);
   const processed = elements['proofreading-issues'].children.find((node) => node.tag === 'details');
   const acceptedCard = processed.children[1].children[0];
@@ -321,11 +321,11 @@ test('replace and delete cards retain distinct diffs and writable correction act
 
 test('accepted AI issues can save a rule without applying again or changing accepted status', () => {
   const { win, elements, calls, ruleDrafts } = createResultHarness();
-  let documentText = '市消防救援支队';
+  let documentText = '甲市公共服务中心旧称';
   const apply = win.applyProofreadingIssue;
   win.applyProofreadingIssue = (id) => {
     apply(id);
-    documentText = '市消防救援局';
+    documentText = '甲市公共服务中心';
     return true;
   };
   const storage = new Map();
@@ -336,14 +336,14 @@ test('accepted AI issues can save a rule without applying again or changing acce
   loadBrowserScript('js/rules-center.js', win);
   win.setProofreadingIssues([{
     id: 'accepted-ai', category: 'wording', origin: 'ai',
-    original: '市消防救援支队', suggestion: '市消防救援局', status: 'pending'
+    original: '甲市公共服务中心旧称', suggestion: '甲市公共服务中心', status: 'pending'
   }]);
 
   findNode(elements['proofreading-issues'], (node) => node.textContent === '修正').fire('click');
   assert.deepEqual(calls, [['apply', 'accepted-ai']]);
   win.setProofreadingIssues([{
     id: 'accepted-ai', category: 'wording', origin: 'ai',
-    original: '市消防救援支队', suggestion: '市消防救援局', status: 'accepted'
+    original: '甲市公共服务中心旧称', suggestion: '甲市公共服务中心', status: 'accepted'
   }]);
   assert.ok(findNode(elements['proofreading-issues'], (node) => node.textContent === '撤销'));
   const save = findNode(elements['proofreading-issues'], (node) => node.textContent === '保存为规则');
@@ -360,7 +360,7 @@ test('accepted AI issues can save a rule without applying again or changing acce
   assert.equal(saved.autoFix, false);
   win.markProofreadingIssueRuleSaved('accepted-ai');
 
-  assert.equal(documentText, '市消防救援局');
+  assert.equal(documentText, '甲市公共服务中心');
   assert.deepEqual(calls, [['apply', 'accepted-ai']]);
   assert.ok(findNode(elements['proofreading-issues'], (node) => node.textContent === '撤销'));
   const savedButton = findNode(elements['proofreading-issues'], (node) => node.textContent === '已保存规则');
@@ -429,16 +429,16 @@ test('manual fixed-rule entry persists only after submit through the existing ru
 
   elements['rule-new-fixed'].fire('click');
   assert.equal(elements['fixed-rule-editor'].hidden, false);
-  elements['fixed-rule-pattern'].value = '市消防救援支队';
-  elements['fixed-rule-replacement'].value = '市消防救援局';
+  elements['fixed-rule-pattern'].value = '甲市公共服务中心旧称';
+  elements['fixed-rule-replacement'].value = '甲市公共服务中心';
   elements['fixed-rule-name'].value = '机构名称规范';
   elements['fixed-rule-notes'].value = '人工确认后建立';
   assert.equal(win.WpsRulesCenter.getRules().length, 0);
   elements['fixed-rule-editor'].fire('submit');
 
   const saved = win.WpsRulesCenter.getRules()[0];
-  assert.equal(saved.pattern, '市消防救援支队');
-  assert.equal(saved.replacement, '市消防救援局');
+  assert.equal(saved.pattern, '甲市公共服务中心旧称');
+  assert.equal(saved.replacement, '甲市公共服务中心');
   assert.equal(saved.name, '机构名称规范');
   assert.equal(saved.notes, '人工确认后建立');
   assert.equal(saved.type, 'replace');
