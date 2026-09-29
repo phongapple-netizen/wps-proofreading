@@ -296,9 +296,9 @@ test("AI review rules require an instruction and reject empty-match regex trigge
 test("user replacement rules use safe defaults and run on the next local evaluation", () => {
     const { api } = createHarness();
     const saved = api.saveUserReplacementRule({
-        pattern: "市消防救援支队",
-        replacement: "市消防救援局",
-        name: "消防机构名称规范",
+        pattern: "甲市公共服务中心旧称",
+        replacement: "甲市公共服务中心",
+        name: "服务中心名称规范",
         notes: "按最新机构名称统一"
     });
 
@@ -312,9 +312,9 @@ test("user replacement rules use safe defaults and run on the next local evaluat
     assert.equal(saved.notes, "按最新机构名称统一");
     assert.equal(api.isSafeAutoFix(saved), false);
 
-    const issue = api.evaluate("市消防救援支队已到场。", 0)[0];
-    assert.equal(issue.original, "市消防救援支队");
-    assert.equal(issue.suggestion, "市消防救援局");
+    const issue = api.evaluate("甲市公共服务中心旧称已登记。", 0)[0];
+    assert.equal(issue.original, "甲市公共服务中心旧称");
+    assert.equal(issue.suggestion, "甲市公共服务中心");
     assert.equal(issue.autoFixable, false);
     assert.equal(issue.actionable, true);
 });

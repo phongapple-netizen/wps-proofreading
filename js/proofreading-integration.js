@@ -361,6 +361,7 @@
                 stateLabel: issueStateLabel(issue),
                 confidence: issue.confidence,
                 message: (issue.reason ? "原因：" + issue.reason + "\n" : "") + "状态：" + issueStateLabel(issue),
+                action: issue.action || "",
                 suggestion: issue.suggestion,
                 status: issue.status,
                 needsReview: issue.needsReview,
@@ -762,6 +763,9 @@
     async function runProofreading() {
         if (issueActionBusy) return { accepted: false, reason: "action-busy" };
         if (busy) return { accepted: false, reason: "busy" };
+        if (typeof root.getTaskBusyState === "function" && root.getTaskBusyState().rewrite) {
+            return { accepted: false, reason: "rewrite-busy" };
+        }
         currentController = makeAbortController();
         setBusy(true);
 

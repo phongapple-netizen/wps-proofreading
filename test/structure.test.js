@@ -81,7 +81,8 @@ function makeTaskPaneElement(tag) {
 function createResultHarness() {
   const ids = ['issue-filter', 'tab-issues', 'tab-history', 'proofreading-issues', 'empty-state',
     'history-empty', 'proofreading-history', 'result-count', 'result-summary', 'result-stale-summary',
-    'apply-all', 'rerun-proofreading', 'proofreading-status'];
+    'apply-all', 'rerun-proofreading', 'proofreading-status', 'proofreading-view', 'rewrite-view',
+    'mode-proofread', 'mode-rewrite', 'deep-enhance-control'];
   const elements = {};
   ids.forEach((id) => { elements[id] = makeTaskPaneElement(id === 'proofreading-issues' ? 'section' : 'div'); });
   elements['issue-filter'].value = 'all';
@@ -157,6 +158,51 @@ test('document adapter reads and replaces the WPS selection safely', () => {
   assert.equal(selection.Range.Text, '修订后');
 });
 
+test('top-level mode switch separates rewrite from proofreading and hides deep enhancement in rewrite mode', () => {
+  const { win, elements } = createResultHarness();
+  elements['rewrite-view'].hidden = true;
+  assert.equal(elements['proofreading-view'].hidden, false);
+  assert.equal(elements['rewrite-view'].hidden, true);
+  assert.equal(win.setAppMode('rewrite'), 'rewrite');
+  assert.equal(elements['proofreading-view'].hidden, true);
+  assert.equal(elements['rewrite-view'].hidden, false);
+  assert.equal(elements['deep-enhance-control'].hidden, true);
+  assert.equal(elements['mode-rewrite'].getAttribute('aria-selected'), 'true');
+  assert.equal(win.setAppMode('proofread'), 'proofread');
+  assert.equal(elements['proofreading-view'].hidden, false);
+  assert.equal(elements['rewrite-view'].hidden, true);
+  assert.equal(elements['deep-enhance-control'].hidden, false);
+});
+
+test('mode tabs stay locked for rewrite, proofreading, and proofreading actions, then recover', () => {
+  const { win, elements } = createResultHarness();
+  assert.equal(win.setAppMode('rewrite'), 'rewrite');
+  win.setRewriteBusy(true);
+  assert.equal(elements['mode-proofread'].disabled, true);
+  assert.equal(elements['mode-rewrite'].disabled, true);
+  assert.equal(win.setAppMode('proofread'), 'rewrite');
+  elements['mode-proofread'].fire('click');
+  assert.equal(win.getAppMode(), 'rewrite');
+  win.setRewriteBusy(false);
+  assert.equal(elements['mode-proofread'].disabled, false);
+  assert.equal(win.setAppMode('proofread'), 'proofread');
+
+  for (const [start, finish] of [
+    [() => win.setProofreadingBusy(true), () => win.setProofreadingBusy(false)],
+    [() => win.setProofreadingActionBusy(true), () => win.setProofreadingActionBusy(false)]
+  ]) {
+    start();
+    assert.equal(elements['mode-proofread'].disabled, true);
+    assert.equal(elements['mode-rewrite'].disabled, true);
+    assert.equal(win.setAppMode('rewrite'), 'proofread');
+    elements['mode-rewrite'].fire('click');
+    assert.equal(win.getAppMode(), 'proofread');
+    finish();
+    assert.equal(elements['mode-proofread'].disabled, false);
+    assert.equal(elements['mode-rewrite'].disabled, false);
+  }
+});
+
 test('ribbon callback opens one task pane and stores its id', () => {
   let createdUrl = '';
   const storage = new Map();
@@ -191,15 +237,15 @@ test('AI issue can open a fixed-rule draft without applying text and shows saved
   const { win, elements, calls, ruleDrafts } = createResultHarness();
   win.setProofreadingIssues([{
     id: 'ai-issue', category: 'wording', origin: 'ai',
-    original: '高空作业', suggestion: '高处作业', actionable: true, status: 'pending'
+    original: '旧表述', suggestion: '新表述', actionable: true, status: 'pending'
   }]);
 
   const saveButton = findNode(elements['proofreading-issues'], (node) => node.textContent === '保存为规则');
   assert.ok(saveButton);
   saveButton.fire('click');
   assert.equal(ruleDrafts.length, 1);
-  assert.equal(ruleDrafts[0].original, '高空作业');
-  assert.equal(ruleDrafts[0].suggestion, '高处作业');
+  assert.equal(ruleDrafts[0].original, '旧表述');
+  assert.equal(ruleDrafts[0].suggestion, '新表述');
   assert.equal(calls.some((call) => call[0] === 'apply'), false);
 
   win.markProofreadingIssueRuleSaved('ai-issue');
@@ -210,13 +256,76 @@ test('AI issue can open a fixed-rule draft without applying text and shows saved
     (node) => node.textContent === '已保存为固定替换规则，下次校对时生效。') !== null, true);
 });
 
+test('review-only cards show neutral text and only locate and ignore actions', () => {
+  const { win, elements, calls } = createResultHarness();
+  win.setProofreadingIssues([{
+    id: 'review-only', action: 'review', actionable: false, needsReview: true,
+    category: 'wording', original: '电信信号视频连线', suggestion: '',
+    reason: '搭配需人工核对。', status: 'pending'
+  }]);
+  const card = elements['proofreading-issues'].children[0];
+  assert.equal(findNode(card, (node) => node.className === 'diff-old'), null);
+  assert.equal(findNode(card, (node) => node.className === 'issue-review-label').textContent, '需核对');
+  assert.equal(findNode(card, (node) => node.className === 'issue-review-text').textContent, '电信信号视频连线');
+  assert.ok(findNode(card, (node) => node.textContent === '错误分析'));
+  const actions = card.children[0].children[1].children;
+  assert.deepEqual(actions.map((button) => button.textContent), ['定位', '忽略']);
+  actions[0].fire('click');
+  actions[1].fire('click');
+  assert.deepEqual(calls, [['locate', 'review-only'], ['ignore', 'review-only']]);
+
+  win.setProofreadingIssues([{
+    id: 'review-action', action: 'review', original: '待核对原文', suggestion: '未验证候选', status: 'pending'
+  }]);
+  const actionOnlyCard = elements['proofreading-issues'].children[0];
+  assert.equal(findNode(actionOnlyCard, (node) => node.className === 'diff-old'), null);
+  assert.equal(findNode(actionOnlyCard, (node) => node.textContent === '修正'), null);
+  const css = read('ui/taskpane.css');
+  assert.match(css, /\.issue-review-text\s*\{[^}]*text-decoration:\s*none/);
+  assert.match(css, /\.issue-review-text\s*\{[^}]*overflow-wrap:\s*anywhere/);
+});
+
+test('replace and delete cards retain distinct diffs and writable correction actions', () => {
+  const { win, elements, calls } = createResultHarness();
+  win.setProofreadingIssues([
+    { id: 'replace', action: 'replace', actionable: true, original: '旧表述',
+      suggestion: '新表述', status: 'pending' },
+    { id: 'delete', action: 'delete', actionable: true, original: '多余文字',
+      suggestion: '', status: 'pending' }
+  ]);
+  const [replaceCard, deleteCard] = elements['proofreading-issues'].children;
+  assert.equal(findNode(replaceCard, (node) => node.className === 'diff-old').textContent, '旧表述');
+  assert.equal(findNode(replaceCard, (node) => node.className === 'diff-arrow').textContent, ' → ');
+  assert.equal(findNode(replaceCard, (node) => node.className === 'diff-new').textContent, '新表述');
+  assert.equal(findNode(deleteCard, (node) => node.className === 'diff-old').textContent, '多余文字');
+  assert.equal(findNode(deleteCard, (node) => node.className === 'diff-new').textContent, '建议删除');
+  const replaceButton = findNode(replaceCard, (node) => node.textContent === '修正');
+  const deleteButton = findNode(deleteCard, (node) => node.textContent === '修正');
+  assert.equal(replaceButton.disabled, false);
+  assert.equal(deleteButton.disabled, false);
+  replaceButton.fire('click');
+  deleteButton.fire('click');
+  assert.deepEqual(calls, [['apply', 'replace'], ['apply', 'delete']]);
+
+  win.setProofreadingIssues([{
+    id: 'replace', action: 'replace', actionable: true, original: '旧表述',
+    suggestion: '新表述', status: 'accepted'
+  }]);
+  const processed = elements['proofreading-issues'].children.find((node) => node.tag === 'details');
+  const acceptedCard = processed.children[1].children[0];
+  const undoButton = findNode(acceptedCard, (node) => node.textContent === '撤销');
+  assert.equal(undoButton.disabled, false);
+  undoButton.fire('click');
+  assert.deepEqual(calls.at(-1), ['undo', 'replace']);
+});
+
 test('accepted AI issues can save a rule without applying again or changing accepted status', () => {
   const { win, elements, calls, ruleDrafts } = createResultHarness();
-  let documentText = '市消防救援支队';
+  let documentText = '甲市公共服务中心旧称';
   const apply = win.applyProofreadingIssue;
   win.applyProofreadingIssue = (id) => {
     apply(id);
-    documentText = '市消防救援局';
+    documentText = '甲市公共服务中心';
     return true;
   };
   const storage = new Map();
@@ -227,14 +336,14 @@ test('accepted AI issues can save a rule without applying again or changing acce
   loadBrowserScript('js/rules-center.js', win);
   win.setProofreadingIssues([{
     id: 'accepted-ai', category: 'wording', origin: 'ai',
-    original: '市消防救援支队', suggestion: '市消防救援局', status: 'pending'
+    original: '甲市公共服务中心旧称', suggestion: '甲市公共服务中心', status: 'pending'
   }]);
 
   findNode(elements['proofreading-issues'], (node) => node.textContent === '修正').fire('click');
   assert.deepEqual(calls, [['apply', 'accepted-ai']]);
   win.setProofreadingIssues([{
     id: 'accepted-ai', category: 'wording', origin: 'ai',
-    original: '市消防救援支队', suggestion: '市消防救援局', status: 'accepted'
+    original: '甲市公共服务中心旧称', suggestion: '甲市公共服务中心', status: 'accepted'
   }]);
   assert.ok(findNode(elements['proofreading-issues'], (node) => node.textContent === '撤销'));
   const save = findNode(elements['proofreading-issues'], (node) => node.textContent === '保存为规则');
@@ -251,7 +360,7 @@ test('accepted AI issues can save a rule without applying again or changing acce
   assert.equal(saved.autoFix, false);
   win.markProofreadingIssueRuleSaved('accepted-ai');
 
-  assert.equal(documentText, '市消防救援局');
+  assert.equal(documentText, '甲市公共服务中心');
   assert.deepEqual(calls, [['apply', 'accepted-ai']]);
   assert.ok(findNode(elements['proofreading-issues'], (node) => node.textContent === '撤销'));
   const savedButton = findNode(elements['proofreading-issues'], (node) => node.textContent === '已保存规则');
@@ -320,16 +429,16 @@ test('manual fixed-rule entry persists only after submit through the existing ru
 
   elements['rule-new-fixed'].fire('click');
   assert.equal(elements['fixed-rule-editor'].hidden, false);
-  elements['fixed-rule-pattern'].value = '市消防救援支队';
-  elements['fixed-rule-replacement'].value = '市消防救援局';
+  elements['fixed-rule-pattern'].value = '甲市公共服务中心旧称';
+  elements['fixed-rule-replacement'].value = '甲市公共服务中心';
   elements['fixed-rule-name'].value = '机构名称规范';
   elements['fixed-rule-notes'].value = '人工确认后建立';
   assert.equal(win.WpsRulesCenter.getRules().length, 0);
   elements['fixed-rule-editor'].fire('submit');
 
   const saved = win.WpsRulesCenter.getRules()[0];
-  assert.equal(saved.pattern, '市消防救援支队');
-  assert.equal(saved.replacement, '市消防救援局');
+  assert.equal(saved.pattern, '甲市公共服务中心旧称');
+  assert.equal(saved.replacement, '甲市公共服务中心');
   assert.equal(saved.name, '机构名称规范');
   assert.equal(saved.notes, '人工确认后建立');
   assert.equal(saved.type, 'replace');
@@ -340,7 +449,10 @@ test('manual fixed-rule entry persists only after submit through the existing ru
 test('top toolbar and rules center expose the expected controls', () => {
   const html = read('ui/taskpane.html');
   assert.match(html, /<div class="toolbar">/);
-  assert.match(html, /<h1 class="toolbar-title">智能校对<\/h1>/);
+  assert.match(html, /<h1 class="toolbar-title">智能校改<\/h1>/);
+  assert.match(html, /id="mode-proofread"/);
+  assert.match(html, /id="mode-rewrite"/);
+  assert.match(html, /id="rewrite-view"/);
   assert.match(html, /id="rules-toggle"/);
   assert.match(html, /id="settings-toggle"/);
   assert.match(html, /aria-label="设置" title="设置"/);
@@ -819,9 +931,9 @@ test('action busy locks issue controls without rebuilding cards and catches reje
   assert.equal(staleActions[0].disabled, true);
   assert.equal(staleActions[1].disabled, true);
   assert.equal(staleActions[2].disabled, true);
-  assert.equal(reviewActions[0].disabled, true);
+  assert.deepEqual(Array.from(reviewActions).map((button) => button.textContent), ['定位', '忽略']);
+  assert.equal(reviewActions[0].disabled, false);
   assert.equal(reviewActions[1].disabled, false);
-  assert.equal(reviewActions[2].disabled, false);
 
   cardsBeforeLock[0].fire('click');
   assert.deepEqual(calls, [['locate', 'pending']]);

@@ -7,6 +7,8 @@
         filter: "all",
         busy: false,
         actionBusy: false,
+        rewriteBusy: false,
+        appMode: "proofread",
         tab: "issues",
         history: [],
         historyIds: {}
@@ -52,6 +54,7 @@
 
     function setProofreadingBusy(value) {
         state.busy = value === true;
+        updateModeTabs();
         var cancelButton = byId("cancel-proofreading");
         if (cancelButton) {
             cancelButton.hidden = !state.busy || !!pendingFullDocumentConfirmation;
@@ -80,8 +83,27 @@
 
     function setProofreadingActionBusy(value) {
         state.actionBusy = value === true;
+        updateModeTabs();
         updateActionControls();
         return state.actionBusy;
+    }
+
+    function taskBusyState() {
+        return { proofreading: state.busy, actionBusy: state.actionBusy, rewrite: state.rewriteBusy };
+    }
+
+    function updateModeTabs() {
+        var locked = state.busy || state.actionBusy || state.rewriteBusy;
+        var proofreadingTab = byId("mode-proofread");
+        var rewriteTab = byId("mode-rewrite");
+        if (proofreadingTab) proofreadingTab.disabled = locked;
+        if (rewriteTab) rewriteTab.disabled = locked;
+    }
+
+    function setRewriteBusy(value) {
+        state.rewriteBusy = value === true;
+        updateModeTabs();
+        return state.rewriteBusy;
     }
 
     function finishFullDocumentConfirmation(confirmed) {
@@ -232,6 +254,7 @@
             stateLabel: String(value.stateLabel || ""),
             confidence: typeof value.confidence === "number" ? value.confidence : null,
             message: String(value.message || value.reason || ""),
+            action: String(value.action || ""),
             suggestion: typeof value.suggestion === "string"
                 ? value.suggestion
                 : String(value.replacement || ""),
@@ -525,6 +548,17 @@
         return issue.status === "accepted" || issue.status === "ignored";
     }
 
+    function isDeleteIssue(issue) {
+        return issue.actionable !== false && issue.action !== "review" &&
+            issue.suggestion === "" &&
+            (issue.action === "delete" || (!issue.action && issue.hasSuggestion));
+    }
+
+    function isReviewOnlyIssue(issue) {
+        return issue.action === "review" || issue.actionable === false ||
+            (issue.suggestion === "" && !isDeleteIssue(issue));
+    }
+
     function renderIssues(issues) {
         if (Array.isArray(issues)) {
             var previous = state.issues;
@@ -581,6 +615,8 @@
 
         shown.forEach(function (issue) {
             var pending = issue.status === "pending";
+            var reviewOnly = isReviewOnlyIssue(issue);
+            var deleteIssue = isDeleteIssue(issue);
             var card = root.document.createElement("article");
             card.className = "issue-card" + (pending && !state.busy ? " is-locatable" : "");
             if (pending && !state.busy) {
@@ -625,16 +661,18 @@
 
             var actions = root.document.createElement("div");
             actions.className = "issue-actions";
-            actions.appendChild(actionButton(
-                issue.status === "accepted" ? "撤销" :
-                    issue.status === "ignored" ? "已忽略" :
-                        issue.status === "stale" ? "需重查" : "修正",
-                "",
-                issue,
-                issue.status === "accepted" ? "undoProofreadingIssue" : "applyProofreadingIssue",
-                state.busy || (!pending && issue.status !== "accepted") ||
-                    (pending && issue.actionable === false)
-            ));
+            if (!pending || !reviewOnly) {
+                actions.appendChild(actionButton(
+                    issue.status === "accepted" ? "撤销" :
+                        issue.status === "ignored" ? "已忽略" :
+                            issue.status === "stale" ? "需重查" : "修正",
+                    "",
+                    issue,
+                    issue.status === "accepted" ? "undoProofreadingIssue" : "applyProofreadingIssue",
+                    state.busy || (!pending && issue.status !== "accepted") ||
+                        (pending && issue.actionable === false)
+                ));
+            }
             actions.appendChild(actionButton("定位", "issue-action-secondary", issue, "locateProofreadingIssue", state.busy || !pending));
             if (canSaveIssueAsRule(issue) || issue.ruleSaved) {
                 actions.appendChild(saveRuleButton(issue, state.busy ||
@@ -647,18 +685,27 @@
             if (issue.original || issue.suggestion) {
                 var diff = root.document.createElement("p");
                 diff.className = "issue-diff";
-                var old = root.document.createElement("span");
-                old.className = "diff-old";
-                old.textContent = issue.original;
-                diff.appendChild(old);
-                if (issue.actionable !== false) {
+                if (reviewOnly) {
+                    var reviewLabel = root.document.createElement("span");
+                    reviewLabel.className = "issue-review-label";
+                    reviewLabel.textContent = "需核对";
+                    diff.appendChild(reviewLabel);
+                    var reviewText = root.document.createElement("span");
+                    reviewText.className = "issue-review-text";
+                    reviewText.textContent = issue.original || issue.suggestion;
+                    diff.appendChild(reviewText);
+                } else {
+                    var old = root.document.createElement("span");
+                    old.className = "diff-old";
+                    old.textContent = issue.original;
+                    diff.appendChild(old);
                     var arrow = root.document.createElement("span");
                     arrow.className = "diff-arrow";
                     arrow.textContent = " → ";
                     diff.appendChild(arrow);
                     var fresh = root.document.createElement("span");
                     fresh.className = "diff-new";
-                    fresh.textContent = issue.suggestion === "" ? "建议删除" : issue.suggestion;
+                    fresh.textContent = deleteIssue ? "建议删除" : issue.suggestion;
                     diff.appendChild(fresh);
                 }
                 card.appendChild(diff);
@@ -760,6 +807,33 @@
         }
     }
 
+    function setAppMode(mode) {
+        if ((state.busy || state.actionBusy || state.rewriteBusy) &&
+            (mode === "rewrite" ? "rewrite" : "proofread") !== state.appMode) return state.appMode;
+        var rewriteMode = mode === "rewrite";
+        state.appMode = rewriteMode ? "rewrite" : "proofread";
+        var proofreadingView = byId("proofreading-view");
+        var rewriteView = byId("rewrite-view");
+        var proofreadingTab = byId("mode-proofread");
+        var rewriteTab = byId("mode-rewrite");
+        var deepControl = byId("deep-enhance-control");
+        if (proofreadingView) proofreadingView.hidden = rewriteMode;
+        if (rewriteView) rewriteView.hidden = !rewriteMode;
+        if (deepControl) deepControl.hidden = rewriteMode;
+        if (proofreadingTab) {
+            proofreadingTab.classList.toggle("is-active", !rewriteMode);
+            proofreadingTab.setAttribute("aria-selected", rewriteMode ? "false" : "true");
+        }
+        if (rewriteTab) {
+            rewriteTab.classList.toggle("is-active", rewriteMode);
+            rewriteTab.setAttribute("aria-selected", rewriteMode ? "true" : "false");
+        }
+        if (rewriteMode && typeof root.refreshRewriteSelection === "function") {
+            root.refreshRewriteSelection();
+        }
+        return state.appMode;
+    }
+
     function pushProofreadingRecord(record) {
         var value = record || {};
         var id = String(value.id == null ? "" : value.id);
@@ -789,10 +863,14 @@
     root.setModelConnectionStatus = root.setModelConnectionStatus || setModelConnectionStatus;
     root.setProofreadingBusy = root.setProofreadingBusy || setProofreadingBusy;
     root.setProofreadingActionBusy = root.setProofreadingActionBusy || setProofreadingActionBusy;
+    root.setRewriteBusy = setRewriteBusy;
+    root.getTaskBusyState = taskBusyState;
     root.requestFullDocumentConfirmation = root.requestFullDocumentConfirmation || requestFullDocumentConfirmation;
     root.dismissFullDocumentConfirmation = root.dismissFullDocumentConfirmation || dismissFullDocumentConfirmation;
     root.setProofreadingProgress = root.setProofreadingProgress || setProofreadingProgress;
     root.syncSettingsForm = syncFormFromStore;
+    root.setAppMode = setAppMode;
+    root.getAppMode = function () { return state.appMode; };
     root.getProofreadingStatus = root.getProofreadingStatus || getProofreadingStatus;
     root.setProofreadingIssues = root.setProofreadingIssues || renderIssues;
     root.markProofreadingIssueRuleSaved = function (issueId) {
@@ -1004,6 +1082,11 @@
         var filter = byId("issue-filter");
         var confirmFullButton = byId("confirm-full-document");
         var declineFullButton = byId("decline-full-document");
+        var proofreadingMode = byId("mode-proofread");
+        var rewriteMode = byId("mode-rewrite");
+
+        if (proofreadingMode) proofreadingMode.addEventListener("click", function () { setAppMode("proofread"); });
+        if (rewriteMode) rewriteMode.addEventListener("click", function () { setAppMode("rewrite"); });
 
         if (confirmFullButton) {
             confirmFullButton.addEventListener("click", function () { finishFullDocumentConfirmation(true); });
@@ -1035,6 +1118,7 @@
             });
         }
         bindResultTabs();
+        updateModeTabs();
         bindSettingsToggle();
         bindSettingsForm();
         syncFormFromStore();

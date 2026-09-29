@@ -1047,7 +1047,11 @@
         return value;
     }
 
-    function createModelRequest(provider, endpoint, model, apiKey, prompt) {
+    function createModelRequest(provider, endpoint, model, apiKey, prompt, requestOptions) {
+        requestOptions = requestOptions || {};
+        var maxOutputTokens = Number(requestOptions.maxOutputTokens);
+        if (!Number.isFinite(maxOutputTokens) || maxOutputTokens <= 0) maxOutputTokens = 2000;
+        maxOutputTokens = Math.min(16000, Math.round(maxOutputTokens));
         var mode = provider === "ollama" ? "ollama" : "openai";
         var url = normalizeEndpoint(mode, endpoint);
         var modelName = String(model || "").trim();
@@ -1064,7 +1068,7 @@
                 stream: false,
                 format: "json",
                 messages: [{ role: "user", content: prompt }],
-                options: { temperature: 0, num_predict: 2000 }
+                options: { temperature: 0, num_predict: maxOutputTokens }
             };
         } else {
             if (apiKey) headers.Authorization = "Bearer " + apiKey;
@@ -1072,7 +1076,7 @@
                 model: modelName,
                 stream: false,
                 temperature: 0,
-                max_tokens: 2000,
+                max_tokens: maxOutputTokens,
                 response_format: { type: "json_object" },
                 messages: [{ role: "user", content: prompt }]
             };
@@ -1097,7 +1101,9 @@
 
     async function requestModel(options, prompt, fetchImpl) {
         var provider = options.provider === "ollama" ? "ollama" : "openai";
-        var request = createModelRequest(provider, options.endpoint, options.model, options.apiKey, prompt);
+        var request = createModelRequest(provider, options.endpoint, options.model, options.apiKey, prompt, {
+            maxOutputTokens: options.maxOutputTokens
+        });
         var fetcher = fetchImpl || root.fetch;
         if (typeof fetcher !== "function") throw new Error("当前 WPS 内核不支持网络请求。");
 
