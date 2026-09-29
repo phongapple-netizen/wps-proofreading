@@ -68,6 +68,18 @@
         }).map(function (group) { return group.name; });
     }
 
+    function isPolicyStrengthOccurrence(source, index, word) {
+        var previous = source.charAt(index - 1);
+        var next = source.charAt(index + 1);
+        if (word === "应") {
+            return !/[相对响适供反效]/.test(previous) && !/[该急用]/.test(next);
+        }
+        if (word === "可") {
+            return !/[认许]/.test(previous) && !/[能靠疑燃视控见行]/.test(next);
+        }
+        return true;
+    }
+
     function extractStrengthGroups(source) {
         var found = Object.create(null);
         var pattern = new RegExp(STRENGTH_PATTERN.source, "g");
@@ -75,11 +87,8 @@
         while ((match = pattern.exec(source)) !== null) {
             var word = match[0];
             var next = source.charAt(match.index + word.length);
-            var previous = source.charAt(match.index - 1);
-            // These ordinary words contain policy characters but are not policy strength.
-            if ((word === "应" && (next === "该" || previous === "响")) ||
-                (word === "可" && (next === "能" || previous === "许")) ||
-                (word === "不可" && next === "能")) continue;
+            if ((word === "不可" && next === "能") ||
+                !isPolicyStrengthOccurrence(source, match.index, word)) continue;
             var term = STRENGTH_TERMS.filter(function (item) { return item.word === word; })[0];
             found[term.group] = true;
         }

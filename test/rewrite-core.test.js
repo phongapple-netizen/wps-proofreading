@@ -150,6 +150,32 @@ test('longer negative strength terms do not also count as positive terms', () =>
   assert.deepEqual(core.extractRewriteGuards('应该研究可能原因，不可能使用许可材料响应请求。').strengths, []);
 });
 
+test('single-character strength terms inside ordinary words are ignored', () => {
+  for (const ordinary of [
+    '应急管理', '相应措施', '对应关系', '应用系统', '响应机制',
+    '适应能力', '供应保障', '反应情况', '效应',
+    '认可', '许可', '可能', '可靠', '可疑', '可燃',
+    '可视', '可控', '可见', '可行'
+  ]) {
+    assert.deepEqual(core.extractRewriteGuards(ordinary).strengths, [], ordinary);
+  }
+  assert.deepEqual(core.extractRewriteGuards('加强应急管理和相应措施落实。').strengths, []);
+  assert.deepEqual(core.extractRewriteGuards('该方案得到认可，技术路线可靠可行。').strengths, []);
+});
+
+test('single-character policy terms remain detectable alongside ordinary words', () => {
+  for (const [policy, group] of [
+    ['应落实整改', 'obligation'], ['应加强监管', 'obligation'],
+    ['应当落实', 'obligation'], ['可采取措施', 'permissive'],
+    ['可依法处理', 'permissive'], ['可以开展', 'permissive'],
+    ['必须立即整改', 'strong-obligation'], ['不得擅自进入', 'prohibition']
+  ]) {
+    assert.deepEqual(core.extractRewriteGuards(policy).strengths, [group], policy);
+  }
+  assert.deepEqual(core.extractRewriteGuards('应急管理部门应落实整改。').strengths, ['obligation']);
+  assert.deepEqual(core.extractRewriteGuards('可靠方案可依法处理。').strengths, ['permissive']);
+});
+
 test('rewrite prompts are independent, preserve optional requirements as data, and demand strict JSON', () => {
   const prompt = core.buildRewritePrompt('原文：拟于2026年9月完成。', '篇幅不要增加');
   assert.match(prompt, /严格 JSON/);
