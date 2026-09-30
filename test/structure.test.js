@@ -41,6 +41,12 @@ function makeTaskPaneElement(tag) {
     node.children.push(child);
     return child;
   };
+  node.insertBefore = (child, before) => {
+    child.parent = node;
+    const index = node.children.indexOf(before);
+    node.children.splice(index < 0 ? node.children.length : index, 0, child);
+    return child;
+  };
   node.setAttribute = (name, value) => { node.attributes[name] = String(value); };
   node.getAttribute = (name) => node.attributes[name] || null;
   node.classList = {
@@ -71,18 +77,18 @@ function makeTaskPaneElement(tag) {
     }
   };
   Object.defineProperty(node, 'textContent', {
-    get() { return node._textContent || ''; },
+    get() { return node._textContent || node.children.map((child) => child.textContent).join(''); },
     set(value) { node._textContent = String(value == null ? '' : value); node.children = []; }
   });
   node.focus = () => {};
   return node;
 }
 
-function createResultHarness() {
+function createResultHarness(extraWindow = {}) {
   const ids = ['issue-filter', 'tab-issues', 'tab-history', 'proofreading-issues', 'empty-state',
     'history-empty', 'proofreading-history', 'result-count', 'result-summary', 'result-stale-summary',
     'apply-all', 'rerun-proofreading', 'proofreading-status', 'proofreading-view', 'rewrite-view',
-    'mode-proofread', 'mode-rewrite', 'deep-enhance-control'];
+    'mode-proofread', 'mode-rewrite', 'deep-enhance-control', 'proofreading-toast'];
   const elements = {};
   ids.forEach((id) => { elements[id] = makeTaskPaneElement(id === 'proofreading-issues' ? 'section' : 'div'); });
   elements['issue-filter'].value = 'all';
@@ -104,6 +110,7 @@ function createResultHarness() {
     openIssueRuleDraft: (issue) => { ruleDrafts.push(issue); return true; },
     applyAllProofreadingIssues: () => { calls.push(['apply-all']); return true; }
   };
+  Object.assign(win, extraWindow);
   loadBrowserScript('js/taskpane.js', win);
   return { win, elements, calls, ruleDrafts };
 }
@@ -115,6 +122,19 @@ function findNode(node, predicate) {
     if (found) return found;
   }
   return null;
+}
+
+function issueActions(card) {
+  return findNode(card, (node) => node.className === 'issue-actions');
+}
+
+function issueActionButtons(card) {
+  const buttons = [];
+  (function visit(node) {
+    if (node.tag === 'button') buttons.push(node);
+    (node.children || []).forEach(visit);
+  })(issueActions(card));
+  return buttons;
 }
 
 test('WPS root files and ribbon callbacks are present', () => {
@@ -240,8 +260,12 @@ test('AI issue can open a fixed-rule draft without applying text and shows saved
     original: '旧表述', suggestion: '新表述', actionable: true, status: 'pending'
   }]);
 
-  const saveButton = findNode(elements['proofreading-issues'], (node) => node.textContent === '保存为规则');
+  const saveButton = findNode(elements['proofreading-issues'], (node) => node.tag === 'button' && node.textContent === '保存为规则');
   assert.ok(saveButton);
+  assert.equal(saveButton.disabled, false);
+  const moreToggle = findNode(elements['proofreading-issues'], (node) => node.className === 'issue-more-toggle');
+  moreToggle.fire('click');
+  assert.equal(moreToggle.getAttribute('aria-expanded'), 'true');
   saveButton.fire('click');
   assert.equal(ruleDrafts.length, 1);
   assert.equal(ruleDrafts[0].original, '旧表述');
@@ -249,7 +273,7 @@ test('AI issue can open a fixed-rule draft without applying text and shows saved
   assert.equal(calls.some((call) => call[0] === 'apply'), false);
 
   win.markProofreadingIssueRuleSaved('ai-issue');
-  const savedButton = findNode(elements['proofreading-issues'], (node) => node.textContent === '已保存规则');
+  const savedButton = findNode(elements['proofreading-issues'], (node) => node.tag === 'button' && node.textContent === '已保存规则');
   assert.ok(savedButton);
   assert.equal(savedButton.disabled, true);
   assert.equal(findNode(elements['proofreading-issues'],
@@ -268,7 +292,7 @@ test('review-only cards show neutral text and keep card location with ignore act
   assert.equal(findNode(card, (node) => node.className === 'issue-review-label').textContent, '需核对');
   assert.equal(findNode(card, (node) => node.className === 'issue-review-text').textContent, '电信信号视频连线');
   assert.ok(findNode(card, (node) => node.textContent === '错误分析'));
-  const actions = card.children[0].children[1].children;
+  const actions = issueActions(card).children;
   assert.deepEqual(actions.map((button) => button.textContent), ['忽略']);
   card.fire('click');
   actions[0].fire('click');
@@ -285,7 +309,7 @@ test('review-only cards show neutral text and keep card location with ignore act
   assert.match(css, /\.issue-review-text\s*\{[^}]*overflow-wrap:\s*anywhere/);
 });
 
-test('replace and delete cards retain distinct diffs and writable correction actions', () => {
+test('replace and delete cards highlight only changed characters and keep writable actions', () => {
   const { win, elements, calls } = createResultHarness();
   win.setProofreadingIssues([
     { id: 'replace', action: 'replace', actionable: true, original: '旧表述',
@@ -294,11 +318,11 @@ test('replace and delete cards retain distinct diffs and writable correction act
       suggestion: '', status: 'pending' }
   ]);
   const [replaceCard, deleteCard] = elements['proofreading-issues'].children;
-  assert.equal(findNode(replaceCard, (node) => node.className === 'diff-old').textContent, '旧表述');
-  assert.equal(findNode(replaceCard, (node) => node.className === 'diff-arrow').textContent, ' → ');
-  assert.equal(findNode(replaceCard, (node) => node.className === 'diff-new').textContent, '新表述');
-  assert.equal(findNode(deleteCard, (node) => node.className === 'diff-old').textContent, '多余文字');
-  assert.equal(findNode(deleteCard, (node) => node.className === 'diff-new').textContent, '建议删除');
+  assert.equal(findNode(replaceCard, (node) => node.tag === 'del').textContent, '旧');
+  assert.equal(findNode(replaceCard, (node) => node.tag === 'ins').textContent, '新');
+  assert.equal(findNode(replaceCard, (node) => node.className === 'diff-common').textContent, '表述');
+  assert.equal(findNode(deleteCard, (node) => node.tag === 'del').textContent, '多余文字');
+  assert.equal(findNode(deleteCard, (node) => node.className === 'diff-delete-note').textContent, '（建议删除）');
   const replaceButton = findNode(replaceCard, (node) => node.textContent === '修正');
   const deleteButton = findNode(deleteCard, (node) => node.textContent === '修正');
   assert.equal(replaceButton.disabled, false);
@@ -317,6 +341,85 @@ test('replace and delete cards retain distinct diffs and writable correction act
   assert.equal(undoButton.disabled, false);
   undoButton.fire('click');
   assert.deepEqual(calls.at(-1), ['undo', 'replace']);
+});
+
+test('character diff handles common suffixes, surrogate pairs, and identical suggestions; review actions stay outlined', () => {
+  const { win, elements, calls } = createResultHarness();
+  win.setProofreadingIssues([
+    { id: 'unicode', original: '甲😀乙', suggestion: '甲😁乙', status: 'pending' },
+    { id: 'same', original: '完全相同', suggestion: '完全相同', status: 'pending' },
+    { id: 'review', original: '甲，乙', suggestion: '甲、乙', status: 'pending', needsReview: true }
+  ]);
+  const [unicodeCard, sameCard, reviewCard] = elements['proofreading-issues'].children;
+  assert.equal(findNode(unicodeCard, (node) => node.tag === 'del').textContent, '😀');
+  assert.equal(findNode(unicodeCard, (node) => node.tag === 'ins').textContent, '😁');
+  assert.deepEqual(findNode(unicodeCard, (node) => node.className === 'issue-diff').children
+    .filter((node) => node.className === 'diff-common').map((node) => node.textContent), ['甲', '乙']);
+  assert.ok(findNode(sameCard, (node) => node.className === 'issue-identical-note'));
+  assert.equal(findNode(sameCard, (node) => node.tag === 'del'), null);
+  const confirm = findNode(reviewCard, (node) => node.tag === 'button' && node.textContent === '确认修正');
+  assert.ok(confirm.className.includes('issue-action-review'));
+  assert.equal(confirm.disabled, false);
+  const ignore = findNode(reviewCard, (node) => node.tag === 'button' && node.textContent === '忽略');
+  assert.ok(ignore.className.includes('button-text'));
+  confirm.fire('click');
+  assert.deepEqual(calls, [['apply', 'review']]);
+});
+
+test('locate success toast expires after three seconds and preserves visible warnings and errors', () => {
+  const timers = new Map();
+  let nextTimer = 0;
+  const { win, elements } = createResultHarness({
+    setTimeout(callback, delay) {
+      assert.equal(delay, 3000);
+      timers.set(++nextTimer, callback);
+      return nextTimer;
+    },
+    clearTimeout(id) { timers.delete(id); }
+  });
+  win.setProofreadingStatus('文档已经变化，请重新校对。', 'warning');
+  win.setProofreadingStatus('已在文档中定位这条问题。', 'success');
+  assert.equal(elements['proofreading-toast'].hidden, false);
+  assert.equal(elements['proofreading-status'].textContent, '文档已经变化，请重新校对。');
+  assert.equal(elements['proofreading-status'].className, 'status status-warning');
+  win.setProofreadingStatus('已在文档中定位这条问题。', 'success');
+  assert.equal(timers.size, 1);
+  win.setProofreadingStatus('定位失败，请重新校对。', 'error');
+  timers.values().next().value();
+  assert.equal(elements['proofreading-toast'].hidden, true);
+  assert.equal(elements['proofreading-status'].className, 'status status-error');
+  assert.equal(elements['proofreading-status'].textContent, '定位失败，请重新校对。');
+});
+
+test('non-actionable identical suggestions keep the neutral note and offer no correction', () => {
+  const { win, elements } = createResultHarness();
+  win.setProofreadingIssues([{ id: 'same-review', original: '原文保持不变',
+    suggestion: '原文保持不变', actionable: false, needsReview: true, status: 'pending' }]);
+  const card = elements['proofreading-issues'].children[0];
+  assert.equal(findNode(card, (node) => node.className === 'issue-identical-text').textContent, '原文保持不变');
+  assert.equal(findNode(card, (node) => node.className === 'issue-identical-note').textContent,
+    '建议文本与原文一致，请人工核对。');
+  assert.equal(findNode(card, (node) => node.tag === 'del' || node.tag === 'ins'), null);
+  assert.deepEqual(issueActionButtons(card).map((node) => node.textContent), ['忽略']);
+});
+
+test('result layout places toast after the summary and keeps ordinary statuses accessible without a separate row', () => {
+  const html = read('ui/taskpane.html');
+  const summary = html.indexOf('class="result-summary-row"');
+  const toast = html.indexOf('id="proofreading-toast"');
+  assert.ok(html.indexOf('class="tab-bar result-tab-row"') < summary);
+  assert.ok(summary < toast && toast < html.indexOf('id="proofreading-issues"'));
+  assert.match(html.slice(summary, toast), /id="proofreading-status"[^>]*aria-live="polite"/);
+  const { win, elements } = createResultHarness();
+  ['idle', 'success'].forEach((tone) => {
+    win.setProofreadingStatus('普通消息', tone);
+    assert.match(elements['proofreading-status'].className, /status-compact/);
+    assert.equal(elements['proofreading-status'].textContent, '普通消息');
+  });
+  ['warning', 'error', 'working'].forEach((tone) => {
+    win.setProofreadingStatus('需要可见的消息', tone);
+    assert.equal(elements['proofreading-status'].className, 'status status-' + tone);
+  });
 });
 
 test('accepted AI issues can save a rule without applying again or changing accepted status', () => {
@@ -346,7 +449,7 @@ test('accepted AI issues can save a rule without applying again or changing acce
     original: '甲市公共服务中心旧称', suggestion: '甲市公共服务中心', status: 'accepted'
   }]);
   assert.ok(findNode(elements['proofreading-issues'], (node) => node.textContent === '撤销'));
-  const save = findNode(elements['proofreading-issues'], (node) => node.textContent === '保存为规则');
+  const save = findNode(elements['proofreading-issues'], (node) => node.tag === 'button' && node.textContent === '保存为规则');
   assert.ok(save);
   assert.equal(save.disabled, false);
 
@@ -363,7 +466,7 @@ test('accepted AI issues can save a rule without applying again or changing acce
   assert.equal(documentText, '甲市公共服务中心');
   assert.deepEqual(calls, [['apply', 'accepted-ai']]);
   assert.ok(findNode(elements['proofreading-issues'], (node) => node.textContent === '撤销'));
-  const savedButton = findNode(elements['proofreading-issues'], (node) => node.textContent === '已保存规则');
+  const savedButton = findNode(elements['proofreading-issues'], (node) => node.tag === 'button' && node.textContent === '已保存规则');
   assert.ok(savedButton);
   assert.equal(savedButton.disabled, true);
   assert.match(elements['result-summary'].textContent, /已处理 1/);
@@ -449,7 +552,9 @@ test('manual fixed-rule entry persists only after submit through the existing ru
 test('top toolbar and rules center expose the expected controls', () => {
   const html = read('ui/taskpane.html');
   assert.match(html, /<div class="toolbar">/);
-  assert.match(html, /<h1 class="toolbar-title">智能校改<\/h1>/);
+  assert.doesNotMatch(html, /<h1 class="toolbar-title">智能校改<\/h1>/);
+  assert.match(html, /id="main-view"/);
+  assert.match(html, /id="settings-back"/);
   assert.match(html, /id="mode-proofread"/);
   assert.match(html, /id="mode-rewrite"/);
   assert.match(html, /id="rewrite-view"/);
@@ -524,8 +629,8 @@ test('top toolbar and rules center expose the expected controls', () => {
   assert.match(read('rules/catalog.json'), /work-safety\.json/);
 });
 
-test('settings popover contains a rules accordion and closes on outside click or Escape', () => {
-  const ids = ['settings-toggle', 'settings-popover', 'rules-toggle', 'rules-center', 'run-proofreading', 'cancel-proofreading',
+test('settings page returns with Escape or back without closing on outside click', () => {
+  const ids = ['main-view', 'settings-toggle', 'settings-back', 'settings-popover', 'rules-toggle', 'rules-center', 'run-proofreading', 'cancel-proofreading',
     'issue-filter', 'tab-issues', 'tab-history', 'apply-all', 'rerun-proofreading'];
   const elements = {};
   ids.forEach((id) => {
@@ -545,6 +650,7 @@ test('settings popover contains a rules accordion and closes on outside click or
     };
   });
   elements['settings-popover'].hidden = true;
+  elements['main-view'].hidden = false;
   const documentListeners = {};
   const win = {
     document: {
@@ -566,6 +672,7 @@ test('settings popover contains a rules accordion and closes on outside click or
   assert.equal(elements['settings-popover'].hidden, true);
   elements['settings-toggle'].fire('click');
   assert.equal(elements['settings-popover'].hidden, false);
+  assert.equal(elements['main-view'].hidden, true);
   assert.equal(elements['rules-center'].hidden, true);
   elements['rules-toggle'].fire('click');
   assert.equal(elements['rules-center'].hidden, false);
@@ -575,12 +682,16 @@ test('settings popover contains a rules accordion and closes on outside click or
   elements['settings-popover'].fire('click');
   assert.equal(elements['settings-popover'].hidden, false);
   win.document.fire('click');
-  assert.equal(elements['settings-popover'].hidden, true);
+  assert.equal(elements['settings-popover'].hidden, false);
 
+  elements['settings-back'].fire('click');
+  assert.equal(elements['settings-popover'].hidden, true);
+  assert.equal(elements['main-view'].hidden, false);
   elements['settings-toggle'].fire('click');
   assert.equal(elements['settings-popover'].hidden, false);
   win.document.fire('keydown', { key: 'Escape' });
   assert.equal(elements['settings-popover'].hidden, true);
+  assert.equal(elements['main-view'].hidden, false);
   win.openRulesCenter();
   assert.equal(elements['settings-popover'].hidden, false);
   assert.equal(elements['rules-center'].hidden, false);
@@ -754,7 +865,7 @@ test('issue cards locate on body click, keep buttons independent, and offer undo
   const analysis = pending.children.find((child) => child.tag === 'details');
   analysis.children[0].fire('click');
   assert.equal(calls.length, 4);
-  const undo = accepted.children[0].children[1].children[0];
+  const undo = issueActions(accepted).children[0];
   assert.equal(undo.textContent, '撤销');
   assert.equal(undo.disabled, false);
   undo.fire('click');
@@ -799,9 +910,9 @@ test('result summaries count pending review, processed, stale, and strict safe-f
   ]);
 
   assert.equal(elements['result-count'].textContent, '3');
-  assert.equal(elements['result-summary'].textContent, '待处理 3（其中需复核 1）· 已处理 2');
+  assert.equal(elements['result-summary'].textContent, '待处理 3 · 需复核 1 · 已处理 2 · 需重查 1');
   assert.equal(elements['result-stale-summary'].textContent, '需重查 1');
-  assert.equal(elements['result-stale-summary'].hidden, false);
+  assert.equal(elements['result-stale-summary'].hidden, true);
   assert.equal(elements['apply-all'].textContent, '修正安全格式项（1）');
   assert.equal(elements['apply-all'].disabled, false);
 
@@ -811,9 +922,9 @@ test('result summaries count pending review, processed, stale, and strict safe-f
   assert.equal(processedSection.children[1].children.length, 2);
   processedSection.open = true;
   const acceptedCard = processedSection.children[1].children.find((card) =>
-    card.children[0].children[1].children[0].textContent === '撤销');
+    issueActions(card).children[0].textContent === '撤销');
   assert.ok(acceptedCard);
-  const undo = acceptedCard.children[0].children[1].children[0];
+  const undo = issueActions(acceptedCard).children[0];
   undo.fire('click');
   assert.deepEqual(calls.at(-1), ['undo', 'accepted']);
 
@@ -824,9 +935,9 @@ test('result summaries count pending review, processed, stale, and strict safe-f
 
   win.setProofreadingBusy(true);
   const waitingCard = elements['proofreading-issues'].children.find((card) =>
-    card.className === 'issue-card' && card.children[0].children[1].children[0].textContent === '修正');
+    card.className === 'issue-card' && issueActions(card).children[0].textContent === '修正');
   assert.ok(waitingCard);
-  assert.equal(waitingCard.children[0].children[1].children[0].disabled, true);
+  assert.equal(issueActions(waitingCard).children[0].disabled, true);
   win.setProofreadingBusy(false);
 
   win.setProofreadingIssues([]);
@@ -895,10 +1006,10 @@ test('action busy locks issue controls without rebuilding cards and catches reje
     child.className.includes('is-locatable'));
   const processedSection = list.children.find((child) => child.tag === 'details');
   const acceptedCard = processedSection.children[1].children[0];
-  const pendingActions = cardsBeforeLock[0].children[0].children[1].children;
-  const acceptedActions = acceptedCard.children[0].children[1].children;
-  const staleActions = cardsBeforeLock[1].children[0].children[1].children;
-  const reviewActions = cardsBeforeLock[2].children[0].children[1].children;
+  const pendingActions = issueActionButtons(cardsBeforeLock[0]);
+  const acceptedActions = issueActionButtons(acceptedCard);
+  const staleActions = issueActionButtons(cardsBeforeLock[1]);
+  const reviewActions = issueActionButtons(cardsBeforeLock[2]);
 
   assert.equal(typeof win.setProofreadingActionBusy, 'function');
   assert.equal(controls['run-proofreading'].disabled, false);
@@ -915,7 +1026,7 @@ test('action busy locks issue controls without rebuilding cards and catches reje
   assert.equal(controls['model-provider'].disabled, false);
   assert.equal(controls['rules-toggle'].disabled, false);
   [pendingActions, acceptedActions, staleActions, reviewActions].forEach((actions) => {
-    Array.from(actions).forEach((button) => assert.equal(button.disabled, true));
+    Array.from(actions).filter((node) => node.tag === 'button').forEach((button) => assert.equal(button.disabled, true));
   });
   cardsBeforeLock[0].fire('click');
   pendingActions[0].fire('click');
@@ -932,8 +1043,8 @@ test('action busy locks issue controls without rebuilding cards and catches reje
   assert.equal(pendingActions[1].disabled, false);
   assert.equal(pendingActions[2].disabled, false);
   assert.equal(acceptedActions[0].disabled, false);
-  assert.equal(acceptedActions[1].disabled, false);
-  assert.equal(acceptedActions[2].disabled, true);
+  assert.equal(acceptedActions.find((button) => button.textContent === '忽略').disabled, true);
+  assert.equal(acceptedActions.find((button) => button.className === 'issue-menu-item').disabled, false);
   assert.equal(staleActions[0].disabled, true);
   assert.equal(staleActions[1].disabled, true);
   assert.deepEqual(Array.from(reviewActions).map((button) => button.textContent), ['忽略']);

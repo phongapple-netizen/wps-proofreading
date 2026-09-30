@@ -15,6 +15,9 @@
     };
     var pendingFullDocumentConfirmation = null;
     var renderedIssueActionButtons = [];
+    var locateToastTimer = null;
+    var activeIssueMenu = null;
+    var issueMenuDismissBound = false;
 
     function byId(id) {
         return root.document && root.document.getElementById
@@ -37,10 +40,24 @@
 
     function setProofreadingStatus(status, tone) {
         state.status = normalizeStatus(status, tone);
+        if (state.status.text === "已在文档中定位这条问题。") {
+            var toast = byId("proofreading-toast");
+            if (toast) {
+                toast.textContent = state.status.text;
+                toast.hidden = false;
+                if (locateToastTimer !== null && root.clearTimeout) root.clearTimeout(locateToastTimer);
+                if (root.setTimeout) locateToastTimer = root.setTimeout(function () {
+                    toast.hidden = true;
+                    locateToastTimer = null;
+                }, 3000);
+            }
+            return state.status;
+        }
         var element = byId("proofreading-status");
         if (element) {
             element.textContent = state.status.text;
-            element.className = "status status-" + state.status.tone;
+            element.className = "status status-" + state.status.tone +
+                (state.status.tone === "success" || state.status.tone === "idle" ? " status-compact" : "");
         }
         return state.status;
     }
@@ -208,6 +225,8 @@
         var toggle = byId("settings-toggle");
         var visible = open === true;
         if (popover) popover.hidden = !visible;
+        var mainView = byId("main-view");
+        if (mainView) mainView.hidden = visible;
         if (toggle) {
             toggle.setAttribute("aria-expanded", visible ? "true" : "false");
             toggle.classList.toggle("is-active", visible);
@@ -219,16 +238,15 @@
         var toggle = byId("settings-toggle");
         var popover = settingsPopover();
         if (!toggle || !popover) return;
+        var back = byId("settings-back");
 
         toggle.addEventListener("click", function (event) {
             event.stopPropagation();
             setSettingsOpen(popover.hidden);
         });
-        popover.addEventListener("click", function (event) {
-            event.stopPropagation();
-        });
-        root.document.addEventListener("click", function () {
-            if (!popover.hidden) setSettingsOpen(false);
+        if (back) back.addEventListener("click", function () {
+            setSettingsOpen(false);
+            if (typeof toggle.focus === "function") toggle.focus();
         });
         root.document.addEventListener("keydown", function (event) {
             if ((event.key === "Escape" || event.key === "Esc") && !popover.hidden) {
@@ -321,12 +339,32 @@
         var autoFixable = autoFixableCount();
         if (count) count.textContent = String(pending);
         var summary = byId("result-summary");
-        if (summary) summary.textContent = "待处理 " + pending + "（其中需复核 " + review +
-            "）· 已处理 " + processed;
+        if (summary) {
+            summary.textContent = "";
+            function summaryPart(text, className) {
+                var part = root.document.createElement("span");
+                part.className = className;
+                part.textContent = text;
+                summary.appendChild(part);
+            }
+            summaryPart("待处理 " + pending, "summary-pending");
+            summaryPart(" · ", "summary-separator");
+            summaryPart("需复核 " + review, "summary-review");
+            summaryPart(" · ", "summary-separator");
+            summaryPart("已处理 " + processed, "summary-processed");
+            if (stale) {
+                summaryPart(" · ", "summary-separator");
+                summaryPart("需重查 " + stale, "summary-stale");
+            }
+            var dot = root.document.createElement("span");
+            dot.className = "summary-dot";
+            dot.setAttribute("aria-hidden", "true");
+            summary.insertBefore(dot, summary.children[0] || null);
+        }
         var staleSummary = byId("result-stale-summary");
         if (staleSummary) {
             staleSummary.textContent = "需重查 " + stale;
-            staleSummary.hidden = stale === 0;
+            staleSummary.hidden = true;
         }
         var applyAllButton = byId("apply-all");
         if (applyAllButton) {
@@ -537,6 +575,106 @@
         return button;
     }
 
+    function invalidateModelConnection() {
+        if (typeof root.invalidateModelConnection === "function") root.invalidateModelConnection();
+        else setModelConnectionStatus("配置已更改，需重新检测", "idle");
+    }
+
+    function appendChangedText(parent, oldText, newText) {
+        var oldChars = Array.from(oldText);
+        var newChars = Array.from(newText);
+        var prefix = 0;
+        while (prefix < oldChars.length && prefix < newChars.length && oldChars[prefix] === newChars[prefix]) prefix++;
+        var suffix = 0;
+        while (suffix < oldChars.length - prefix && suffix < newChars.length - prefix &&
+            oldChars[oldChars.length - 1 - suffix] === newChars[newChars.length - 1 - suffix]) suffix++;
+        function add(tag, className, text) {
+            if (!text) return;
+            var node = root.document.createElement(tag);
+            node.className = className;
+            node.textContent = text;
+            parent.appendChild(node);
+        }
+        if (prefix === oldChars.length && prefix === newChars.length) {
+            add("span", "issue-identical-text", oldText);
+            add("span", "issue-identical-note", "建议文本与原文一致，请人工核对。");
+            return;
+        }
+        add("span", "diff-common", oldChars.slice(0, prefix).join(""));
+        add("del", "diff-old", oldChars.slice(prefix, oldChars.length - suffix).join(""));
+        add("ins", "diff-new", newChars.slice(prefix, newChars.length - suffix).join(""));
+        add("span", "diff-common", suffix ? oldChars.slice(oldChars.length - suffix).join("") : "");
+    }
+
+    function appendIssueMenu(actions, issue, disabled) {
+        var more = root.document.createElement("div");
+        more.className = "issue-more";
+        var toggle = root.document.createElement("button");
+        toggle.type = "button";
+        toggle.className = "issue-more-toggle";
+        toggle.textContent = "⋯";
+        toggle._proofreadingActionDisabled = disabled === true;
+        toggle.disabled = state.actionBusy || toggle._proofreadingActionDisabled;
+        renderedIssueActionButtons.push(toggle);
+        toggle.setAttribute("aria-label", "更多操作");
+        toggle.setAttribute("aria-expanded", "false");
+        toggle.addEventListener("click", function (event) {
+            if (event && event.stopPropagation) event.stopPropagation();
+            menu.hidden = !menu.hidden;
+            toggle.setAttribute("aria-expanded", menu.hidden ? "false" : "true");
+        });
+        var menu = root.document.createElement("div");
+        menu.className = "issue-menu";
+        menu.hidden = true;
+        more.addEventListener("click", function (event) {
+            if (event && event.stopPropagation) event.stopPropagation();
+        });
+        var save = root.document.createElement("button");
+        save.type = "button";
+        save.textContent = issue.ruleSaved ? "已保存规则" : "保存为规则";
+        save._proofreadingActionDisabled = disabled === true || !canSaveIssueAsRule(issue) || issue.ruleSaved === true;
+        save.disabled = state.actionBusy || save._proofreadingActionDisabled;
+        save.setAttribute("data-issue-id", issue.id);
+        renderedIssueActionButtons.push(save);
+        if (!save._proofreadingActionDisabled) save.addEventListener("click", function (event) {
+            if (event && event.stopPropagation) event.stopPropagation();
+            if (state.actionBusy) return;
+            if (typeof root.openIssueRuleDraft !== "function") {
+                setProofreadingStatus("规则中心尚未就绪。", "warning");
+                return;
+            }
+            root.openIssueRuleDraft(issue);
+        });
+        save.className = "issue-menu-item";
+        menu.appendChild(save);
+        more.appendChild(toggle);
+        more.appendChild(menu);
+        actions.appendChild(more);
+        if (!issueMenuDismissBound && root.document && root.document.addEventListener) {
+            issueMenuDismissBound = true;
+            root.document.addEventListener("click", function () {
+                if (!activeIssueMenu) return;
+                activeIssueMenu.menu.hidden = true;
+                activeIssueMenu.toggle.setAttribute("aria-expanded", "false");
+                activeIssueMenu = null;
+            });
+            root.document.addEventListener("keydown", function (event) {
+                if ((event.key === "Escape" || event.key === "Esc") && activeIssueMenu) {
+                    activeIssueMenu.menu.hidden = true;
+                    activeIssueMenu.toggle.setAttribute("aria-expanded", "false");
+                    activeIssueMenu = null;
+                }
+            });
+        }
+        toggle.addEventListener("click", function () {
+            if (activeIssueMenu && activeIssueMenu.toggle !== toggle) {
+                activeIssueMenu.menu.hidden = true;
+                activeIssueMenu.toggle.setAttribute("aria-expanded", "false");
+            }
+            activeIssueMenu = menu.hidden ? null : { menu: menu, toggle: toggle };
+        });
+    }
+
     function visibleIssues() {
         if (state.filter === "all") return state.issues.slice();
         return state.issues.filter(function (issue) {
@@ -586,6 +724,7 @@
 
         var shown = visibleIssues();
         renderedIssueActionButtons = [];
+        activeIssueMenu = null;
         list.textContent = "";
         if (!shown.length) {
             list.hidden = true;
@@ -618,7 +757,7 @@
             var reviewOnly = isReviewOnlyIssue(issue);
             var deleteIssue = isDeleteIssue(issue);
             var card = root.document.createElement("article");
-            card.className = "issue-card" + (pending && !state.busy ? " is-locatable" : "");
+            card.className = "issue-card" + ((issue.needsReview || reviewOnly) ? " is-review" : "") + (pending && !state.busy ? " is-locatable" : "");
             if (pending && !state.busy) {
                 card.addEventListener("click", function () {
                     if (state.actionBusy) return;
@@ -665,26 +804,26 @@
                 actions.appendChild(actionButton(
                     issue.status === "accepted" ? "撤销" :
                         issue.status === "ignored" ? "已忽略" :
-                            issue.status === "stale" ? "需重查" : "修正",
-                    "",
+                            issue.status === "stale" ? "需重查" : issue.needsReview ? "确认修正" : "修正",
+                    issue.needsReview ? "issue-action-review issue-action-secondary" : "issue-action-primary",
                     issue,
                     issue.status === "accepted" ? "undoProofreadingIssue" : "applyProofreadingIssue",
                     state.busy || (!pending && issue.status !== "accepted") ||
                         (pending && issue.actionable === false)
                 ));
             }
+            actions.appendChild(actionButton("忽略", "issue-action-secondary button-text", issue, "ignoreProofreadingIssue", state.busy || !pending));
             if (canSaveIssueAsRule(issue) || issue.ruleSaved) {
-                actions.appendChild(saveRuleButton(issue, state.busy ||
-                    (!pending && issue.status !== "accepted")));
+                appendIssueMenu(actions, issue, state.busy || (!pending && issue.status !== "accepted"));
             }
-            actions.appendChild(actionButton("忽略", "issue-action-secondary", issue, "ignoreProofreadingIssue", state.busy || !pending));
-            header.appendChild(actions);
             card.appendChild(header);
 
             if (issue.original || issue.suggestion) {
                 var diff = root.document.createElement("p");
                 diff.className = "issue-diff";
-                if (reviewOnly) {
+                if (issue.original === issue.suggestion) {
+                    appendChangedText(diff, issue.original, issue.suggestion);
+                } else if (reviewOnly) {
                     var reviewLabel = root.document.createElement("span");
                     reviewLabel.className = "issue-review-label";
                     reviewLabel.textContent = "需核对";
@@ -694,18 +833,13 @@
                     reviewText.textContent = issue.original || issue.suggestion;
                     diff.appendChild(reviewText);
                 } else {
-                    var old = root.document.createElement("span");
-                    old.className = "diff-old";
-                    old.textContent = issue.original;
-                    diff.appendChild(old);
-                    var arrow = root.document.createElement("span");
-                    arrow.className = "diff-arrow";
-                    arrow.textContent = " → ";
-                    diff.appendChild(arrow);
-                    var fresh = root.document.createElement("span");
-                    fresh.className = "diff-new";
-                    fresh.textContent = deleteIssue ? "建议删除" : issue.suggestion;
-                    diff.appendChild(fresh);
+                    appendChangedText(diff, issue.original, deleteIssue ? "" : issue.suggestion);
+                    if (deleteIssue) {
+                        var deleteLabel = root.document.createElement("span");
+                        deleteLabel.className = "diff-delete-note";
+                        deleteLabel.textContent = "（建议删除）";
+                        diff.appendChild(deleteLabel);
+                    }
                 }
                 card.appendChild(diff);
             }
@@ -734,18 +868,19 @@
                 card.appendChild(analysis);
             }
 
-            if (issue.stateLabel || !pending) {
-                var stateLine = root.document.createElement("p");
-                stateLine.className = "issue-state";
-                stateLine.textContent = issue.stateLabel || "状态：" + issue.status;
-                card.appendChild(stateLine);
-            }
+            var stateChip = root.document.createElement("span");
+            stateChip.className = "issue-status" + ((issue.needsReview || reviewOnly) ? " is-review" : "");
+            stateChip.textContent = issue.status === "pending"
+                ? issue.needsReview || reviewOnly ? "需复核" : "待确认"
+                : issue.status === "stale" ? "需重查" : issue.status === "accepted" ? "已修正" : issue.status === "ignored" ? "已忽略" : issue.status;
+            header.appendChild(stateChip);
             if (issue.ruleSaved) {
                 var savedLine = root.document.createElement("p");
                 savedLine.className = "issue-state rule-saved-feedback";
                 savedLine.textContent = "已保存为固定替换规则，下次校对时生效。";
                 card.appendChild(savedLine);
             }
+            card.appendChild(actions);
 
             (isProcessedIssue(issue) ? processedList : list).appendChild(card);
         });
@@ -948,6 +1083,7 @@
 
     function syncModelSuggestions(settings) {
         var select = byId("model-suggestions");
+        var modelField = byId("model-name");
         if (!select) return;
         var api = store();
         var catalog = api && typeof api.loadCatalog === "function" ? api.loadCatalog() : null;
@@ -960,19 +1096,45 @@
             : "";
 
         while (select.options.length > 1) select.remove(1);
+        var found = models.indexOf(current) >= 0;
         models.forEach(function (name) {
             var option = root.document.createElement("option");
             option.value = name;
             option.textContent = name;
             select.appendChild(option);
         });
-        select.value = models.indexOf(current) >= 0 ? current : "";
+        if (current && !found) {
+            var savedOption = root.document.createElement("option");
+            savedOption.value = current;
+            savedOption.textContent = current + "（当前配置）";
+            select.appendChild(savedOption);
+        }
+        select.value = current || "";
         var placeholder = select.options[0];
         if (placeholder) {
             placeholder.textContent = models.length
                 ? "（从 " + models.length + " 个已检测模型中选择）"
                 : "（先点“检测并读取模型”）";
         }
+        var detection = byId("model-detection-result");
+        if (detection) {
+            var hasModels = catalog && catalog.provider === provider && Array.isArray(catalog.models) && catalog.models.length;
+            var connection = typeof root.getModelConnectionState === "function" ? root.getModelConnectionState() : null;
+            var detected = connection && connection.provider === provider && connection.detected;
+            var tone = connection ? connection.tone : "idle";
+            detection.textContent = detected ? "已读取 " + connection.modelCount + " 个模型"
+                : tone === "working" ? "正在读取模型…"
+                    : (hasModels ? "缓存 " + models.length + " 个模型；" : "") +
+                        (tone === "error" ? "本次检测失败" : tone === "warning" ? "未读取到可用模型" : "需重新检测");
+            detection.className = "model-detection-result is-" + tone;
+        }
+        var selectRow = byId("model-select-row");
+        var manualRow = byId("model-manual-row");
+        var manual = byId("model-input-toggle");
+        var manualMode = manual && manual.getAttribute("aria-pressed") === "true";
+        if (selectRow) selectRow.hidden = manualMode;
+        if (manualRow) manualRow.hidden = !manualMode;
+        if (modelField && !manualMode && current) modelField.value = current;
     }
 
     function syncFormFromStore() {
@@ -1016,12 +1178,14 @@
         var deepField = byId("deep-enhance");
         var autoAdvanceField = byId("auto-advance");
         var refreshButton = byId("refresh-models");
+        var manualToggle = byId("model-input-toggle");
         var api = store();
 
         if (providerField) {
             providerField.addEventListener("change", function () {
                 if (!api) return;
                 api.updateSettings({ provider: providerField.value });
+                invalidateModelConnection();
                 syncFormFromStore();
             });
         }
@@ -1032,6 +1196,7 @@
                 var provider = currentProvider(settings);
                 api.saveRuntimeEndpoint(provider, endpointField.value);
                 api.updateSettings({ provider: provider, profile: { endpoint: endpointField.value } });
+                invalidateModelConnection();
                 syncFormFromStore();
             });
         }
@@ -1062,6 +1227,8 @@
                 if (!api || typeof api.savePassword !== "function") return;
                 var settings = loadStoredSettings();
                 api.savePassword(keyField.value, currentProvider(settings));
+                invalidateModelConnection();
+                syncFormFromStore();
             });
         }
         if (deepField) {
@@ -1078,10 +1245,19 @@
         }
         if (refreshButton) {
             refreshButton.addEventListener("click", function () {
-                callSimple("refreshProviderModels", "模型服务检测尚未就绪。");
+                var refresh = callSimple("refreshProviderModels", "模型服务检测尚未就绪。");
+                if (refresh && typeof refresh.then === "function") refresh.then(function () {
+                    syncFormFromStore();
+                });
                 syncFormFromStore();
             });
         }
+        if (manualToggle) manualToggle.addEventListener("click", function (event) {
+            if (event && event.preventDefault) event.preventDefault();
+            var manualMode = manualToggle.getAttribute("aria-pressed") !== "true";
+            manualToggle.setAttribute("aria-pressed", manualMode ? "true" : "false");
+            syncFormFromStore();
+        });
     }
 
     function bindUi() {

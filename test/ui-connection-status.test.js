@@ -1,0 +1,163 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+
+const root = path.resolve(__dirname, '..');
+
+function field() {
+  const node = { value: '', checked: false, hidden: false, disabled: false,
+    textContent: '', className: '', options: [{ value: '' }], attributes: {}, listeners: {} };
+  node.addEventListener = (type, handler) => { (node.listeners[type] ||= []).push(handler); };
+  node.fire = (type) => (node.listeners[type] || []).forEach((handler) => handler({ stopPropagation() {} }));
+  node.appendChild = (child) => node.options.push(child);
+  node.remove = (index) => node.options.splice(index, 1);
+  node.setAttribute = (name, value) => { node.attributes[name] = value; };
+  node.getAttribute = (name) => node.attributes[name];
+  return node;
+}
+
+function harness() {
+  const elements = {};
+  ['model-provider', 'model-endpoint', 'model-name', 'model-suggestions', 'model-api-key',
+    'model-api-key-row', 'model-endpoint-label', 'model-name-label', 'model-api-key-label',
+    'provider-help', 'refresh-models', 'model-summary', 'connection-status', 'model-detection-result']
+    .forEach((id) => { elements[id] = field(); });
+  const storage = new Map();
+  const ready = [];
+  const intervals = [];
+  const win = {
+    localStorage: { getItem: (key) => storage.get(key) || '', setItem: (key, value) => storage.set(key, value) },
+    document: { readyState: 'loading', getElementById: (id) => elements[id] || null,
+      createElement: field, addEventListener: (type, handler) => { if (type === 'DOMContentLoaded') ready.push(handler); } },
+    setInterval: (callback, delay) => { assert.equal(delay, 1000); intervals.push(callback); },
+    WpsModelCatalog: { detect: async (options) => ({ provider: options.provider,
+      models: ['demo/model'], defaultModel: 'demo/model', detail: options.provider + ' 已连接' }) }
+  };
+  const context = vm.createContext({ window: win, URL, setTimeout, clearTimeout });
+  ['settings-store.js', 'proofreading-integration.js', 'taskpane.js'].forEach((file) => {
+    vm.runInContext(fs.readFileSync(path.join(root, 'js', file), 'utf8'), context, { filename: file });
+  });
+  win.document.readyState = 'complete';
+  ready.forEach((callback) => callback());
+  return { win, elements, storage, tick: () => intervals.forEach((callback) => callback()),
+    change(id, value) { elements[id].value = value; elements[id].fire('change'); } };
+}
+
+function assertRequiresDetection(h) {
+  h.tick();
+  h.tick();
+  assert.equal(h.win.getModelConnectionState().detected, false);
+  assert.equal(h.elements['connection-status'].className, 'connection-status connection-status-idle');
+  assert.match(h.elements['connection-status'].textContent, /需重新检测/);
+  assert.doesNotMatch(h.elements['model-detection-result'].className, /is-success/);
+}
+
+test('provider, endpoint and password edits remain unverified across polling until fresh detection succeeds', async () => {
+  const h = harness();
+  await h.win.refreshProviderModels();
+  assert.equal(h.elements['connection-status'].className, 'connection-status connection-status-success');
+  assert.equal(h.elements['model-detection-result'].textContent, '已读取 1 个模型');
+
+  h.change('model-provider', 'ollama');
+  assertRequiresDetection(h);
+  assert.doesNotMatch(h.elements['connection-status'].textContent, /opencode 已连接/);
+  await h.win.refreshProviderModels();
+  assert.equal(h.win.getModelConnectionState().provider, 'ollama');
+  assert.equal(h.win.getModelConnectionState().detected, true);
+
+  h.change('model-endpoint', 'http://127.0.0.1:11435');
+  assertRequiresDetection(h);
+  await h.win.refreshProviderModels();
+  assert.equal(h.win.getModelConnectionState().detected, true);
+
+  h.change('model-provider', 'opencode');
+  await h.win.refreshProviderModels();
+  h.change('model-api-key', 'test-only-password');
+  assertRequiresDetection(h);
+  assert.equal(h.win.WpsSettingsStore.loadPassword('opencode'), 'test-only-password');
+  assert.equal(JSON.stringify([...h.storage.values()]).includes('test-only-password'), false);
+  assert.equal(JSON.stringify(h.win.getModelConnectionState()).includes('test-only-password'), false);
+  await h.win.refreshProviderModels();
+  assert.equal(h.win.getModelConnectionState().detected, true);
+});
+
+test('cached catalogs never assert a live connection on reload or mismatch; non-connection settings keep verified state', async () => {
+  const h = harness();
+  h.win.WpsSettingsStore.saveCatalog({ provider: 'ollama', models: ['cached'], tone: 'success', detail: '旧连接' });
+  h.tick();
+  assert.equal(h.win.getModelConnectionState().detected, false);
+  assert.doesNotMatch(h.elements['connection-status'].className, /success/);
+  assert.doesNotMatch(h.elements['connection-status'].textContent, /旧连接/);
+  await h.win.refreshProviderModels();
+  h.win.WpsSettingsStore.updateSettings({ deep: true, autoAdvance: false });
+  h.tick();
+  assert.equal(h.win.getModelConnectionState().detected, true);
+  h.win.WpsSettingsStore.savePassword('programmatic-test', 'opencode');
+  assertRequiresDetection(h); // Credential changes must also be observed outside form events.
+});
+
+test('late success and failure cannot restore a changed configuration or overwrite a newer detection', async () => {
+  for (const change of [
+    (h) => h.change('model-provider', 'ollama'),
+    (h) => h.change('model-endpoint', 'http://127.0.0.1:4097'),
+    (h) => h.change('model-api-key', 'changed-test-password')
+  ]) {
+    const h = harness();
+    let finish;
+    h.win.WpsModelCatalog.detect = (options) => new Promise((resolve) => {
+      finish = () => resolve({ provider: options.provider, models: ['old/model'], defaultModel: 'old/model' });
+    });
+    const pending = h.win.refreshProviderModels();
+    change(h);
+    finish();
+    assert.equal((await pending).stale, true);
+    assertRequiresDetection(h);
+    assert.equal(h.win.WpsSettingsStore.loadCatalog(), null);
+    const settings = h.win.WpsSettingsStore.loadSettings() || h.win.WpsSettingsStore.defaultSettings();
+    assert.notEqual(settings.profiles.opencode.model, 'old/model');
+  }
+  const h = harness();
+  let rejectOld;
+  h.win.WpsModelCatalog.detect = () => new Promise((resolve, reject) => { rejectOld = reject; });
+  const older = h.win.refreshProviderModels();
+  h.win.WpsModelCatalog.detect = async () => ({ provider: 'opencode', models: ['new/model'], defaultModel: 'new/model' });
+  await h.win.refreshProviderModels();
+  rejectOld(new Error('obsolete failure'));
+  assert.equal((await older).stale, true);
+  assert.equal(h.win.getModelConnectionState().detected, true);
+  assert.equal(h.win.WpsSettingsStore.loadCatalog().models[0], 'new/model');
+});
+
+test('failed detection and empty model lists remain error or warning across unrelated store changes', async () => {
+  const h = harness();
+  await h.win.refreshProviderModels();
+  h.win.WpsModelCatalog.detect = async () => { throw new Error('expected failure'); };
+  assert.equal((await h.win.refreshProviderModels()).error, true);
+  h.win.WpsSettingsStore.updateSettings({ deep: true });
+  h.tick();
+  assert.equal(h.win.getModelConnectionState().tone, 'error');
+  assert.match(h.elements['model-detection-result'].textContent, /缓存 1 个模型；本次检测失败/);
+  h.win.WpsModelCatalog.detect = async () => ({ provider: 'opencode', models: [], defaultModel: '' });
+  await h.win.refreshProviderModels();
+  h.win.WpsSettingsStore.updateSettings({ deep: false });
+  h.tick();
+  assert.equal(h.win.getModelConnectionState().tone, 'warning');
+  assert.equal(h.win.getModelConnectionState().detected, false);
+});
+
+test('configuration observation in a form getter or late response cannot consume the pending connection repaint', async () => {
+  const h = harness();
+  await h.win.refreshProviderModels();
+  h.win.WpsSettingsStore.savePassword('external-change', 'opencode');
+  h.win.syncSettingsForm(); // Getter notices the secret-only change before the poll does.
+  assertRequiresDetection(h);
+  let finish;
+  h.win.WpsModelCatalog.detect = () => new Promise((resolve) => { finish = resolve; });
+  const pending = h.win.refreshProviderModels();
+  h.win.WpsSettingsStore.savePassword('external-change-again', 'opencode');
+  finish({ provider: 'opencode', models: ['obsolete'], defaultModel: 'obsolete' });
+  assert.equal((await pending).stale, true);
+  assertRequiresDetection(h);
+});
