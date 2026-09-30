@@ -18,7 +18,6 @@
     var locateToastTimer = null;
     var activeIssueMenu = null;
     var issueMenuDismissBound = false;
-    var modelCatalogStale = false;
 
     function byId(id) {
         return root.document && root.document.getElementById
@@ -58,8 +57,7 @@
         if (element) {
             element.textContent = state.status.text;
             element.className = "status status-" + state.status.tone +
-                (state.status.tone === "success" && state.status.text.indexOf("校对完成") === 0
-                    ? " status-compact-success" : "");
+                (state.status.tone === "success" || state.status.tone === "idle" ? " status-compact" : "");
         }
         return state.status;
     }
@@ -575,6 +573,11 @@
             });
         }
         return button;
+    }
+
+    function invalidateModelConnection() {
+        if (typeof root.invalidateModelConnection === "function") root.invalidateModelConnection();
+        else setModelConnectionStatus("配置已更改，需重新检测", "idle");
     }
 
     function appendChangedText(parent, oldText, newText) {
@@ -1116,13 +1119,14 @@
         var detection = byId("model-detection-result");
         if (detection) {
             var hasModels = catalog && catalog.provider === provider && Array.isArray(catalog.models) && catalog.models.length;
-            var detected = hasModels && catalog.tone === "success" && !modelCatalogStale;
-            detection.textContent = detected ? "已读取 " + catalog.models.length + " 个模型"
-                : hasModels && (catalog.tone === "error" || modelCatalogStale) ? "上次读取 " + catalog.models.length + " 个模型" +
-                    (catalog.tone === "error" ? "；本次检测失败" : "；设置已更改，请重新检测")
-                    : "尚未读取模型";
-            detection.className = "model-detection-result" + (detected ? " is-success"
-                : hasModels && catalog.tone === "error" ? " is-error" : modelCatalogStale ? " is-stale" : "");
+            var connection = typeof root.getModelConnectionState === "function" ? root.getModelConnectionState() : null;
+            var detected = connection && connection.provider === provider && connection.detected;
+            var tone = connection ? connection.tone : "idle";
+            detection.textContent = detected ? "已读取 " + connection.modelCount + " 个模型"
+                : tone === "working" ? "正在读取模型…"
+                    : (hasModels ? "缓存 " + models.length + " 个模型；" : "") +
+                        (tone === "error" ? "本次检测失败" : tone === "warning" ? "未读取到可用模型" : "需重新检测");
+            detection.className = "model-detection-result is-" + tone;
         }
         var selectRow = byId("model-select-row");
         var manualRow = byId("model-manual-row");
@@ -1180,21 +1184,19 @@
         if (providerField) {
             providerField.addEventListener("change", function () {
                 if (!api) return;
-                modelCatalogStale = true;
-                setModelConnectionStatus("尚未检测", "idle");
                 api.updateSettings({ provider: providerField.value });
+                invalidateModelConnection();
                 syncFormFromStore();
             });
         }
         if (endpointField) {
             endpointField.addEventListener("change", function () {
                 if (!api) return;
-                modelCatalogStale = true;
-                setModelConnectionStatus("尚未检测", "idle");
                 var settings = loadStoredSettings();
                 var provider = currentProvider(settings);
                 api.saveRuntimeEndpoint(provider, endpointField.value);
                 api.updateSettings({ provider: provider, profile: { endpoint: endpointField.value } });
+                invalidateModelConnection();
                 syncFormFromStore();
             });
         }
@@ -1225,6 +1227,8 @@
                 if (!api || typeof api.savePassword !== "function") return;
                 var settings = loadStoredSettings();
                 api.savePassword(keyField.value, currentProvider(settings));
+                invalidateModelConnection();
+                syncFormFromStore();
             });
         }
         if (deepField) {
@@ -1241,10 +1245,8 @@
         }
         if (refreshButton) {
             refreshButton.addEventListener("click", function () {
-                modelCatalogStale = true;
                 var refresh = callSimple("refreshProviderModels", "模型服务检测尚未就绪。");
-                if (refresh && typeof refresh.then === "function") refresh.then(function (result) {
-                    modelCatalogStale = !!(result && result.error);
+                if (refresh && typeof refresh.then === "function") refresh.then(function () {
                     syncFormFromStore();
                 });
                 syncFormFromStore();

@@ -51,7 +51,6 @@
 
         <section class="panel" aria-labelledby="result-heading">
             <h2 id="result-heading" class="sr-only">校对结果</h2>
-            <div id="proofreading-toast" class="proofreading-toast" role="status" aria-live="polite" hidden></div>
             <div class="tab-bar result-tab-row" role="tablist">
                 <button id="tab-issues" class="tab is-active" type="button" role="tab" aria-selected="true">
                     校对建议 <span id="result-count" class="count-badge">0</span>
@@ -64,11 +63,12 @@
                         <option value="consistency">前后统一</option><option value="rule">规则核对</option>
                     </select></div>
             </div>
-            <div id="proofreading-status" class="status status-idle" role="status" aria-live="polite">等待开始</div>
             <div class="result-summary-row">
                 <div id="result-summary" class="result-summary" role="status" aria-live="polite">待处理 0（其中需复核 0）· 已处理 0</div>
                 <div id="result-stale-summary" class="result-stale-summary" role="status" aria-live="polite" hidden>需重查 0</div>
+                <div id="proofreading-status" class="status status-idle status-compact" role="status" aria-live="polite">等待开始</div>
             </div>
+            <div id="proofreading-toast" class="proofreading-toast" role="status" aria-live="polite" hidden></div>
             <div id="empty-state" class="empty-state">校对结果会显示在这里。</div>
             <div id="proofreading-issues" class="issue-list" hidden></div>
             <div id="history-empty" class="empty-state" hidden>本次会话还没有处理记录。</div>

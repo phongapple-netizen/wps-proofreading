@@ -403,6 +403,25 @@ test('non-actionable identical suggestions keep the neutral note and offer no co
   assert.deepEqual(issueActionButtons(card).map((node) => node.textContent), ['忽略']);
 });
 
+test('result layout places toast after the summary and keeps ordinary statuses accessible without a separate row', () => {
+  const html = read('ui/taskpane.html');
+  const summary = html.indexOf('class="result-summary-row"');
+  const toast = html.indexOf('id="proofreading-toast"');
+  assert.ok(html.indexOf('class="tab-bar result-tab-row"') < summary);
+  assert.ok(summary < toast && toast < html.indexOf('id="proofreading-issues"'));
+  assert.match(html.slice(summary, toast), /id="proofreading-status"[^>]*aria-live="polite"/);
+  const { win, elements } = createResultHarness();
+  ['idle', 'success'].forEach((tone) => {
+    win.setProofreadingStatus('普通消息', tone);
+    assert.match(elements['proofreading-status'].className, /status-compact/);
+    assert.equal(elements['proofreading-status'].textContent, '普通消息');
+  });
+  ['warning', 'error', 'working'].forEach((tone) => {
+    win.setProofreadingStatus('需要可见的消息', tone);
+    assert.equal(elements['proofreading-status'].className, 'status status-' + tone);
+  });
+});
+
 test('accepted AI issues can save a rule without applying again or changing accepted status', () => {
   const { win, elements, calls, ruleDrafts } = createResultHarness();
   let documentText = '甲市公共服务中心旧称';

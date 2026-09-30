@@ -581,20 +581,42 @@
         return parts.join(" · ");
     }
 
+    // Connection results belong to one configuration and one detection request.
+    // Credentials are compared in memory only, never serialized into store keys.
+    var connectionConfiguration = null;
+    var connectionRevision = 0;
+    var renderedConnectionRevision = 0;
+    var modelDetectionCounter = 0;
+    var connectionResult = null;
+
+    function observeConnectionConfiguration() {
+        var options = modelOptions();
+        if (connectionConfiguration && connectionConfiguration.provider === options.provider &&
+            connectionConfiguration.endpoint === options.endpoint && connectionConfiguration.apiKey === options.apiKey) return false;
+        connectionConfiguration = { provider: options.provider, endpoint: options.endpoint, apiKey: options.apiKey };
+        connectionRevision++;
+        connectionResult = null;
+        return true;
+    }
+
+    function modelConnectionState() {
+        observeConnectionConfiguration();
+        return Object.assign({ provider: connectionConfiguration.provider, detected: false, modelCount: 0 },
+            connectionResult || { text: connectionRevision > 1 ? "配置已更改，需重新检测" : "尚未检测", tone: "idle" });
+    }
+
     function renderModelSummary() {
         var summary = byId("model-summary");
         if (summary) summary.textContent = modelSummaryText();
-        var catalog = settingsStore() && typeof settingsStore().loadCatalog === "function"
-            ? settingsStore().loadCatalog()
-            : null;
-        if (catalog) {
-            setConnectionStatus(
-                (catalog.detail || "已检测") + " · " + catalog.models.length + " 个模型",
-                catalog.tone || "success"
-            );
-        } else {
-            setConnectionStatus("尚未检测", "idle");
-        }
+        var connection = modelConnectionState();
+        setConnectionStatus(connection.text, connection.tone);
+        renderedConnectionRevision = connectionRevision;
+        if (typeof root.syncSettingsForm === "function") root.syncSettingsForm();
+    }
+
+    function invalidateModelConnection() {
+        connectionConfiguration = null;
+        renderModelSummary();
     }
 
     var lastKnownStoreState = "";
@@ -615,11 +637,11 @@
     }
 
     function syncFromStore() {
+        var connectionChanged = observeConnectionConfiguration();
         var key = storeStateKey();
-        if (key === lastKnownStoreState) return false;
+        if (key === lastKnownStoreState && !connectionChanged && renderedConnectionRevision === connectionRevision) return false;
         lastKnownStoreState = key;
         renderModelSummary();
-        if (typeof root.syncSettingsForm === "function") root.syncSettingsForm();
         return true;
     }
 
@@ -643,13 +665,27 @@
     }
 
     async function refreshProviderModels() {
-        setConnectionStatus("正在检测…", "working");
         var options;
+        var request = ++modelDetectionCounter;
+        var revision;
         var api = settingsStore();
+        function isCurrentDetection() {
+            observeConnectionConfiguration();
+            return request === modelDetectionCounter && revision === connectionRevision;
+        }
         try {
             options = modelOptions();
+            observeConnectionConfiguration();
+            revision = connectionRevision;
+            connectionResult = { text: "正在检测…", tone: "working" };
+            renderModelSummary();
             if (!root.WpsModelCatalog) throw new Error("模型检测模块没有加载。");
             var result = await root.WpsModelCatalog.detect(options, root.fetch);
+            if (!isCurrentDetection()) {
+                syncFromStore();
+                return { models: [], defaultModel: "", stale: true };
+            }
+            if (result.provider !== options.provider) throw new Error("检测结果与当前服务类型不一致，请重新检测。");
             saveCatalogResult(result.provider, result, result.models.length ? "success" : "error");
             if (result.models.length && result.defaultModel && api && typeof api.updateSettings === "function") {
                 var profile = currentSettings().profiles[result.provider] || { model: "" };
@@ -657,28 +693,34 @@
                     api.updateSettings({ provider: result.provider, profile: { model: result.defaultModel } });
                 }
             }
+            connectionResult = result.models.length ? {
+                text: (result.detail || "已检测") + " · " + result.models.length + " 个模型",
+                tone: "success", detected: true, modelCount: result.models.length
+            } : { text: "模型服务已连接，但未读取到可用模型。", tone: "warning" };
             syncFromStore();
             // Detection changes the UI even when the stored catalog is unchanged.
             renderModelSummary();
             if (!result.models.length) {
-                setConnectionStatus("模型服务已连接，但未读取到可用模型。", "warning");
                 return { models: [], defaultModel: "" };
             }
             return { models: result.models, defaultModel: result.defaultModel };
         } catch (error) {
+            if (!isCurrentDetection()) {
+                syncFromStore();
+                return { models: [], defaultModel: "", stale: true };
+            }
             var existing = api && typeof api.loadCatalog === "function" ? api.loadCatalog() : null;
             if (options) {
                 saveCatalogResult(options.provider, {
-                    models: existing ? existing.models : [],
-                    defaultModel: existing ? existing.defaultModel : "",
+                    models: existing && existing.provider === options.provider ? existing.models : [],
+                    defaultModel: existing && existing.provider === options.provider ? existing.defaultModel : "",
                     detail: "连接失败"
                 }, "error");
             }
+            connectionResult = { text: error && error.message
+                ? error.message : "模型服务检测失败。请确认服务已启动并允许加载项跨域访问。", tone: "error" };
             syncFromStore();
             renderModelSummary();
-            setConnectionStatus(error && error.message
-                ? error.message
-                : "模型服务检测失败。请确认服务已启动并允许加载项跨域访问。", "error");
             return { models: [], defaultModel: "", error: true };
         }
     }
@@ -1660,6 +1702,8 @@
     root.runProofreading = runProofreading;
     root.cancelProofreading = cancelProofreading;
     root.refreshProviderModels = refreshProviderModels;
+    root.getModelConnectionState = modelConnectionState;
+    root.invalidateModelConnection = invalidateModelConnection;
     root.locateProofreadingIssue = locateProofreadingIssue;
     root.ignoreProofreadingIssue = ignoreProofreadingIssue;
     root.applyProofreadingIssue = applyProofreadingIssue;
