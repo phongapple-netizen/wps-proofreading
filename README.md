@@ -61,7 +61,7 @@ http://127.0.0.1:3891
 npm run build:mac:installer
 ```
 
-安装包生成在 `dist/mac/`，包含 Intel 与 Apple 芯片通用的应用。打开 DMG，按其中的《安装说明》操作。应用会注册 WPS 并启动当前用户的登录服务；目标电脑无需 Node.js 或 npm。OpenCode、Ollama 和兼容模型接口仍由使用者单独配置。当前安装包采用临时签名，正式对外分发需要 Apple 开发者签名和公证。
+安装包生成在 `dist/mac/`，包含 Intel 与 Apple 芯片通用的应用。打开 DMG，按其中的《安装说明》操作。应用会注册 WPS 并启动当前用户的登录服务；目标电脑无需 Node.js 或 npm。使用 OpenCode 时需单独安装 OpenCode，插件会在选择后尝试自动启动它。Ollama 和兼容模型接口仍由使用者单独配置。当前安装包采用临时签名，正式对外分发需要 Apple 开发者签名和公证。
 
 以下是从项目源码运行的开发流程。
 
@@ -112,19 +112,29 @@ npm run debug:mac
 
 ### Windows x64 测试安装包
 
-Windows 10/11 x64 安装程序由 GitHub Actions 在 Windows 环境构建与验证。双击 Setup.exe 即可为当前用户安装；它会注册 WPS 加载项，启动只监听 `127.0.0.1:3891` 的网页服务，并设置登录自启。目标电脑无需 Node.js 或 npm。卸载入口位于 Windows“已安装的应用”。WPS 和模型服务仍需单独准备；当前安装程序未签名，SmartScreen 可能提示未知发布者。
+Windows 10/11 x64 安装程序由 GitHub Actions 在 Windows 环境构建与验证。双击 Setup.exe 即可为当前用户安装；它会注册 WPS 加载项，启动只监听 `127.0.0.1:3891` 的网页服务，并设置登录自启。目标电脑无需 Node.js 或 npm。卸载入口位于 Windows“已安装的应用”。需要预先安装 WPS；使用 OpenCode 时还需单独安装 OpenCode。当前安装程序未签名，SmartScreen 可能提示未知发布者。
 
 开发者可在 macOS 或 Windows 上先运行 `npm run build:windows:server` 交叉编译 x64 服务程序；完整安装程序由 `windows/installer.iss` 在 Windows 上通过 Inno Setup 编译。
 
 ## OpenCode
 
-插件连接的是 OpenCode 的 HTTP 服务。直接运行 `opencode` 只会打开终端交互界面，不会启动插件要连接的 4096 端口。在 Mac 终端或 Windows PowerShell 运行：
+普通用户按以下步骤连接 OpenCode：
+
+1. 安装本插件和 OpenCode；OpenCode 本身不包含在插件安装包内。
+2. 在 WPS 任务窗格中选择“OpenCode”。
+3. 插件会查找已安装的 OpenCode，按需在后台启动本机服务、检查健康状态并读取模型。选择模型即可使用。
+
+若未检测到 OpenCode，任务窗格提供安装方法。若自动启动失败，可点击“重试”或展开“高级 / 故障排查”。
+
+### 故障排查 / 手工启动
+
+直接运行 `opencode` 只会打开终端交互界面，不会启动插件要连接的 4096 端口。必要时在 Mac 终端或 Windows PowerShell 手工运行：
 
 ```bash
 opencode serve --hostname 127.0.0.1 --port 4096 --cors http://127.0.0.1:3891
 ```
 
-保持终端窗口运行，再打开 `http://127.0.0.1:4096/global/health`，确认返回 `"healthy":true`。最后在任务窗格中选择 OpenCode，点击“检测并读取模型”。健康地址打不开，通常是服务未启动、端口不对；健康地址能打开但插件仍无法检测，应核对 `--cors http://127.0.0.1:3891` 和服务密码。插件使用内置 `build` 代理，在每个临时校对会话中将全部工具设为必须审批，并核对服务端已启用该限制。插件不会批准工具请求；如果模型请求工具，插件会中止并清理会话。
+保持终端窗口运行，再打开 `http://127.0.0.1:4096/global/health`，确认返回 `"healthy":true`。回到任务窗格点击“检测并读取模型”。健康地址打不开，通常是服务未启动、端口不对；健康地址能打开但插件仍无法检测，应核对 `--cors http://127.0.0.1:3891` 和服务密码。若 4096 被其他程序占用，插件不会停止该程序。插件使用内置 `build` 代理，在每个临时校对会话中将全部工具设为必须审批，并核对服务端已启用该限制。插件不会批准工具请求；如果模型请求工具，插件会中止并清理会话。
 
 模型列表读取成功只表示服务已连接，不代表模型允许校对调用。“免费额度仅限 OpenCode 内使用”（HTTP 403）也可能由自定义代理或完全禁用工具引发的兼容性问题导致，不能据此认定免费模型无法用于插件。当前调用方式已在 OpenCode 1.18.32 和 `opencode/mimo-v2.6-flash-free` 上验证。插件中的“OpenCode 服务密码”只用于连接本机服务，不是模型提供商的 API 密钥。
 

@@ -650,9 +650,49 @@
 
     function initConfiguration() {
         syncFromStore();
+        if (modelOptions().provider === "opencode" && canManageOpenCode()) {
+            // The native service is already running when this page is served.
+            refreshProviderModels();
+        }
         if (root.document && typeof root.setInterval === "function") {
             root.setInterval(syncFromStore, 1000);
         }
+    }
+
+    function canManageOpenCode() {
+        return root.location && root.location.origin === "http://127.0.0.1:3891" &&
+            typeof root.fetch === "function" &&
+            !modelOptions().apiKey &&
+            modelOptions().endpoint.replace(/\/+$/, "") === "http://127.0.0.1:4096";
+    }
+
+    async function nativeOpenCodeRequest(method, path) {
+        var response = await root.fetch("http://127.0.0.1:3891/api/opencode/" + path, {
+            method: method,
+            headers: method === "POST" ? { "Content-Type": "application/json" } : {},
+            credentials: "same-origin"
+        });
+        if (!response.ok) throw new Error("OpenCode 本机管理服务暂时不可用，请查看高级 / 故障排查。");
+        return response.json();
+    }
+
+    async function ensureOpenCodeReady(isCurrentDetection, showState) {
+        if (!canManageOpenCode()) return null;
+        var status = await nativeOpenCodeRequest("GET", "status");
+        if (!isCurrentDetection()) return { stale: true };
+        if (status.state === "stopped") {
+            showState("正在启动 OpenCode…", "working");
+            status = await nativeOpenCodeRequest("POST", "start");
+            if (!isCurrentDetection()) return { stale: true };
+        }
+        if (status.state === "ready") return status;
+        var messages = {
+            missing: "未检测到 OpenCode。请查看安装方法。",
+            port_conflict: "4096 端口被其他程序占用，无法自动启动 OpenCode。",
+            error: "已检测到 OpenCode，但服务启动失败。请重试或查看详情。",
+            stopped: "已检测到 OpenCode，但服务启动失败。请重试或查看详情。"
+        };
+        throw new Error(messages[status.state] || messages.error);
     }
 
     function saveCatalogResult(provider, result, tone) {
@@ -683,6 +723,12 @@
             connectionResult = { text: "正在检测…", tone: "working" };
             renderModelSummary();
             if (!root.WpsModelCatalog) throw new Error("模型检测模块没有加载。");
+            var nativeStatus = options.provider === "opencode" && canManageOpenCode()
+                ? await ensureOpenCodeReady(isCurrentDetection, function (text, tone) {
+                    connectionResult = { text: text, tone: tone };
+                    renderModelSummary();
+                }) : null;
+            if (nativeStatus && nativeStatus.stale) return { models: [], defaultModel: "", stale: true };
             var result = await root.WpsModelCatalog.detect(options, root.fetch);
             if (!isCurrentDetection()) {
                 syncFromStore();
@@ -697,7 +743,9 @@
                 }
             }
             connectionResult = result.models.length ? {
-                text: (result.detail || "已检测") + " · " + result.models.length + " 个模型",
+                text: nativeStatus && nativeStatus.version
+                    ? "OpenCode " + nativeStatus.version + " · 已发现 " + result.models.length + " 个模型"
+                    : (result.detail || "已检测") + " · " + result.models.length + " 个模型",
                 tone: "success", detected: true, modelCount: result.models.length
             } : { text: "模型服务已连接，但未读取到可用模型。", tone: "warning" };
             syncFromStore();
@@ -798,7 +846,9 @@
         if (ruleIsReminder) {
             combined = Object.assign({}, aiIssue, {
                 origin: "rule+ai",
+                ruleId: ruleIssue.ruleId || "",
                 ruleName: ruleIssue.ruleName || "",
+                ruleGroup: ruleIssue.ruleGroup || "",
                 ruleSource: ruleIssue.ruleSource || "",
                 ruleType: ruleIssue.ruleType || "",
                 severity: ruleIssue.severity || "",

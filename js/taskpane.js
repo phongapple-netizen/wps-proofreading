@@ -64,9 +64,23 @@
 
     function setModelConnectionStatus(message, tone) {
         var element = byId("connection-status");
-        if (!element) return;
-        element.textContent = String(message || "");
-        element.className = "connection-status connection-status-" + String(tone || "idle");
+        if (element) {
+            element.textContent = String(message || "");
+            element.className = "connection-status connection-status-" + String(tone || "idle");
+        }
+        var service = byId("opencode-service-message");
+        if (!service) return;
+        var provider = currentProvider(loadStoredSettings());
+        var text = String(message || "");
+        var missing = /未检测到 OpenCode/.test(text);
+        var failed = /启动失败|端口被其他程序占用|管理服务暂时不可用/.test(text);
+        service.textContent = provider === "opencode" ? text : "";
+        var retry = byId("opencode-retry");
+        var installHelp = byId("opencode-install-help");
+        var details = byId("opencode-details");
+        if (retry) retry.hidden = provider !== "opencode" || !failed;
+        if (installHelp) installHelp.hidden = provider !== "opencode" || !missing;
+        if (details) details.hidden = provider !== "opencode" || !failed;
     }
 
     function setProofreadingBusy(value) {
@@ -1069,9 +1083,11 @@
         var model = byId("model-name");
         var help = byId("provider-help");
         var opencodeGuide = byId("opencode-start-guide");
+        var opencodeServiceState = byId("opencode-service-state");
 
         if (keyRow) keyRow.hidden = provider === "ollama";
         if (opencodeGuide) opencodeGuide.hidden = provider !== "opencode";
+        if (opencodeServiceState) opencodeServiceState.hidden = provider !== "opencode";
         if (provider === "ollama") {
             if (endpointLabel) endpointLabel.textContent = "Ollama 服务地址";
             if (endpoint) endpoint.placeholder = "http://127.0.0.1:11434";
@@ -1085,7 +1101,7 @@
             if (model) model.placeholder = "检测服务后选择 provider/model";
             if (keyLabel) keyLabel.textContent = "OpenCode 服务密码（可选）";
             if (key) key.placeholder = "仅在服务启用密码时填写；不会保存";
-            if (help) help.textContent = "完成上面的启动和健康检查后，再读取模型。";
+            if (help) help.textContent = "选择 OpenCode 后会自动检测、启动服务并读取模型。";
         } else {
             if (endpointLabel) endpointLabel.textContent = "Chat Completions API 地址";
             if (endpoint) endpoint.placeholder = "https://example.com/v1/chat/completions";
@@ -1195,6 +1211,9 @@
         var autoAdvanceField = byId("auto-advance");
         var refreshButton = byId("refresh-models");
         var manualToggle = byId("model-input-toggle");
+        var opencodeRetry = byId("opencode-retry");
+        var opencodeDetails = byId("opencode-details");
+        var opencodeGuideToggle = byId("opencode-guide-toggle");
         var api = store();
 
         if (providerField) {
@@ -1203,6 +1222,9 @@
                 api.updateSettings({ provider: providerField.value });
                 invalidateModelConnection();
                 syncFormFromStore();
+                if (providerField.value === "opencode" && typeof root.refreshProviderModels === "function") {
+                    root.refreshProviderModels();
+                }
             });
         }
         if (endpointField) {
@@ -1268,6 +1290,20 @@
                 syncFormFromStore();
             });
         }
+        if (opencodeRetry) opencodeRetry.addEventListener("click", function () {
+            if (typeof root.refreshProviderModels === "function") root.refreshProviderModels();
+        });
+        if (opencodeDetails) opencodeDetails.addEventListener("click", function () {
+            var content = byId("opencode-guide-content");
+            if (content) content.hidden = false;
+            if (opencodeGuideToggle) opencodeGuideToggle.setAttribute("aria-expanded", "true");
+        });
+        if (opencodeGuideToggle) opencodeGuideToggle.addEventListener("click", function () {
+            var content = byId("opencode-guide-content");
+            if (!content) return;
+            content.hidden = !content.hidden;
+            opencodeGuideToggle.setAttribute("aria-expanded", content.hidden ? "false" : "true");
+        });
         if (manualToggle) manualToggle.addEventListener("click", function (event) {
             if (event && event.preventDefault) event.preventDefault();
             var manualMode = manualToggle.getAttribute("aria-pressed") !== "true";

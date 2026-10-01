@@ -8,16 +8,25 @@ on:
       - .github/workflows/release-windows.yml
       - windows/**
       - scripts/build-windows-server.js
+      - scripts/release-notes.js
       - package.json
       - package-lock.json
   workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/release-windows.yml
+      - windows/**
+      - scripts/build-windows-server.js
+      - scripts/release-notes.js
+      - package.json
+      - package-lock.json
 
 permissions:
   contents: write
 
 jobs:
   release:
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[release-windows]')
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[release-windows]')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,6 +41,8 @@ jobs:
         run: npm ci
       - name: Run project tests
         run: npm test
+      - name: Run native discovery, service and registration tests
+        run: node scripts/build-windows-server.js --test
       - name: Build x64 server
         run: npm run build:windows:server
       - name: Compile Inno Setup installer
@@ -88,25 +99,53 @@ jobs:
           $remaining = Get-Content $publish -Raw
           if ($remaining -match 'name="wps-text-proofreading"' -or $remaining -notmatch 'name="other-addon"') { throw 'Uninstall did not preserve the other add-on.' }
           if (Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name WPSProofreading -ErrorAction SilentlyContinue) { throw 'Login startup entry remained after uninstall.' }
+
+          # Exercise the installer preflight failure without administrator
+          # permissions: an unrelated local listener must remain untouched and
+          # the user's WPS XML and pre-existing Run value must remain unchanged.
+          $originalXml = [System.IO.File]::ReadAllText($publish)
+          $runPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+          $priorRun = '"prior-user-service.exe" --serve'
+          Set-ItemProperty -Path $runPath -Name WPSProofreading -Value $priorRun
+          $blockerScript = Join-Path $env:TEMP 'wps-proofreading-port-blocker.js'
+          Set-Content -Path $blockerScript -Encoding UTF8 -Value 'require("node:net").createServer().listen(3891,"127.0.0.1")'
+          $blocker = Start-Process -FilePath 'node' -ArgumentList "`"$blockerScript`"" -PassThru -WindowStyle Hidden
+          try {
+            $occupied = $false
+            for ($attempt = 0; $attempt -lt 20; $attempt++) {
+              $client = [System.Net.Sockets.TcpClient]::new()
+              try { $client.Connect('127.0.0.1', 3891); $occupied = $true; break } catch { Start-Sleep -Milliseconds 250 } finally { $client.Dispose() }
+            }
+            if (-not $occupied) { throw 'Could not start the fake 3891 port blocker.' }
+            $failedInstall = Start-Process -FilePath $installer -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART' -Wait -PassThru
+            if ($failedInstall.ExitCode -eq 0) { throw 'Installer unexpectedly succeeded while 3891 was occupied.' }
+            if ([System.IO.File]::ReadAllText($publish) -ne $originalXml) { throw 'Failed install changed publish.xml.' }
+            $restoredRun = (Get-ItemProperty -Path $runPath -Name WPSProofreading -ErrorAction Stop).WPSProofreading
+            if ($restoredRun -ne $priorRun) { throw 'Failed install changed the pre-existing Run value.' }
+          } finally {
+            if ($blocker -and -not $blocker.HasExited) { Stop-Process -Id $blocker.Id -Force }
+            Remove-Item $blockerScript -Force -ErrorAction SilentlyContinue
+            Remove-ItemProperty -Path $runPath -Name WPSProofreading -ErrorAction SilentlyContinue
+          }
+
       - name: Create Windows beta release
+        if: github.event_name != 'pull_request'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $version = node -p "require('./package.json').version"
           $asset = "dist/windows/WPS-Proofreading-$version-Windows-x64-Setup.exe"
-          $hash = (Get-FileHash -Algorithm SHA256 $asset).Hash.ToLowerInvariant()
-          $notes = @"
-          Windows 10/11 x64 测试安装包。双击 EXE 即可为当前用户安装，无需 Node.js 或管理员权限。
-
-          安装器会注册 WPS 加载项、启动本机网页服务并设置登录自启；卸载时会移除本加载项和启动项，保留其他 WPS 加载项。需要预先安装 WPS，OpenCode、Ollama 或兼容模型接口仍需另行配置。本包不含 AI 模型。
-
-          本版在插件内加入 OpenCode 服务启动、健康检查和跨域排查步骤，并提高 DeepSeek 思考模型校对请求的输出额度。
-
-          当前为未签名测试版，Windows SmartScreen 可能提示未知发布者。真实 WPS 环境中的交互仍需在 Windows 电脑上验证。
-
-          SHA-256: $hash  $asset
-          "@
-          Set-Content -Path release-notes.md -Value $notes -Encoding UTF8
-          gh release create "v$version" $asset --target $env:GITHUB_SHA --title "WPS 文本校对 v$version · Windows x64 测试版" --notes-file release-notes.md --prerelease
+          node scripts/release-notes.js
+          gh release view "v$version" --json tagName 2>$null | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create "v$version" --target $env:GITHUB_SHA --title "WPS 文本校对 v$version · 测试版" --notes-file release-notes.md --prerelease
+            if ($LASTEXITCODE -ne 0) {
+              gh release view "v$version" --json tagName 2>$null | Out-Null
+              if ($LASTEXITCODE -ne 0) { throw "Could not create or locate v$version release." }
+            }
+          }
+          gh release upload "v$version" $asset --clobber
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          gh release edit "v$version" --title "WPS 文本校对 v$version · 测试版" --notes-file release-notes.md --prerelease
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

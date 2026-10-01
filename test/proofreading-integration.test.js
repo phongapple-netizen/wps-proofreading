@@ -1864,6 +1864,37 @@ test("local and complete AI batches render progressively with stable IDs and one
     assert.equal(new Set(harness.renderedIssues.map((issue) => issue.id)).size, 3);
 });
 
+test("a reminder upgraded by AI keeps the local rule stable ID", async () => {
+    const gates = [];
+    const harness = createHarness({
+        selectedText: "旧称。" + "甲".repeat(200),
+        issuesForRequest: () => [{
+            category: "wording", paragraphIndex: 1, original: "旧称",
+            suggestion: "新称", reason: "AI 确认该称谓应调整",
+            confidence: 0.95, needsReview: false
+        }],
+        waitForRequest: () => new Promise((resolve) => gates.push(resolve)),
+        rules: [{
+            id: "stable-reminder", name: "称谓提醒", group: "名称",
+            type: "reminder", pattern: "旧称", replacement: "",
+            notes: "请核对称谓", priority: 100
+        }]
+    });
+    harness.window.AbortController = AbortController;
+    const run = harness.window.runProofreading();
+    await until(() => gates.length === 1);
+    assert.equal(harness.renderedIssues.length, 1);
+    const localId = harness.renderedIssues[0].id;
+    assert.equal(harness.renderedIssues[0].actionable, false);
+
+    gates[0]();
+    const result = await run;
+    assert.equal(result.accepted, true);
+    assert.equal(harness.renderedIssues.length, 1);
+    assert.equal(harness.renderedIssues[0].id, localId);
+    assert.equal(harness.renderedIssues[0].origin, "rule+ai");
+});
+
 test("cancellation retains completed findings and discards a late response", async () => {
     const { harness, gates } = progressiveFixture();
     const run = harness.window.runProofreading();
