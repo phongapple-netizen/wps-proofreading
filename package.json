@@ -5,7 +5,7 @@
   "description": "WPS 文字原生智能文本校对加载项",
   "addonType": "wps",
   "scripts": {
-    "test": "node --test test/*.test.js",
+    "test": "node --test",
     "debug": "node scripts/dev-server.js --port 3891",
     "debug:server": "node scripts/dev-server.js --port 3891",
     "build": "wpsjs build",
