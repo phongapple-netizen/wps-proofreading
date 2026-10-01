@@ -49,6 +49,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Smoke test install, service, and uninstall
         shell: pwsh
+        timeout-minutes: 8
         run: |
           $version = node -p "require('./package.json').version"
           $server = (Resolve-Path 'dist/windows/WPSProofreadingServer.exe').Path
@@ -60,7 +61,8 @@ jobs:
           Set-Content -Path $publish -Encoding UTF8 -Value '<?xml version="1.0"?><jsplugins><jspluginonline name="other-addon" url="https://example.test/"/></jsplugins>'
 
           $installer = (Resolve-Path "dist/windows/WPS-Proofreading-$version-Windows-x64-Setup.exe").Path
-          $install = Start-Process -FilePath $installer -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
+          $install = [System.Diagnostics.Process]::Start($installer, '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART')
+          if (-not $install.WaitForExit(120000)) { $install.Kill(); throw 'Installer timed out.' }
           if ($install.ExitCode -ne 0) { throw "Installer failed: $($install.ExitCode)" }
 
           $registered = Get-Content $publish -Raw
