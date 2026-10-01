@@ -181,6 +181,23 @@ func TestOpenCodeHealthStates(t *testing.T) {
 	}
 }
 
+func TestNpmDiscoveryPrefersNativeExecutable(t *testing.T) {
+	root := t.TempDir()
+	shim := touch(t, filepath.Join(root, "npm with spaces", "opencode.cmd"))
+	native := touch(t, filepath.Join(filepath.Dir(shim), "node_modules", "opencode-ai", "bin", "opencode.exe"))
+	got, ok := discoverFrom(func(string) (string, error) { return shim, nil }, "", "", "")
+	if !ok || got.path != native || got.cmd {
+		t.Fatalf("native binary not preferred: %#v", got)
+	}
+	if err := os.Remove(native); err != nil {
+		t.Fatal(err)
+	}
+	got, ok = candidateFrom(shim)
+	if !ok || got.path != shim || !got.cmd {
+		t.Fatalf("batch fallback lost: %#v", got)
+	}
+}
+
 func managerForStart(t *testing.T, state func() (bool, bool, string), start func() error) (*openCodeManager, string) {
 	t.Helper()
 	root := t.TempDir()

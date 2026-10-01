@@ -118,6 +118,18 @@ test('switching away from OpenCode makes an old native start result stale', asyn
   assert.doesNotMatch(h.elements['connection-status'].textContent, /OpenCode old|已发现/);
 });
 
+test('native startup failure includes its actionable detail as plain text', async () => {
+  const h = harness({ nativeFetch: async (url, init) => ({ ok: true, async json() {
+    return init.method === 'GET' ? { state: 'stopped', found: true } : {
+      state: 'error', found: true, errorCode: 'process_exited',
+      detail: 'OpenCode 启动进程已提前退出，请查看本机启动日志。'
+    };
+  } }) });
+  await new Promise(setImmediate);
+  assert.match(h.elements['opencode-service-message'].textContent, /启动失败.*提前退出/);
+  assert.equal(h.elements['opencode-retry'].hidden, false);
+});
+
 test('OpenCode troubleshooting stays folded until requested and other providers do not start it', async () => {
   const calls = [];
   const h = harness({ nativeFetch: async (url, init) => {

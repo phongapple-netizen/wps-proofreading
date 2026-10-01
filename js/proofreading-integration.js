@@ -692,7 +692,8 @@
             error: "已检测到 OpenCode，但服务启动失败。请重试或查看详情。",
             stopped: "已检测到 OpenCode，但服务启动失败。请重试或查看详情。"
         };
-        throw new Error(messages[status.state] || messages.error);
+        var detail = typeof status.detail === "string" ? status.detail.trim() : "";
+        throw new Error((messages[status.state] || messages.error) + (detail ? " " + detail : ""));
     }
 
     function saveCatalogResult(provider, result, tone) {
