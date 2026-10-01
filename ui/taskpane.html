@@ -301,14 +301,23 @@
                         <option value="openai">OpenAI 兼容接口</option>
                     </select>
 
+                    <div id="opencode-service-state" class="opencode-service-state" role="status" aria-live="polite">
+                        <span id="opencode-service-message">正在检测 OpenCode…</span>
+                        <button id="opencode-retry" class="button button-text" type="button" hidden>重试</button>
+                        <a id="opencode-install-help" href="https://opencode.ai/docs/" target="_blank" rel="noopener noreferrer" hidden>查看安装方法</a>
+                        <button id="opencode-details" class="button button-text" type="button" hidden>查看详情</button>
+                    </div>
                     <div id="opencode-start-guide" class="opencode-start-guide">
-                        <strong>连接 OpenCode 的 3 步</strong>
+                        <button id="opencode-guide-toggle" class="button button-text" type="button" aria-expanded="false">高级 / 故障排查</button>
+                        <div id="opencode-guide-content" hidden>
+                        <strong>手工启动 OpenCode</strong>
                         <ol>
                             <li>在 Mac 终端或 Windows PowerShell 运行下面的命令。只打开 <code>opencode</code> 交互界面不会启动插件需要的服务。</li>
                             <li><code class="opencode-start-command">opencode serve --hostname 127.0.0.1 --port 4096 --cors http://127.0.0.1:3891</code>保持终端窗口运行。</li>
                             <li>在浏览器打开 <code>http://127.0.0.1:4096/global/health</code>，看到 <code>"healthy":true</code> 后，回到这里点击“检测并读取模型”。</li>
                         </ol>
                         <p>健康地址打不开：检查服务是否启动、端口是否为 4096。能打开但检测失败：检查启动命令是否带有上面的 <code>--cors</code> 参数；若设置过服务密码，也要在下方填写。</p>
+                        </div>
                     </div>
 
                     <label id="model-endpoint-label" class="field-label" for="model-endpoint">OpenCode 服务地址</label>
@@ -331,7 +340,7 @@
                     <div class="connection-row">
                         <button id="refresh-models" class="button button-secondary" type="button">检测并读取模型</button>
                     </div>
-                    <p id="provider-help" class="field-note">先启动 OpenCode 服务，再读取当前项目可用的模型。</p>
+                    <p id="provider-help" class="field-note">选择 OpenCode 后会自动检测、启动服务并读取模型。</p>
                     <p id="model-detection-result" class="model-detection-result" role="status" aria-live="polite"></p>
                     <p class="field-note">服务类型和模型名保存在本机，OpenCode 与 Ollama 本机地址也可保存；API 密钥和服务密码不会保存。</p>
                 </div>

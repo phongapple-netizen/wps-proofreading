@@ -18,12 +18,15 @@ function field() {
   return node;
 }
 
-function harness() {
+function harness(options = {}) {
   const elements = {};
   ['model-provider', 'model-endpoint', 'model-name', 'model-suggestions', 'model-api-key',
     'model-api-key-row', 'model-endpoint-label', 'model-name-label', 'model-api-key-label',
-    'provider-help', 'opencode-start-guide', 'refresh-models', 'model-summary', 'connection-status', 'model-detection-result']
+    'provider-help', 'opencode-start-guide', 'opencode-service-state', 'opencode-service-message',
+    'opencode-retry', 'opencode-install-help', 'opencode-details', 'opencode-guide-toggle',
+    'opencode-guide-content', 'refresh-models', 'model-summary', 'connection-status', 'model-detection-result']
     .forEach((id) => { elements[id] = field(); });
+  elements['opencode-guide-content'].hidden = true;
   const storage = new Map();
   const ready = [];
   const intervals = [];
@@ -35,6 +38,10 @@ function harness() {
     WpsModelCatalog: { detect: async (options) => ({ provider: options.provider,
       models: ['demo/model'], defaultModel: 'demo/model', detail: options.provider + ' 已连接' }) }
   };
+  if (options.nativeFetch) {
+    win.location = { origin: 'http://127.0.0.1:3891' };
+    win.fetch = options.nativeFetch;
+  }
   const context = vm.createContext({ window: win, URL, setTimeout, clearTimeout });
   ['settings-store.js', 'proofreading-integration.js', 'taskpane.js'].forEach((file) => {
     vm.runInContext(fs.readFileSync(path.join(root, 'js', file), 'utf8'), context, { filename: file });
@@ -44,6 +51,101 @@ function harness() {
   return { win, elements, storage, tick: () => intervals.forEach((callback) => callback()),
     change(id, value) { elements[id].value = value; elements[id].fire('change'); } };
 }
+
+function nativeResponse(state, version = '') {
+  return { ok: true, async json() { return { state, found: state !== 'missing', version, managed: state === 'ready' }; } };
+}
+
+test('OpenCode selection starts a stopped service and then enumerates models', async () => {
+  const calls = [];
+  const h = harness({ nativeFetch: async (url, init) => {
+    calls.push(init.method + ' ' + url);
+    return nativeResponse(init.method === 'GET' ? 'stopped' : 'ready', '1.18.32');
+  } });
+  await new Promise(setImmediate);
+  assert.deepEqual(calls.map((call) => call.split(' ')[0]), ['GET', 'POST']);
+  assert.match(h.elements['connection-status'].textContent, /OpenCode 1\.18\.32 · 已发现 1 个模型/);
+  assert.equal(h.elements['opencode-retry'].hidden, true);
+});
+
+test('OpenCode manager reports missing install, startup failure, and 4096 conflict', async () => {
+  for (const [state, pattern] of [
+    ['missing', /未检测到 OpenCode/],
+    ['error', /启动失败/],
+    ['port_conflict', /4096 端口被其他程序占用/]
+  ]) {
+    const calls = [];
+    const h = harness({ nativeFetch: async (url, init) => {
+      calls.push(init.method);
+      return nativeResponse(state);
+    } });
+    await new Promise(setImmediate);
+    assert.match(h.elements['connection-status'].textContent, pattern);
+    assert.deepEqual(calls, ['GET']);
+  }
+});
+
+test('failed automatic start offers retry and troubleshooting without exposing the command by default', async () => {
+  const calls = [];
+  const h = harness({ nativeFetch: async (url, init) => {
+    calls.push(init.method);
+    return nativeResponse(init.method === 'GET' ? 'stopped' : 'error');
+  } });
+  await new Promise(setImmediate);
+  assert.deepEqual(calls, ['GET', 'POST']);
+  assert.match(h.elements['opencode-service-message'].textContent, /启动失败/);
+  assert.equal(h.elements['opencode-retry'].hidden, false);
+  assert.equal(h.elements['opencode-guide-content'].hidden, true);
+  h.elements['opencode-details'].fire('click');
+  assert.equal(h.elements['opencode-guide-content'].hidden, false);
+  h.elements['opencode-retry'].fire('click');
+  await new Promise(setImmediate);
+  assert.deepEqual(calls, ['GET', 'POST', 'GET', 'POST']);
+});
+
+test('switching away from OpenCode makes an old native start result stale', async () => {
+  let finish;
+  const h = harness({ nativeFetch: async (url, init) => {
+    if (init.method === 'GET') return nativeResponse('stopped');
+    return new Promise((resolve) => { finish = () => resolve(nativeResponse('ready', 'old')); });
+  } });
+  await new Promise(setImmediate);
+  assert.match(h.elements['connection-status'].textContent, /正在启动 OpenCode/);
+  h.change('model-provider', 'ollama');
+  finish();
+  await new Promise(setImmediate);
+  assert.equal(h.win.getModelConnectionState().provider, 'ollama');
+  assert.doesNotMatch(h.elements['connection-status'].textContent, /OpenCode old|已发现/);
+});
+
+test('OpenCode troubleshooting stays folded until requested and other providers do not start it', async () => {
+  const calls = [];
+  const h = harness({ nativeFetch: async (url, init) => {
+    calls.push(init.method);
+    return nativeResponse('ready', '1.18.32');
+  } });
+  await new Promise(setImmediate);
+  assert.equal(h.elements['opencode-guide-content'].hidden, true);
+  h.elements['opencode-guide-toggle'].fire('click');
+  assert.equal(h.elements['opencode-guide-content'].hidden, false);
+  h.change('model-provider', 'ollama');
+  await h.win.refreshProviderModels();
+  assert.deepEqual(calls, ['GET']);
+});
+
+test('session-only OpenCode password keeps the existing authenticated model detection path', async () => {
+  const calls = [];
+  const h = harness({ nativeFetch: async (url, init) => {
+    calls.push(init.method);
+    return nativeResponse('port_conflict');
+  } });
+  await new Promise(setImmediate);
+  h.change('model-api-key', 'session-only');
+  await h.win.refreshProviderModels();
+  assert.deepEqual(calls, ['GET']);
+  assert.equal(h.win.getModelConnectionState().detected, true);
+  assert.equal(JSON.stringify([...h.storage.values()]).includes('session-only'), false);
+});
 
 function assertRequiresDetection(h) {
   h.tick();
