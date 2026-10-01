@@ -458,7 +458,9 @@
             endpoint: endpoint || "",
             model: profile ? profile.model : "",
             apiKey: api && typeof api.loadPassword === "function" ? api.loadPassword(settings.provider) : "",
-            signal: currentController ? currentController.signal : undefined
+            signal: currentController ? currentController.signal : undefined,
+            maxOutputTokens: settings.provider === "openai" && profile &&
+                /deepseek/i.test(profile.model || "") ? 10000 : undefined
         };
     }
 
@@ -578,7 +580,7 @@
         if (options.endpoint) parts.push(options.endpoint);
         if (options.model) parts.push(options.model);
         if (isDeepMode()) parts.push("深度增强");
-        return parts.join(" · ");
+        return "当前设置：" + parts.join(" · ");
     }
 
     // Connection results belong to one configuration and one detection request.

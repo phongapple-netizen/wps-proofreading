@@ -22,7 +22,7 @@ function harness() {
   const elements = {};
   ['model-provider', 'model-endpoint', 'model-name', 'model-suggestions', 'model-api-key',
     'model-api-key-row', 'model-endpoint-label', 'model-name-label', 'model-api-key-label',
-    'provider-help', 'refresh-models', 'model-summary', 'connection-status', 'model-detection-result']
+    'provider-help', 'opencode-start-guide', 'refresh-models', 'model-summary', 'connection-status', 'model-detection-result']
     .forEach((id) => { elements[id] = field(); });
   const storage = new Map();
   const ready = [];
@@ -56,11 +56,14 @@ function assertRequiresDetection(h) {
 
 test('provider, endpoint and password edits remain unverified across polling until fresh detection succeeds', async () => {
   const h = harness();
+  assert.equal(h.elements['opencode-start-guide'].hidden, false);
+  assert.match(h.elements['model-summary'].textContent, /^当前设置：OpenCode/);
   await h.win.refreshProviderModels();
   assert.equal(h.elements['connection-status'].className, 'connection-status connection-status-success');
   assert.equal(h.elements['model-detection-result'].textContent, '已读取 1 个模型');
 
   h.change('model-provider', 'ollama');
+  assert.equal(h.elements['opencode-start-guide'].hidden, true);
   assertRequiresDetection(h);
   assert.doesNotMatch(h.elements['connection-status'].textContent, /opencode 已连接/);
   await h.win.refreshProviderModels();
@@ -73,6 +76,7 @@ test('provider, endpoint and password edits remain unverified across polling unt
   assert.equal(h.win.getModelConnectionState().detected, true);
 
   h.change('model-provider', 'opencode');
+  assert.equal(h.elements['opencode-start-guide'].hidden, false);
   await h.win.refreshProviderModels();
   h.change('model-api-key', 'test-only-password');
   assertRequiresDetection(h);

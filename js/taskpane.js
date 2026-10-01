@@ -1054,8 +1054,10 @@
         var modelLabel = byId("model-name-label");
         var model = byId("model-name");
         var help = byId("provider-help");
+        var opencodeGuide = byId("opencode-start-guide");
 
         if (keyRow) keyRow.hidden = provider === "ollama";
+        if (opencodeGuide) opencodeGuide.hidden = provider !== "opencode";
         if (provider === "ollama") {
             if (endpointLabel) endpointLabel.textContent = "Ollama 服务地址";
             if (endpoint) endpoint.placeholder = "http://127.0.0.1:11434";
@@ -1069,7 +1071,7 @@
             if (model) model.placeholder = "检测服务后选择 provider/model";
             if (keyLabel) keyLabel.textContent = "OpenCode 服务密码（可选）";
             if (key) key.placeholder = "仅在服务启用密码时填写；不会保存";
-            if (help) help.textContent = "先启动 OpenCode 服务，再读取当前项目可用的模型。";
+            if (help) help.textContent = "完成上面的启动和健康检查后，再读取模型。";
         } else {
             if (endpointLabel) endpointLabel.textContent = "Chat Completions API 地址";
             if (endpoint) endpoint.placeholder = "https://example.com/v1/chat/completions";

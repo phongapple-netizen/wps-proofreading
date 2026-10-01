@@ -152,12 +152,19 @@
         } catch (error) {
             if (isAbortError(error, signal)) throw createCancelledError();
             if (error && error.code === "TIMEOUT") throw error;
-            throw createError(operation + "失败，请检查 OpenCode 服务是否已启动及跨域设置。", "NETWORK_ERROR");
+            var localDefault = /^http:\/\/(?:127\.0\.0\.1|localhost):4096\//i.test(url);
+            var guidance = localDefault
+                ? "请在浏览器打开 http://127.0.0.1:4096/global/health：打不开就运行 opencode serve；能打开则检查启动命令是否包含 --cors http://127.0.0.1:3891，并核对服务密码。"
+                : "请在浏览器打开所填服务地址下的 /global/health；若能打开，请确认服务允许插件地址跨域访问，并核对服务密码。";
+            throw createError(operation + "失败。" + guidance, "NETWORK_ERROR");
         }
     }
 
     async function responseJson(response, operation, signal, timeoutMs) {
         if (!responseIsOk(response)) {
+            if (Number(response && response.status) === 401) {
+                throw createError("OpenCode 服务密码缺失或不正确。请在插件设置中填写 OpenCode 服务密码。", "HTTP_ERROR");
+            }
             throw createError(operation + "失败" + statusText(response) + "。", "HTTP_ERROR");
         }
         if (!response || typeof response.json !== "function") {

@@ -262,6 +262,25 @@ test("request failures do not echo endpoint credentials or response bodies", asy
     );
 });
 
+test("thinking-model responses explain exhausted output budgets without exposing reasoning text", () => {
+    const reasoning = "private model reasoning";
+    const truncated = { choices: [{
+        finish_reason: "length",
+        message: { content: "", reasoning_content: reasoning }
+    }] };
+    const empty = { choices: [{
+        finish_reason: "stop",
+        message: { content: null, reasoning_content: reasoning }
+    }] };
+    assert.throws(() => core.extractReply("openai", truncated), (error) =>
+        /token 上限/.test(error.message) && !error.message.includes(reasoning));
+    assert.throws(() => core.extractReply("openai", empty), (error) =>
+        /只返回了推理内容/.test(error.message) && !error.message.includes(reasoning));
+    assert.equal(core.extractReply("openai", { choices: [{
+        finish_reason: "stop", message: { content: '{"issues":[]}' }
+    }] }), '{"issues":[]}');
+});
+
 test("batching keeps whole paragraphs and respects the batch character budget", () => {
     const paragraphs = [
         { paragraphIndex: 1, text: "短段落。", offset: 0 },

@@ -393,6 +393,48 @@ test("OpenCode proofreading uses the built-in agent and retains the selection-on
     assert.equal(harness.contentReads, 0);
 });
 
+test("OpenAI-compatible proofreading reserves enough output tokens for thinking models", async () => {
+    const settings = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
+    settings.provider = "openai";
+    settings.profiles.openai = {
+        endpoint: "http://127.0.0.1:9999/v1/chat/completions",
+        model: "deepseek-reasoner"
+    };
+    const harness = createHarness({ seed: JSON.stringify(settings) });
+    let requestBody;
+    harness.window.fetch = async (_url, requestOptions) => {
+        requestBody = JSON.parse(requestOptions.body);
+        return { ok: true, status: 200, json: async () => ({
+            choices: [{ finish_reason: "stop", message: { content: '{"issues":[]}' } }]
+        }) };
+    };
+
+    const result = await harness.window.runProofreading();
+
+    assert.equal(result.accepted, true);
+    assert.equal(requestBody.max_tokens, 10000);
+});
+
+test("other compatible proofreading models keep the existing output budget", async () => {
+    const settings = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
+    settings.provider = "openai";
+    settings.profiles.openai = {
+        endpoint: "http://127.0.0.1:9999/v1/chat/completions",
+        model: "regular-model"
+    };
+    const harness = createHarness({ seed: JSON.stringify(settings) });
+    let requestBody;
+    harness.window.fetch = async (_url, requestOptions) => {
+        requestBody = JSON.parse(requestOptions.body);
+        return { ok: true, status: 200, json: async () => ({
+            choices: [{ finish_reason: "stop", message: { content: '{"issues":[]}' } }]
+        }) };
+    };
+
+    assert.equal((await harness.window.runProofreading()).accepted, true);
+    assert.equal(requestBody.max_tokens, 2000);
+});
+
 test("OpenCode free-tier rejection reaches the task pane and releases the busy state", async () => {
     const harness = createHarness({
         requireSelection: true,

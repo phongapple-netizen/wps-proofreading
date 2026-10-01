@@ -74,10 +74,13 @@ jobs:
           for ($attempt = 0; $attempt -lt 20; $attempt++) {
             try {
               $response = Invoke-WebRequest -Uri 'http://127.0.0.1:3891/package.json' -UseBasicParsing -TimeoutSec 2
-              if (($response.Content | ConvertFrom-Json).name -eq 'wps-text-proofreading') { $ready = $true; break }
+              $package = $response.Content | ConvertFrom-Json
+              if ($package.name -eq 'wps-text-proofreading' -and $package.version -eq $version) { $ready = $true; break }
             } catch { Start-Sleep -Seconds 1 }
           }
           if (-not $ready) { throw 'Installed local service did not start.' }
+          $guide = (Invoke-WebRequest -Uri 'http://127.0.0.1:3891/ui/taskpane.html' -UseBasicParsing -TimeoutSec 5).Content
+          if ($guide -notmatch 'opencode serve --hostname 127\.0\.0\.1 --port 4096 --cors http://127\.0\.0\.1:3891') { throw 'Updated OpenCode guide is missing from the installed add-on.' }
 
           $uninstaller = Join-Path $env:LOCALAPPDATA 'Programs\WPSProofreading\unins000.exe'
           $uninstall = Start-Process -FilePath $uninstaller -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
@@ -97,6 +100,8 @@ jobs:
           Windows 10/11 x64 测试安装包。双击 EXE 即可为当前用户安装，无需 Node.js 或管理员权限。
 
           安装器会注册 WPS 加载项、启动本机网页服务并设置登录自启；卸载时会移除本加载项和启动项，保留其他 WPS 加载项。需要预先安装 WPS，OpenCode、Ollama 或兼容模型接口仍需另行配置。本包不含 AI 模型。
+
+          本版在插件内加入 OpenCode 服务启动、健康检查和跨域排查步骤，并提高 DeepSeek 思考模型校对请求的输出额度。
 
           当前为未签名测试版，Windows SmartScreen 可能提示未知发布者。真实 WPS 环境中的交互仍需在 Windows 电脑上验证。
 

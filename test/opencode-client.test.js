@@ -32,6 +32,20 @@ test('health check uses the normalized endpoint and returns safe status fields',
   assert.equal(JSON.stringify(health).includes('never-return'), false);
 });
 
+test('connection failures distinguish the service URL, CORS setting, and service password', async () => {
+  await assert.rejects(
+    client.checkHealth({ endpoint: 'http://127.0.0.1:4096' }, async () => { throw new TypeError('Failed to fetch'); }),
+    (error) => error.code === 'NETWORK_ERROR' &&
+      error.message.includes('global/health') && error.message.includes('opencode serve') &&
+      error.message.includes('--cors http://127.0.0.1:3891')
+  );
+  await assert.rejects(
+    client.checkHealth({ endpoint: 'http://127.0.0.1:4096', password: 'test-secret' }, async () => response(401, {})),
+    (error) => error.code === 'HTTP_ERROR' && /服务密码/.test(error.message) &&
+      !error.message.includes('test-secret')
+  );
+});
+
 test('model enumeration supports provider arrays, provider objects, model arrays and default selection', async () => {
   const result = await client.fetchModels(
     { endpoint: 'http://127.0.0.1:4096' },

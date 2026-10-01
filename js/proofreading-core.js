@@ -1085,15 +1085,24 @@
     }
 
     function extractReply(provider, payload) {
+        var choice = provider === "ollama" ? null
+            : payload && payload.choices && payload.choices[0];
+        if (choice && choice.finish_reason === "length") {
+            throw new Error("模型输出达到 token 上限，校对结果可能不完整。请缩小校对范围后重试，或改用非思考模型。");
+        }
         var content = provider === "ollama"
             ? payload && payload.message && payload.message.content
-            : payload && payload.choices && payload.choices[0] && payload.choices[0].message && payload.choices[0].message.content;
+            : choice && choice.message && choice.message.content;
         if (Array.isArray(content)) {
             content = content.map(function (part) {
                 return typeof part === "string" ? part : (part && typeof part.text === "string" ? part.text : "");
             }).join("");
         }
         if (typeof content !== "string" || !content.trim()) {
+            if (choice && choice.message && typeof choice.message.reasoning_content === "string" &&
+                choice.message.reasoning_content.trim()) {
+                throw new Error("模型只返回了推理内容，没有生成校对结果。请缩小校对范围后重试，或改用非思考模型。");
+            }
             throw new Error("模型没有返回校对文本，请检查模型名称和服务响应。");
         }
         return content;
