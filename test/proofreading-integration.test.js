@@ -139,6 +139,7 @@ function createHarness(options = {}) {
         }
     };
     let renderedIssues = [];
+    const renders = [];
     let status = { text: "", tone: "idle" };
     const statuses = [];
     const requests = [];
@@ -200,7 +201,7 @@ function createHarness(options = {}) {
             };
         },
         setProofreadingStatus: (value) => { status = value; statuses.push(value); },
-        setProofreadingIssues: (value) => { renderedIssues = value; },
+        setProofreadingIssues: (value) => { renderedIssues = value; renders.push(value); },
         clearProofreadingIssues: () => { renderedIssues = []; },
         setProofreadingProgress: (percent, label) => { progress.push({ percent, label: label || "" }); },
         setProofreadingBusy: (value) => { busyValue = value === true; },
@@ -275,6 +276,7 @@ function createHarness(options = {}) {
         get sentRequest() { return requests[requests.length - 1]; },
         get requests() { return requests; },
         get renderedIssues() { return renderedIssues; },
+        get renders() { return renders; },
         get status() { return status; },
         get statuses() { return statuses; },
         get records() { return records; },
@@ -1804,6 +1806,132 @@ test("long content is split into batches with real progress reporting", async ()
     assert.equal(harness.busy, false);
 });
 
+async function until(check) {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+        if (check()) return;
+        await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.fail("expected asynchronous proofreading state was not reached");
+}
+
+function progressiveFixture(extra = {}) {
+    const gates = [];
+    const selectedText = [
+        "旧称。" + "甲".repeat(1390) + "错字甲。",
+        "乙".repeat(1390) + "错字乙。"
+    ].join("\n");
+    const harness = createHarness(Object.assign({
+        selectedText,
+        issuesForRequest: ({ requestIndex }) => [{
+            category: "typo", paragraphIndex: requestIndex + 1,
+            original: requestIndex === 0 ? "错字甲" : "错字乙",
+            suggestion: requestIndex === 0 ? "正字甲" : "正字乙",
+            reason: "测试", confidence: 0.95, needsReview: false
+        }],
+        waitForRequest: () => new Promise((resolve) => gates.push(resolve)),
+        rules: [{ id: "progressive-local", name: "名称", group: "名称", type: "replace",
+            pattern: "旧称", replacement: "新称", autoFix: true, priority: 100 }]
+    }, extra));
+    harness.window.AbortController = AbortController;
+    return { harness, gates };
+}
+
+test("local and complete AI batches render progressively with stable IDs and one render per batch", async () => {
+    const { harness, gates } = progressiveFixture();
+    const run = harness.window.runProofreading();
+    await until(() => gates.length === 1);
+    assert.deepEqual(Array.from(harness.renderedIssues, (issue) => issue.original), ["旧称"]);
+    assert.match(harness.status.text, /本地检查完成 · 已发现 1 项/);
+    const localId = harness.renderedIssues[0].id;
+    const rendersBeforeFirst = harness.renders.length;
+
+    gates[0]();
+    await until(() => gates.length === 2);
+    assert.equal(harness.renders.length, rendersBeforeFirst + 1);
+    assert.deepEqual(Array.from(harness.renderedIssues, (issue) => issue.original), ["旧称", "错字甲"]);
+    const firstId = harness.renderedIssues[1].id;
+    assert.equal(harness.renderedIssues[0].id, localId);
+    assert.match(harness.status.text, /AI 校对 \d+% · 已发现 2 项/);
+    assert.equal(await harness.window.applyProofreadingIssue(firstId), false);
+
+    gates[1]();
+    const result = await run;
+    assert.equal(result.accepted, true);
+    assert.equal(harness.renders.length, rendersBeforeFirst + 2);
+    assert.deepEqual(Array.from(harness.renderedIssues, (issue) => issue.original), ["旧称", "错字甲", "错字乙"]);
+    assert.equal(harness.renderedIssues[0].id, localId);
+    assert.equal(harness.renderedIssues[1].id, firstId);
+    assert.equal(new Set(harness.renderedIssues.map((issue) => issue.id)).size, 3);
+});
+
+test("cancellation retains completed findings and discards a late response", async () => {
+    const { harness, gates } = progressiveFixture();
+    const run = harness.window.runProofreading();
+    await until(() => gates.length === 1);
+    gates[0]();
+    await until(() => gates.length === 2);
+    const before = Array.from(harness.renderedIssues, (issue) => issue.id);
+    assert.equal(harness.window.cancelProofreading(), true);
+    gates[1]();
+    const result = await run;
+    assert.equal(result.reason, "cancelled");
+    assert.deepEqual(Array.from(harness.renderedIssues, (issue) => issue.id), before);
+    assert.match(harness.status.text, /校对已取消 · 已保留已完成的 2 项结果/);
+});
+
+test("a restarted run ignores the old run's late batch", async () => {
+    const { harness, gates } = progressiveFixture();
+    const first = harness.window.runProofreading();
+    await until(() => gates.length === 1);
+    const second = harness.window.runProofreading(true);
+    await until(() => gates.length === 2);
+    gates[1]();
+    await until(() => gates.length === 3);
+    gates[2]();
+    const newResult = await second;
+    assert.equal(newResult.accepted, true);
+    const ids = Array.from(harness.renderedIssues, (issue) => issue.id);
+    gates[0]();
+    assert.equal((await first).reason, "cancelled");
+    assert.deepEqual(Array.from(harness.renderedIssues, (issue) => issue.id), ids);
+});
+
+test("a later batch failure leaves earlier rendered findings intact", async () => {
+    const { harness, gates } = progressiveFixture({
+        issuesForRequest: ({ requestIndex }) => {
+            if (requestIndex === 1) throw new Error("第二批失败");
+            return [{ category: "typo", paragraphIndex: 1, original: "错字甲",
+                suggestion: "正字甲", reason: "测试", confidence: 0.95, needsReview: false }];
+        }
+    });
+    const run = harness.window.runProofreading();
+    await until(() => gates.length === 1);
+    gates[0]();
+    await until(() => gates.length === 2);
+    const before = Array.from(harness.renderedIssues, (issue) => issue.id);
+    gates[1]();
+    assert.equal((await run).reason, "error");
+    assert.deepEqual(Array.from(harness.renderedIssues, (issue) => issue.id), before);
+    assert.match(harness.status.text, /校对中断 · 已保留已完成的 2 项结果/);
+});
+
+test("more than 100 incrementally rendered findings have distinct stable IDs", async () => {
+    const selectedText = Array.from({ length: 120 }, (_, index) =>
+        "第" + index + "条错字。" + "甲".repeat(18)).join("\n");
+    const harness = createHarness({ selectedText, issues: [], rules: [{
+        id: "many-local", name: "批量本地规则", group: "校对", type: "replace",
+        pattern: "错字", replacement: "正字", autoFix: true, priority: 100
+    }] });
+    const result = await harness.window.runProofreading();
+    assert.equal(result.accepted, true);
+    assert.equal(harness.renderedIssues.length, 120);
+    assert.equal(new Set(Array.from(harness.renderedIssues, (issue) => issue.id)).size, 120);
+    const firstRender = harness.renders.find((issues) => issues.length === 120);
+    assert.ok(firstRender);
+    assert.deepEqual(Array.from(firstRender, (issue) => issue.id),
+        Array.from(harness.renderedIssues, (issue) => issue.id));
+});
+
 
 test("first-pass progress is weighted by processed characters rather than batch count", async () => {
     const selectedText = [
@@ -1901,6 +2029,29 @@ test("multi-batch proofreading runs a second consistency pass and keeps its find
     assert.equal(applyAll.applied, 0);
     assert.equal(applyAll.skipped, 1);
     assert.equal(harness.readDocument(), before);
+});
+
+test("consistency review keeps the earlier ID when it repeats the same finding", async () => {
+    const first = "甲市综协办负责统筹。" + "第一部分工作内容。".repeat(180);
+    const second = "甲市综合协调办公室负责统筹。" + "第二部分工作内容。".repeat(180);
+    const finding = { category: "consistency", paragraphIndex: 2,
+        original: "甲市综合协调办公室", suggestion: "甲市综协办",
+        reason: "称谓不一致", confidence: 0.95, needsReview: true };
+    const harness = createHarness({
+        selectedText: first + "\n" + second,
+        issuesForRequest: ({ body, requestIndex }) => {
+            const prompt = body && body.messages && body.messages[0] && body.messages[0].content || "";
+            return prompt.includes("第二遍跨段落一致性复核") || requestIndex === 1
+                ? [finding] : [];
+        }
+    });
+    const result = await harness.window.runProofreading();
+    assert.equal(result.consistencyCompleted, true);
+    assert.equal(harness.renderedIssues.length, 1);
+    const firstPass = harness.renders.find((issues) => issues.length === 1);
+    assert.ok(firstPass);
+    assert.equal(harness.renderedIssues[0].id, firstPass[0].id);
+    assert.equal(harness.renders.filter((issues) => issues.length === 1).length >= 2, true);
 });
 
 test("consistency-pass failure keeps completed first-pass findings", async () => {
