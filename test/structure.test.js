@@ -49,6 +49,21 @@ function makeTaskPaneElement(tag) {
   };
   node.setAttribute = (name, value) => { node.attributes[name] = String(value); };
   node.getAttribute = (name) => node.attributes[name] || null;
+  node.querySelectorAll = (selector) => {
+    const found = [];
+    (function visit(current) {
+      for (const child of current.children) {
+        if (selector === '.issue-card[data-issue-id]' &&
+          child.className.split(/\s+/).includes('issue-card') && child.getAttribute('data-issue-id')) {
+          found.push(child);
+        }
+        visit(child);
+      }
+    })(node);
+    return found;
+  };
+  node.querySelector = (selector) => findNode(node, (child) => child !== node &&
+    child.className.split(/\s+/).includes(selector.slice(1)));
   node.classList = {
     toggle(name, enabled) {
       const names = node.className.split(/\s+/).filter(Boolean);
@@ -894,6 +909,43 @@ test('a new proofreading run resets filter and tab while preserving session hist
   elements['tab-history'].fire('click');
   assert.equal(elements['proofreading-history'].children.length, 1);
   assert.equal(elements['proofreading-history'].hidden, false);
+});
+
+test('incremental cards keep filter, tab, scroll, and expanded analysis while writes stay disabled', () => {
+  const { win, elements, calls } = createResultHarness();
+  const list = elements['proofreading-issues'];
+  const first = { id: 'stable-1', category: 'typo', original: '错字', suggestion: '正字',
+    reason: '测试分析', status: 'pending', autoFixable: true, confidence: 0.95 };
+  win.setProofreadingBusy(true);
+  win.setProofreadingIssues([first]);
+  const originalCard = list.children[0];
+  const analysis = findNode(originalCard, (node) => node.className === 'issue-analysis');
+  analysis.open = true;
+  list.scrollTop = 240;
+  originalCard.fire('click');
+  assert.deepEqual(calls.at(-1), ['locate', 'stable-1']);
+  assert.equal(issueActions(originalCard).children[0].disabled, true);
+  assert.equal(elements['apply-all'].disabled, true);
+
+  win.setProofreadingIssues([first, { id: 'stable-2', category: 'grammar', original: '病句',
+    suggestion: '通顺', status: 'pending' }]);
+  assert.equal(list.scrollTop, 240);
+  assert.equal(findNode(list.children[0], (node) => node.className === 'issue-analysis').open, true);
+  elements['issue-filter'].value = 'typo';
+  elements['issue-filter'].fire('change');
+  win.setProofreadingIssues([first, { id: 'stable-2', category: 'grammar', original: '病句',
+    suggestion: '通顺', status: 'pending' }, { id: 'stable-3', category: 'typo',
+    original: '误字', suggestion: '正字', status: 'pending' }]);
+  assert.equal(elements['issue-filter'].value, 'typo');
+  assert.equal(list.children.length, 2);
+  elements['tab-history'].fire('click');
+  win.setProofreadingIssues([first, { id: 'stable-3', category: 'typo',
+    original: '误字', suggestion: '正字', status: 'pending' }]);
+  assert.equal(elements['tab-history'].attributes['aria-selected'], 'true');
+  win.setProofreadingBusy(false);
+  elements['tab-issues'].fire('click');
+  assert.equal(issueActions(list.children[0]).children[0].disabled, false);
+  assert.equal(elements['apply-all'].disabled, false);
 });
 
 test('result summaries count pending review, processed, stale, and strict safe-format actions', () => {

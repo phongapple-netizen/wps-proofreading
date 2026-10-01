@@ -13,6 +13,7 @@
     var issueActionBusy = false;
     var waitingForFullDocumentConfirmation = false;
     var runCounter = 0;
+    var runAttemptCounter = 0;
     var actionCounter = 0;
     var ANCHOR_CHARACTERS = 40;
 
@@ -800,6 +801,19 @@
         }
     }
 
+    function resultCountLabel() {
+        return currentIssues.length ? "已发现 " + currentIssues.length + " 项" : "暂未发现问题";
+    }
+
+    function ensureRunActive(controller, runId, attempt) {
+        if (attempt !== runAttemptCounter || controller !== currentController || runId !== runCounter ||
+            (controller && controller.signal && controller.signal.aborted)) {
+            var error = new Error("已取消校对。");
+            error.name = "AbortError";
+            throw error;
+        }
+    }
+
     function batchCharacterCount(batch) {
         return (batch || []).reduce(function (total, paragraph) {
             return total + text(paragraph && paragraph.text).length;
@@ -832,7 +846,9 @@
         if (ruleIsReminder) {
             combined = Object.assign({}, aiIssue, {
                 origin: "rule+ai",
+                ruleId: ruleIssue.ruleId || "",
                 ruleName: ruleIssue.ruleName || "",
+                ruleGroup: ruleIssue.ruleGroup || "",
                 ruleSource: ruleIssue.ruleSource || "",
                 ruleType: ruleIssue.ruleType || "",
                 severity: ruleIssue.severity || "",
@@ -863,11 +879,24 @@
         });
     }
 
+    function stableIssueId(issue) {
+        var source = issueOrigin(issue).indexOf("rule") >= 0 ? "rule" : "ai";
+        var identity = [runCounter, source, issue.start, issue.end, issue.original,
+            source === "rule" ? (issue.ruleId || issue.ruleName || "") : (issue.action || ""),
+            source === "rule" ? "" : (issue.suggestion || "")].join("\u0000");
+        var hash = 2166136261;
+        for (var i = 0; i < identity.length; i += 1) {
+            hash ^= identity.charCodeAt(i);
+            hash = Math.imul(hash, 16777619);
+        }
+        return "issue-" + runCounter + "-" + issue.start + "-" + (hash >>> 0).toString(36);
+    }
+
     function mergeMappedIssues(list) {
         var input = (list || []).slice().filter(function (issue) {
             return issue && Number.isFinite(Number(issue.start)) && Number.isFinite(Number(issue.end));
-        }).map(function (issue) {
-            return Object.assign({ origin: issueOrigin(issue) }, issue);
+        }).map(function (issue, index) {
+            return Object.assign({ origin: issueOrigin(issue), insertionOrder: index }, issue);
         }).sort(function (left, right) {
             return left.start - right.start ||
                 left.end - right.end ||
@@ -903,8 +932,16 @@
                 return;
             }
 
+            if (sameOriginal && existing.suggestion === issue.suggestion &&
+                existing.action === issue.action) return;
+
             var existingRule = existingOrigin.indexOf("rule") >= 0;
             var incomingRule = incomingOrigin.indexOf("rule") >= 0;
+            if (sameOriginal && !existingRule && !incomingRule &&
+                (existing.suggestion !== issue.suggestion || existing.action !== issue.action)) {
+                kept.push(issue);
+                return;
+            }
             var existingPriority = Number(existing.priority) || 0;
             var incomingPriority = Number(issue.priority) || 0;
 
@@ -921,10 +958,14 @@
         });
 
         kept.sort(function (left, right) {
-            return left.start - right.start || left.end - right.end;
+            var leftRule = issueOrigin(left).indexOf("rule") >= 0;
+            var rightRule = issueOrigin(right).indexOf("rule") >= 0;
+            return left.start - right.start || left.end - right.end ||
+                Number(rightRule) - Number(leftRule) ||
+                left.insertionOrder - right.insertionOrder;
         });
-        kept.forEach(function (issue, index) {
-            issue.id = "issue-" + (index + 1) + "-" + issue.start;
+        kept.forEach(function (issue) {
+            issue.id = stableIssueId(issue);
         });
         return kept;
     }
@@ -1017,13 +1058,22 @@
             provider === "ollama" ? "Ollama" : "兼容接口";
     }
 
-    async function runProofreading() {
+    async function runProofreading(restart) {
         if (issueActionBusy) return { accepted: false, reason: "action-busy" };
-        if (busy) return { accepted: false, reason: "busy" };
+        if (busy && restart !== true) return { accepted: false, reason: "busy" };
         if (typeof root.getTaskBusyState === "function" && root.getTaskBusyState().rewrite) {
             return { accepted: false, reason: "rewrite-busy" };
         }
+        if (busy && currentController) {
+            currentController.abort();
+            if (waitingForFullDocumentConfirmation &&
+                typeof root.dismissFullDocumentConfirmation === "function") {
+                root.dismissFullDocumentConfirmation();
+            }
+        }
         currentController = makeAbortController();
+        var runController = currentController;
+        var runAttempt = ++runAttemptCounter;
         setBusy(true);
 
         var snapshot = null;
@@ -1032,6 +1082,10 @@
         try {
             if (root.WpsRulesReady && typeof root.WpsRulesReady.then === "function") {
                 await root.WpsRulesReady;
+            }
+            if (runAttempt !== runAttemptCounter ||
+                (runController && runController.signal && runController.signal.aborted)) {
+                return { accepted: false, reason: "cancelled" };
             }
             snapshot = captureSnapshot();
             var options = validateModelOptions(modelOptions());
@@ -1049,6 +1103,10 @@
                     providerLabel: providerLabel,
                     model: options.model || ""
                 });
+                if (runAttempt !== runAttemptCounter ||
+                    (runController && runController.signal && runController.signal.aborted)) {
+                    return { accepted: false, reason: "cancelled" };
+                }
                 waitingForFullDocumentConfirmation = false;
                 if (confirmed !== true) {
                     setStatus("已取消全文校对，文档内容没有发送。", "warning");
@@ -1064,6 +1122,7 @@
             currentSnapshot = null;
             currentIssues = [];
             runCounter += 1;
+            var activeRunId = runCounter;
             if (typeof root.beginProofreadingRun === "function") {
                 root.beginProofreadingRun();
             } else {
@@ -1086,15 +1145,9 @@
             currentSnapshot = snapshot;
             currentIssues = mergeMappedIssues(collected);
             viewIssues();
-            var scanParts = [];
-            if (localRuleIssues.length) scanParts.push("确定性规则 " + localRuleIssues.length + " 项");
-            if (aiReviewCandidates.length) scanParts.push("AI核查点 " + aiReviewCandidates.length + " 处");
-            setStatus(scanParts.length
-                ? "规则扫描完成：" + scanParts.join("，") + "；AI 正在结合上下文继续校对…"
-                : "规则扫描完成，未发现规则命中；AI 正在继续校对…", "working");
-            reportProgress(2, aiReviewCandidates.length
-                ? "规则扫描完成 · " + aiReviewCandidates.length + " 处待 AI 核查"
-                : "规则扫描完成 · AI 校对准备中");
+            setStatus("规则扫描完成 · 本地检查完成 · " + resultCountLabel() +
+                (aiReviewCandidates.length ? " · AI核查点 " + aiReviewCandidates.length + " 处" : ""), "working");
+            reportProgress(0, "本地检查完成 · " + resultCountLabel());
 
             var paragraphs = root.WpsProofreadingCore.splitIntoParagraphs(snapshot.selectedText);
             if (!paragraphs.length) {
@@ -1128,6 +1181,7 @@
                     aiReviewContext: currentAiReviewContext
                 });
                 var response = await requestProofreadingModel(options, prompt);
+                ensureRunActive(runController, activeRunId, runAttempt);
                 if (!currentDocumentMatches(snapshot)) {
                     currentSnapshot = null;
                     currentIssues = [];
@@ -1154,7 +1208,9 @@
                 }
                 batchLabel += " · 已处理 " + completedFirstPassCharacters +
                     "/" + totalFirstPassCharacters + " 字";
-                reportProgress(firstPassPercent, batchLabel);
+                setStatus("AI 校对 " + firstPassPercent + "% · " + resultCountLabel(), "working");
+                reportProgress(firstPassPercent, "AI 校对 " + firstPassPercent + "% · " +
+                    resultCountLabel() + " · " + batchLabel);
             }
 
             if (runConsistencyPass) {
@@ -1163,13 +1219,14 @@
                     consistencyAbortError.name = "AbortError";
                     throw consistencyAbortError;
                 }
-                setStatus("第一遍逐段校对已完成，正在进行跨段落一致性复核…", "working");
-                reportProgress(firstPassProgressCeiling, "正文校对完成 · 全文一致性复核中");
+                setStatus("正在进行全文一致性复核 · " + resultCountLabel(), "working");
+                reportProgress(firstPassProgressCeiling, "全文一致性复核中 · " + resultCountLabel());
                 try {
                     for (var candidateBatchIndex = 0; candidateBatchIndex < consistencyBatches.length; candidateBatchIndex += 1) {
                         var consistencyBatch = consistencyBatches[candidateBatchIndex];
                         var consistencyPrompt = root.WpsProofreadingCore.buildConsistencyPrompt(consistencyBatch);
                         var consistencyResponse = await requestProofreadingModel(options, consistencyPrompt);
+                        ensureRunActive(runController, activeRunId, runAttempt);
                         if (!currentDocumentMatches(snapshot)) {
                             currentSnapshot = null;
                             currentIssues = [];
@@ -1187,9 +1244,11 @@
                         currentIssues = mergeMappedIssues(collected);
                         currentSnapshot = snapshot;
                         viewIssues();
+                        setStatus("正在进行全文一致性复核 · " + resultCountLabel(), "working");
                         reportProgress(firstPassProgressCeiling + Math.round(
                             ((candidateBatchIndex + 1) / consistencyBatches.length) * (100 - firstPassProgressCeiling)),
-                            "一致性复核 · 第 " + (candidateBatchIndex + 1) + "/" + consistencyBatches.length + " 批候选组");
+                            "全文一致性复核 · " + resultCountLabel() + " · 第 " +
+                            (candidateBatchIndex + 1) + "/" + consistencyBatches.length + " 批候选组");
                     }
                     consistencyCompleted = true;
                     reportProgress(100, "全文一致性复核完成");
@@ -1206,10 +1265,19 @@
                 }
             }
 
+            ensureRunActive(runController, activeRunId, runAttempt);
+            if (!currentDocumentMatches(snapshot)) {
+                currentSnapshot = null;
+                currentIssues = [];
+                discarded = true;
+                viewIssues();
+                throw new Error("校对期间" + scopeLabel + "内容已变化，结果已丢弃。请重新校对。");
+            }
             currentIssues = mergeMappedIssues(collected);
             currentSnapshot = snapshot;
-            viewIssues();
-            reportProgress(100, "完成");
+            reportProgress(100, currentIssues.length
+                ? "校对完成 · 共发现 " + currentIssues.length + " 项"
+                : "校对完成 · 未发现明显问题");
             var consistencyText = runConsistencyPass
                 ? (consistencyCompleted
                     ? "；已复核 " + consistencyCandidates.length + " 组全文一致性候选"
@@ -1217,10 +1285,10 @@
                 : "";
             var finalTone = consistencyWarning ? "warning" : "success";
             setStatus(currentIssues.length
-                ? "校对完成，共发现 " + currentIssues.length + " 项（" +
+                ? "校对完成 · 共发现 " + currentIssues.length + " 项（" +
                     batches.length + " 批" + consistencyText + "）。点击问题卡片可定位，再选择修正或忽略。" +
                     (consistencyWarning ? " " + consistencyWarning : "")
-                : "校对完成，没有发现可精确定位的问题" + consistencyText + "。" +
+                : "校对完成 · 未发现明显问题" + consistencyText + "。" +
                     (consistencyWarning ? " " + consistencyWarning : ""), finalTone);
             return {
                 accepted: true,
@@ -1231,32 +1299,35 @@
                 consistencyWarning: consistencyWarning
             };
         } catch (error) {
-            var cancelled = currentController && currentController.signal && currentController.signal.aborted;
-            var partial = collected.length > 0 && !discarded && snapshot;
+            if (runAttempt !== runAttemptCounter || currentController !== runController) {
+                return { accepted: false, reason: "cancelled" };
+            }
+            var cancelled = runController && runController.signal && runController.signal.aborted;
+            var partial = collected.length > 0 && !discarded && snapshot &&
+                currentDocumentMatches(snapshot);
             if (partial) {
                 currentIssues = mergeMappedIssues(collected);
                 currentSnapshot = snapshot;
                 viewIssues();
             }
-            reportProgress(0, "");
             if (cancelled || (error && error.name === "AbortError")) {
-                setStatus(partial
-                    ? "已取消校对；已完成的部分结果仍可定位和应用，文档没有修改。"
-                    : "已取消校对，文档没有修改。", "warning");
+                setStatus("校对已取消 · 已保留已完成的 " + currentIssues.length + " 项结果", "warning");
                 return { accepted: false, reason: "cancelled" };
             }
             setStatus(partial
-                ? "校对中断：" + (error && error.message ? error.message : "请重试。") +
-                    "已完成的部分结果仍可使用。"
+                ? "校对中断 · 已保留已完成的 " + currentIssues.length + " 项结果。" +
+                    (error && error.message ? error.message : "请重试。")
                 : (error && error.message ? error.message : "校对失败，请重试。"), "error");
             return { accepted: false, reason: "error" };
         } finally {
-            waitingForFullDocumentConfirmation = false;
-            if (typeof root.dismissFullDocumentConfirmation === "function") {
-                root.dismissFullDocumentConfirmation();
+            if (runAttempt === runAttemptCounter && currentController === runController) {
+                waitingForFullDocumentConfirmation = false;
+                if (typeof root.dismissFullDocumentConfirmation === "function") {
+                    root.dismissFullDocumentConfirmation();
+                }
+                currentController = null;
+                setBusy(false);
             }
-            currentController = null;
-            setBusy(false);
         }
     }
 
@@ -1267,12 +1338,16 @@
             root.dismissFullDocumentConfirmation();
             return true;
         }
-        if (!busy || !currentController) {
+        if (!busy) {
             setStatus("当前没有正在进行的校对。", "warning");
             return false;
         }
-        currentController.abort();
-        setStatus("正在取消校对…", "warning");
+        if (currentController) currentController.abort();
+        else {
+            runAttemptCounter += 1;
+            setBusy(false);
+        }
+        setStatus("校对已取消 · 已保留已完成的 " + currentIssues.length + " 项结果", "warning");
         return true;
     }
 
@@ -1315,7 +1390,7 @@
     }
 
     function locateProofreadingIssue(issueId) {
-        if (issueActionUnavailable()) return false;
+        if (issueActionBusy) return false;
         var perf = startActionPerf("locate");
         var outcome = "rejected";
         setIssueActionBusy(true);

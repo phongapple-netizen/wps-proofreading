@@ -105,8 +105,9 @@
         if (runButton) runButton.disabled = state.busy || state.actionBusy;
         if (applyAllButton) {
             applyAllButton.disabled = state.busy || state.actionBusy || !autoFixableCount();
+            if (state.busy) applyAllButton.title = "校对完成后可修改正文";
         }
-        if (rerunButton) rerunButton.disabled = state.busy || state.actionBusy;
+        if (rerunButton) rerunButton.disabled = state.actionBusy;
         renderedIssueActionButtons.forEach(function (button) {
             button.disabled = state.actionBusy || button._proofreadingActionDisabled === true;
         });
@@ -204,7 +205,7 @@
         bar.hidden = false;
         if (fill) fill.style.width = value + "%";
         if (labelEl) labelEl.textContent = label
-            ? label + " · " + value + "%"
+            ? label + (/\d+%/.test(label) || value === 0 ? "" : " · " + value + "%")
             : value + "%";
     }
 
@@ -384,9 +385,9 @@
         if (applyAllButton) {
             applyAllButton.textContent = "修正安全格式项（" + autoFixable + "）";
             applyAllButton.disabled = state.busy || state.actionBusy || autoFixable === 0;
-            applyAllButton.title = pendingCount() > autoFixableCount()
-                ? "仅自动修正内置低风险标点格式规则"
-                : "";
+            applyAllButton.title = state.busy ? "校对完成后可修改正文" :
+                pendingCount() > autoFixableCount()
+                    ? "仅自动修正内置低风险标点格式规则" : "";
         }
     }
 
@@ -545,6 +546,8 @@
         button.textContent = label;
         button._proofreadingActionDisabled = disabled === true;
         button.disabled = state.actionBusy || button._proofreadingActionDisabled;
+        if (state.busy && (callbackName === "applyProofreadingIssue" ||
+            callbackName === "undoProofreadingIssue")) button.title = "校对完成后可修改正文";
         renderedIssueActionButtons.push(button);
         button.setAttribute("data-issue-id", issue.id);
         if (!button._proofreadingActionDisabled) {
@@ -737,6 +740,14 @@
         }
 
         var shown = visibleIssues();
+        var previousScrollTop = list.scrollTop;
+        var expanded = Object.create(null);
+        var processedWasOpen = !!(list.querySelector &&
+            list.querySelector(".processed-issues") && list.querySelector(".processed-issues").open);
+        Array.prototype.forEach.call(list.querySelectorAll ? list.querySelectorAll(".issue-card[data-issue-id]") : [], function (card) {
+            var analysis = card.querySelector && card.querySelector(".issue-analysis");
+            if (analysis && analysis.open) expanded[card.getAttribute("data-issue-id")] = true;
+        });
         renderedIssueActionButtons = [];
         activeIssueMenu = null;
         list.textContent = "";
@@ -757,7 +768,7 @@
         if (processed.length) {
             processedDetails = root.document.createElement("details");
             processedDetails.className = "processed-issues";
-            processedDetails.open = false;
+            processedDetails.open = processedWasOpen;
             var processedSummary = root.document.createElement("summary");
             processedSummary.textContent = "已处理（" + processed.length + "）";
             processedDetails.appendChild(processedSummary);
@@ -771,8 +782,9 @@
             var reviewOnly = isReviewOnlyIssue(issue);
             var deleteIssue = isDeleteIssue(issue);
             var card = root.document.createElement("article");
+            card.setAttribute("data-issue-id", issue.id);
             card.className = "issue-card" + ((issue.needsReview || reviewOnly) ? " is-review" : "") + (pending && !state.busy ? " is-locatable" : "");
-            if (pending && !state.busy) {
+            if (pending) {
                 card.addEventListener("click", function () {
                     if (state.actionBusy) return;
                     callAction("locateProofreadingIssue", issue.id, "当前操作未能完成。");
@@ -870,6 +882,7 @@
             if (issue.reason) {
                 var analysis = root.document.createElement("details");
                 analysis.className = "issue-analysis";
+                analysis.open = expanded[issue.id] === true;
                 analysis.addEventListener("click", function (event) {
                     if (event && typeof event.stopPropagation === "function") event.stopPropagation();
                 });
@@ -902,6 +915,7 @@
         if (processedDetails) list.appendChild(processedDetails);
 
         list.hidden = false;
+        list.scrollTop = previousScrollTop;
         if (emptyState) emptyState.hidden = true;
         return state.issues.slice();
     }
@@ -917,12 +931,12 @@
         return { accepted: false, reason: "integration-not-bound" };
     }
 
-    function callRunProofreading() {
+    function callRunProofreading(restart) {
         var callback = typeof root.runProofreading === "function"
             ? root.runProofreading
             : defaultRunProofreading;
         try {
-            var result = callback();
+            var result = callback(restart === true);
             if (result && typeof result.then === "function") {
                 result.catch(function (error) {
                     setProofreadingStatus(error && error.message ? error.message : "校对失败", "error");
@@ -1364,7 +1378,7 @@
             });
         }
         if (rerunButton) {
-            rerunButton.addEventListener("click", callRunProofreading);
+            rerunButton.addEventListener("click", function () { callRunProofreading(true); });
         }
         updateCount();
     }
