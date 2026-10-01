@@ -191,9 +191,31 @@ func managerForStart(t *testing.T, state func() (bool, bool, string), start func
 		if err := start(); err != nil {
 			return nil, err
 		}
-		return nil, nil
+		executable, err := os.Executable()
+		if err != nil {
+			return nil, err
+		}
+		cmd.Path, cmd.Args = executable, []string{executable, "-test.run=^TestOpenCodeHelperProcess$"}
+		cmd.Env = append(os.Environ(), "WPS_OPENCODE_TEST_HELPER=1")
+		if err := cmd.Start(); err != nil {
+			return nil, err
+		}
+		return cmd.Process, nil
 	}
+	t.Cleanup(func() {
+		m.mu.Lock()
+		run := m.run
+		m.mu.Unlock()
+		m.stopManaged(run)
+	})
 	return m, candidate
+}
+
+func TestOpenCodeHelperProcess(t *testing.T) {
+	if os.Getenv("WPS_OPENCODE_TEST_HELPER") == "1" {
+		time.Sleep(time.Minute)
+		os.Exit(0)
+	}
 }
 
 func TestOpenCodeStartLifecycle(t *testing.T) {
@@ -221,10 +243,22 @@ func TestOpenCodeStartLifecycle(t *testing.T) {
 		}
 	})
 	t.Run("startup timeout", func(t *testing.T) {
-		m, _ := managerForStart(t, func() (bool, bool, string) { return false, false, "" }, func() error { return nil })
+		launches := 0
+		m, _ := managerForStart(t, func() (bool, bool, string) { return false, false, "" }, func() error { launches++; return nil })
+		m.probe = func() (bool, bool, string) { return launches > 1, m.isManaged(), "v-test" }
+		var started *exec.Cmd
+		launch := m.start
+		m.start = func(cmd *exec.Cmd) (*os.Process, error) { started = cmd; return launch(cmd) }
 		got := m.startServer()
-		if got.State != "error" {
+		if got.State != "error" || got.Managed || m.run != nil || started.ProcessState == nil {
 			t.Fatalf("state %#v", got)
+		}
+		logPath := filepath.Join(os.Getenv("LOCALAPPDATA"), "WPSProofreading", "opencode.log")
+		if err := os.Remove(logPath); err != nil {
+			t.Fatalf("timeout left the log open: %v", err)
+		}
+		if retry := m.startServer(); retry.State != "ready" || !retry.Managed || launches != 2 {
+			t.Fatalf("retry did not launch a fresh process: %#v launches=%d", retry, launches)
 		}
 	})
 	t.Run("occupied port", func(t *testing.T) {
@@ -238,10 +272,33 @@ func TestOpenCodeStartLifecycle(t *testing.T) {
 	t.Run("already managed", func(t *testing.T) {
 		calls := 0
 		m, _ := managerForStart(t, func() (bool, bool, string) { calls++; return calls > 1, false, "" }, func() error { return nil })
-		m.managed = true
+		if got := m.startServer(); got.State != "ready" {
+			t.Fatalf("initial start: %#v", got)
+		}
+		launches := 0
+		m.start = func(*exec.Cmd) (*os.Process, error) { launches++; return nil, errors.New("must not relaunch") }
+		calls = 0
+		m.probe = func() (bool, bool, string) { calls++; return calls > 2, true, "v-test" }
 		got := m.startServer()
-		if got.State != "ready" || !got.Managed {
+		if got.State != "ready" || !got.Managed || launches != 0 {
 			t.Fatalf("state %#v", got)
+		}
+	})
+	t.Run("bound port waits for health after launch", func(t *testing.T) {
+		calls, launches := 0, 0
+		m, _ := managerForStart(t, func() (bool, bool, string) { calls++; return calls > 3, calls > 1, "v-test" }, func() error { launches++; return nil })
+		if got := m.startServer(); got.State != "ready" || !got.Managed || launches != 1 {
+			t.Fatalf("startup listener misclassified: %#v launches=%d", got, launches)
+		}
+	})
+	t.Run("nil successful launch is rejected and closes log", func(t *testing.T) {
+		m, _ := managerForStart(t, func() (bool, bool, string) { return false, false, "" }, func() error { return nil })
+		m.start = func(*exec.Cmd) (*os.Process, error) { return nil, nil }
+		if got := m.startServer(); got.State != "error" || got.Managed || m.run != nil {
+			t.Fatalf("invalid launch accepted: %#v", got)
+		}
+		if err := os.Remove(filepath.Join(os.Getenv("LOCALAPPDATA"), "WPSProofreading", "opencode.log")); err != nil {
+			t.Fatalf("nil launch left the log open: %v", err)
 		}
 	})
 	t.Run("not installed", func(t *testing.T) {

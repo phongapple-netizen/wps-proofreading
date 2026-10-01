@@ -161,6 +161,9 @@ func (w *boundedLog) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	n := len(p)
+	if w.file == nil {
+		return n, nil
+	}
 	if w.size >= 1024*1024 {
 		return n, nil
 	}
@@ -175,10 +178,25 @@ func (w *boundedLog) Write(p []byte) (int, error) {
 	return n, nil
 }
 
+func (w *boundedLog) Close() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.file != nil {
+		_ = w.file.Close()
+		w.file = nil
+	}
+}
+
+type openCodeRun struct {
+	process *os.Process
+	output  *boundedLog
+	done    chan struct{}
+}
+
 type openCodeManager struct {
 	mu             sync.Mutex
 	managed        bool
-	process        *os.Process
+	run            *openCodeRun
 	client         *http.Client
 	healthURL      string
 	portAddress    string
@@ -341,7 +359,7 @@ func (m *openCodeManager) status() opencodeState {
 
 func (m *openCodeManager) startServer() opencodeState {
 	state := m.status()
-	if state.State == "ready" || state.State == "port_conflict" || state.State == "missing" {
+	if state.State == "ready" || (state.State == "port_conflict" && !state.Managed) || state.State == "missing" {
 		return state
 	}
 	discover := m.discover
@@ -355,8 +373,9 @@ func (m *openCodeManager) startServer() opencodeState {
 	}
 	m.mu.Lock()
 	if m.managed {
+		run := m.run
 		m.mu.Unlock()
-		return m.waitReady(c)
+		return m.waitReady(c, run)
 	}
 	cmd, err := commandFor(c, "serve", "--hostname", "127.0.0.1", "--port", "4096", "--cors", "http://127.0.0.1:3891")
 	if err != nil {
@@ -378,30 +397,52 @@ func (m *openCodeManager) startServer() opencodeState {
 	}
 	output := &boundedLog{file: logFile}
 	cmd.Stdout, cmd.Stderr = output, output
+	cmd.WaitDelay = time.Second
 	process, err := m.start(cmd)
-	if err != nil {
-		_ = logFile.Close()
+	if err != nil || process == nil {
+		output.Close()
 		m.mu.Unlock()
 		state.State = "error"
 		return state
 	}
-	m.process, m.managed = process, true
-	if process != nil {
-		go func() {
-			_ = cmd.Wait()
-			_ = logFile.Close()
-			m.mu.Lock()
-			if m.process == process {
-				m.managed, m.process = false, nil
-			}
-			m.mu.Unlock()
-		}()
-	}
+	run := &openCodeRun{process: process, output: output, done: make(chan struct{})}
+	m.run, m.managed = run, true
+	go func() {
+		_ = cmd.Wait()
+		output.Close()
+		close(run.done)
+		m.mu.Lock()
+		if m.run == run {
+			m.managed, m.run = false, nil
+		}
+		m.mu.Unlock()
+	}()
 	m.mu.Unlock()
-	return m.waitReady(c)
+	return m.waitReady(c, run)
 }
 
-func (m *openCodeManager) waitReady(c opencodeCandidate) opencodeState {
+func (m *openCodeManager) stopManaged(run *openCodeRun) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if run == nil || m.run != run {
+		return
+	}
+	// Only terminate the exact process tree started by this manager. Wait closes
+	// done before acquiring mu, so cleanup can finish before another retry starts.
+	select {
+	case <-run.done:
+	default:
+		_ = killManagedProcess(run.process)
+	}
+	select {
+	case <-run.done:
+	case <-time.After(2 * time.Second):
+	}
+	run.output.Close()
+	m.managed, m.run = false, nil
+}
+
+func (m *openCodeManager) waitReady(c opencodeCandidate, run *openCodeRun) opencodeState {
 	versionFn := m.getVersion
 	if versionFn == nil {
 		versionFn = m.version
@@ -415,13 +456,13 @@ func (m *openCodeManager) waitReady(c opencodeCandidate) opencodeState {
 	}
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if healthy, occupied, version := m.health(); healthy {
+		if healthy, _, version := m.health(); healthy {
 			return opencodeState{State: "ready", Found: true, Version: firstNonempty(version, versionFn(c)), Managed: m.isManaged()}
-		} else if occupied {
-			return opencodeState{State: "port_conflict", Found: true, Version: versionFn(c), Managed: m.isManaged()}
 		}
+		// Our process may bind the port before its health endpoint is ready.
 		time.Sleep(interval)
 	}
+	m.stopManaged(run)
 	return opencodeState{State: "error", Found: true, Version: versionFn(c), Managed: m.isManaged()}
 }
 func firstNonempty(a, b string) string {

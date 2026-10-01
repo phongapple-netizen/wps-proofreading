@@ -230,9 +230,61 @@ private enum LoginService {
 private enum NativeOpenCode {
     enum Health: Equatable { case ready, absent, conflict }
     struct HealthResult { let state: Health; let version: String }
+    fileprivate final class ManagedRun {
+        let process: Process
+        let pipe: Pipe
+        let terminated: DispatchSemaphore
+        let readerFinished: DispatchSemaphore
+        let closeLog: () -> Void
+
+        init(process: Process, pipe: Pipe, terminated: DispatchSemaphore,
+             readerFinished: DispatchSemaphore, closeLog: @escaping () -> Void) {
+            self.process = process
+            self.pipe = pipe
+            self.terminated = terminated
+            self.readerFinished = readerFinished
+            self.closeLog = closeLog
+        }
+    }
     private static let lock = NSLock()
-    private static var child: Process?
+    fileprivate static var child: ManagedRun?
     private static let logLimit = 1024 * 1024
+
+    fileprivate static func shouldClearChild(_ run: ManagedRun, current: ManagedRun?) -> Bool {
+        current === run
+    }
+
+    fileprivate static func stopManagedChild(_ run: ManagedRun) {
+        guard shouldClearChild(run, current: child) else { return }
+        let process = run.process
+        if process.isRunning {
+            process.terminate()
+            if run.terminated.wait(timeout: .now() + 0.5) == .timedOut && process.isRunning {
+                _ = Darwin.kill(process.processIdentifier, SIGKILL)
+                _ = run.terminated.wait(timeout: .now() + 1)
+            }
+        }
+
+        // A descendant may inherit stdout and keep the reader alive after the managed
+        // process exits. Close our pipe ends and log handle so a retry can start cleanly.
+        try? run.pipe.fileHandleForReading.close()
+        try? run.pipe.fileHandleForWriting.close()
+        run.closeLog()
+        _ = run.readerFinished.wait(timeout: .now() + 0.25)
+        if shouldClearChild(run, current: child) { child = nil }
+    }
+
+    fileprivate static func waitUntilReady(run: ManagedRun, timeout: TimeInterval, pollInterval: TimeInterval,
+                                           healthProbe: () -> HealthResult) -> HealthResult? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let current = healthProbe()
+            if current.state == .ready { return current }
+            Thread.sleep(forTimeInterval: pollInterval)
+        }
+        stopManagedChild(run)
+        return nil
+    }
 
     fileprivate static func searchDirectories(path: String, home: String,
                                               homebrewArm: String = "/opt/homebrew/bin",
@@ -333,58 +385,95 @@ private enum NativeOpenCode {
     }
 
     static func status() -> Data {
+        lock.lock()
+        let managed = child?.process.isRunning == true
+        lock.unlock()
         let executable = executable()
         let current = health()
         let version = current.state == .ready ? current.version : (executable.map(version) ?? "")
         switch current.state {
-        case .ready: return response(state: "ready", found: executable != nil, version: version, managed: child?.isRunning == true)
+        case .ready: return response(state: "ready", found: executable != nil, version: version, managed: managed)
         case .conflict: return response(state: "port_conflict", found: executable != nil, version: version)
         case .absent: return response(state: executable == nil ? "missing" : "stopped", found: executable != nil, version: version)
         }
     }
 
     static func start() -> Data {
-        let current = health()
-        if case .ready = current.state {
-            let executable = executable()
-            return response(state: "ready", found: executable != nil, version: current.version, managed: child?.isRunning == true)
-        }
-        if case .conflict = current.state { return response(state: "port_conflict", found: executable() != nil) }
-        guard let executable = executable() else { return response(state: "missing", found: false) }
+        start(discover: executable, healthProbe: health, versionProbe: version,
+              timeout: 15, pollInterval: 0.25, logDirectory: Paths.logs)
+    }
+
+    fileprivate static func start(discover: () -> URL?, healthProbe: () -> HealthResult,
+                                  versionProbe: (URL) -> String, timeout: TimeInterval,
+                                  pollInterval: TimeInterval, logDirectory: URL) -> Data {
         lock.lock(); defer { lock.unlock() }
-        if child?.isRunning != true {
+        let current = healthProbe()
+        if case .ready = current.state {
+            let executable = discover()
+            return response(state: "ready", found: executable != nil, version: current.version, managed: child?.process.isRunning == true)
+        }
+        if case .conflict = current.state, child?.process.isRunning != true {
+            return response(state: "port_conflict", found: discover() != nil)
+        }
+        guard let executable = discover() else { return response(state: "missing", found: false) }
+        if child?.process.isRunning != true {
+            if let previous = child { stopManagedChild(previous) }
             let process = Process()
             process.executableURL = executable
             process.arguments = ["serve", "--hostname", "127.0.0.1", "--port", "4096", "--cors", "http://127.0.0.1:3891"]
             let pipe = Pipe(); process.standardOutput = pipe; process.standardError = pipe
+            let terminated = DispatchSemaphore(value: 0)
+            let readerFinished = DispatchSemaphore(value: 0)
+            var closeCreatedLog: (() -> Void)?
+            process.terminationHandler = { _ in terminated.signal() }
             do {
-                try FileManager.default.createDirectory(at: Paths.logs, withIntermediateDirectories: true)
-                let log = Paths.logs.appendingPathComponent("opencode.log")
+                try FileManager.default.createDirectory(at: logDirectory, withIntermediateDirectories: true)
+                let log = logDirectory.appendingPathComponent("opencode.log")
                 if let size = (try? FileManager.default.attributesOfItem(atPath: log.path)[.size] as? NSNumber)?.intValue, size >= logLimit {
                     try? FileManager.default.removeItem(at: log)
                 }
                 FileManager.default.createFile(atPath: log.path, contents: nil, attributes: [.posixPermissions: 0o600])
                 let output = try FileHandle(forWritingTo: log)
-                DispatchQueue.global(qos: .utility).async {
-                    while true {
-                        let data = pipe.fileHandleForReading.readData(ofLength: 4096)
-                        if data.isEmpty { break }
-                        let current = (try? FileManager.default.attributesOfItem(atPath: log.path)[.size] as? NSNumber)?.intValue ?? 0
-                        if current + data.count > logLimit { try? output.truncate(atOffset: 0); try? output.seek(toOffset: 0) }
-                        try? output.write(contentsOf: data)
-                    }
+                let outputLock = NSLock()
+                var outputClosed = false
+                let closeLog = {
+                    outputLock.lock(); defer { outputLock.unlock() }
+                    guard !outputClosed else { return }
+                    outputClosed = true
                     try? output.close()
                 }
-                try process.run(); child = process
-            } catch { return response(state: "error", found: true, version: version(executable)) }
+                closeCreatedLog = closeLog
+                try process.run()
+                try? pipe.fileHandleForWriting.close()
+                let run = ManagedRun(process: process, pipe: pipe, terminated: terminated,
+                                     readerFinished: readerFinished, closeLog: closeLog)
+                child = run
+                DispatchQueue.global(qos: .utility).async {
+                    defer { try? pipe.fileHandleForReading.close(); closeLog(); readerFinished.signal() }
+                    do {
+                        while let data = try pipe.fileHandleForReading.read(upToCount: 4096), !data.isEmpty {
+                            outputLock.lock()
+                            if !outputClosed {
+                                let current = (try? FileManager.default.attributesOfItem(atPath: log.path)[.size] as? NSNumber)?.intValue ?? 0
+                                if current + data.count > logLimit { try? output.truncate(atOffset: 0); try? output.seek(toOffset: 0) }
+                                try? output.write(contentsOf: data)
+                            }
+                            outputLock.unlock()
+                        }
+                    } catch { }
+                }
+            } catch {
+                closeCreatedLog?()
+                try? pipe.fileHandleForReading.close()
+                try? pipe.fileHandleForWriting.close()
+                return response(state: "error", found: true, version: versionProbe(executable))
+            }
         }
-        let deadline = Date().addingTimeInterval(15)
-        while Date() < deadline {
-            let current = health()
-            if case .ready = current.state { return response(state: "ready", found: true, version: current.version, managed: child?.isRunning == true) }
-            Thread.sleep(forTimeInterval: 0.25)
+        guard let run = child else { return response(state: "error", found: true) }
+        if let ready = waitUntilReady(run: run, timeout: timeout, pollInterval: pollInterval, healthProbe: healthProbe) {
+            return response(state: "ready", found: true, version: ready.version, managed: child?.process.isRunning == true)
         }
-        return response(state: "error", found: true, version: version(executable), managed: child?.isRunning == true)
+        return response(state: "error", found: true, version: versionProbe(executable), managed: child?.process.isRunning == true)
     }
 }
 
@@ -763,6 +852,48 @@ if CommandLine.arguments.contains("--self-test") {
     let healthChecks = healthyStatus.state == .ready && healthyStatus.version == "1.2.3"
         && noProcessStatus.state == .absent && timeoutStatus.state == .conflict
         && httpErrorStatus.state == .conflict && nonOpenCodeStatus.state == .conflict
+    let lifecycleExecutable = temp.appendingPathComponent("fake-opencode")
+    try! "#!/bin/sh\nexec /bin/sleep 30\n".write(to: lifecycleExecutable, atomically: true, encoding: .utf8)
+    try! FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: lifecycleExecutable.path)
+    func lifecycleStart(_ probe: () -> NativeOpenCode.HealthResult) -> [String: Any] {
+        let data = NativeOpenCode.start(discover: { lifecycleExecutable }, healthProbe: probe,
+                                        versionProbe: { _ in "v-test" }, timeout: 0.05,
+                                        pollInterval: 0.005, logDirectory: temp.appendingPathComponent("logs"))
+        return (try! JSONSerialization.jsonObject(with: data)) as! [String: Any]
+    }
+    var timedOutRun: NativeOpenCode.ManagedRun?
+    let timedOut = lifecycleStart {
+        if let run = NativeOpenCode.child { timedOutRun = run }
+        return NativeOpenCode.HealthResult(state: NativeOpenCode.child == nil ? .absent : .conflict, version: "")
+    }
+    let timeoutCleaned = timedOut["state"] as? String == "error"
+        && timedOut["managed"] as? Bool == false && NativeOpenCode.child == nil
+        && timedOutRun != nil && timedOutRun?.process.isRunning == false
+    var retryProbes = 0
+    let retried = lifecycleStart {
+        retryProbes += 1
+        let state: NativeOpenCode.Health = retryProbes == 1 ? .absent : (retryProbes == 2 ? .conflict : .ready)
+        return NativeOpenCode.HealthResult(state: state, version: "v-test")
+    }
+    let retryRun = NativeOpenCode.child
+    if let old = timedOutRun { NativeOpenCode.stopManagedChild(old) }
+    let retryStarted = retried["state"] as? String == "ready" && retried["managed"] as? Bool == true
+        && retryRun != nil && retryRun !== timedOutRun && retryRun?.process.isRunning == true
+        && NativeOpenCode.child === retryRun
+    // An already managed process must also be cleaned up on a later timeout.
+    let managedTimeout = lifecycleStart { NativeOpenCode.HealthResult(state: .conflict, version: "") }
+    let existingManagedCleaned = managedTimeout["state"] as? String == "error"
+        && NativeOpenCode.child == nil && retryRun?.process.isRunning == false
+    let userProcess = Process()
+    userProcess.executableURL = URL(fileURLWithPath: "/bin/sleep")
+    userProcess.arguments = ["30"]
+    try! userProcess.run()
+    let userReady = lifecycleStart { NativeOpenCode.HealthResult(state: .ready, version: "v-user") }
+    let userPreserved = userReady["state"] as? String == "ready" && userReady["managed"] as? Bool == false
+        && NativeOpenCode.child == nil && userProcess.isRunning
+    userProcess.terminate()
+    userProcess.waitUntilExit()
+    let lifecycleCleanup = timeoutCleaned && retryStarted && existingManagedCleaned && userPreserved
     let methodChecks = StaticServer.allowsMethod("POST", path: "/api/opencode/start")
         && !StaticServer.allowsMethod("POST", path: "/api/opencode/status")
         && StaticServer.validHostHeaders(["127.0.0.1:3891"], port: 3891)
@@ -775,7 +906,7 @@ if CommandLine.arguments.contains("--self-test") {
           migrated.contains("name=\"\(addonName)\""), !migrated.contains("wordollama-wps-native"), malformedRejected, brokenRejected, wrongRootRejected, emptyCreated,
           backupUpdated, installIdempotent, uninstallIdempotent, startupFailed, registrationUntouched,
           damagedUnchanged, batchRolledBack, emptyFileCreated, pathFound, hiddenFound, brewFound, usrLocalFound,
-          notFound, healthChecks, methodChecks else {
+          notFound, healthChecks, lifecycleCleanup, methodChecks else {
         fputs("WPS 注册项自检失败。\n", stderr)
         exit(1)
     }
