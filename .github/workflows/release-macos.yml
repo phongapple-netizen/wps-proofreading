@@ -8,15 +8,25 @@ on:
       - .github/workflows/release-macos.yml
       - mac/**
       - scripts/build-mac-installer.sh
+      - scripts/release-notes.js
       - package.json
+      - package-lock.json
   workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/release-macos.yml
+      - mac/**
+      - scripts/build-mac-installer.sh
+      - scripts/release-notes.js
+      - package.json
+      - package-lock.json
 
 permissions:
   contents: write
 
 jobs:
   release:
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[release-macos]')
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[release-macos]')
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,7 +40,15 @@ jobs:
         run: npm test
       - name: Build universal installer
         run: npm run build:mac:installer
+      - name: Verify installer registration and rollback self-tests
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          mount="$(mktemp -d)"
+          hdiutil attach "dist/mac/WPS-文本校对-${version}-macOS.dmg" -mountpoint "$mount" -nobrowse -quiet
+          trap 'hdiutil detach "$mount" -quiet; rmdir "$mount"' EXIT
+          "$mount/WPS 文本校对.app/Contents/MacOS/WPSProofreading" --self-test
       - name: Create beta release
+        if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -38,23 +56,14 @@ jobs:
           asset="dist/mac/WPS-文本校对-${version}-macOS.dmg"
           public_asset="dist/mac/WPS-Proofreading-${version}-macOS.dmg"
           cp "$asset" "$public_asset"
-          cat > release-notes.md <<'NOTES'
-          macOS 测试安装包，支持 macOS 11 及以上的 Intel 和 Apple 芯片 Mac。
-
-          安装：打开 DMG，把应用拖入“应用程序”，运行应用并点击“安装并启动”，然后重启 WPS。
-
-          需要预先安装 WPS。OpenCode、Ollama 或兼容模型接口需要另行配置；本包不包含 AI 模型。当前应用采用临时签名，尚未经 Apple 公证，首次打开可能需要在 macOS“隐私与安全性”中允许。
-
-          安装说明、GPL 许可证和第三方说明均在 DMG 中。源代码可从本 Release 的标签下载。
-          NOTES
-          shasum -a 256 "$public_asset" >> release-notes.md
+          node scripts/release-notes.js
           if gh release view "v${version}" >/dev/null 2>&1; then
             gh release upload "v${version}" "$public_asset" --clobber
-            gh release edit "v${version}" --notes-file release-notes.md \
-              --title "WPS 文本校对 v${version} · macOS 测试版" --prerelease
-            gh release delete-asset "v${version}" "WPS-.-${version}-macOS.dmg" --yes || true
           else
-            gh release create "v${version}" "$public_asset" --target "$GITHUB_SHA" \
-              --title "WPS 文本校对 v${version} · macOS 测试版" \
-              --notes-file release-notes.md --prerelease
+            gh release create "v${version}" --target "$GITHUB_SHA" \
+              --title "WPS 文本校对 v${version} · 测试版" \
+              --notes-file release-notes.md --prerelease || gh release view "v${version}" >/dev/null
+            gh release upload "v${version}" "$public_asset" --clobber
           fi
+          gh release edit "v${version}" --notes-file release-notes.md \
+            --title "WPS 文本校对 v${version} · 测试版" --prerelease

@@ -31,12 +31,9 @@ Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\SOURCE_PROVENANCE.md"; DestDir: "{app}"; Flags: ignoreversion
 
-[Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "WPSProofreading"; ValueData: """{app}\WPSProofreadingServer.exe"" --serve"; Flags: uninsdeletevalue
-
 [UninstallRun]
 Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM WPSProofreadingServer.exe"; Flags: runhidden
-Filename: "{app}\WPSProofreadingServer.exe"; Parameters: "--unregister"; Flags: runhidden skipifdoesntexist
+Filename: "{app}\WPSProofreadingServer.exe"; Parameters: "--uninstall"; Flags: runhidden skipifdoesntexist
 
 [Code]
 function PrepareToInstall(var NeedsRestart: Boolean): String;
@@ -55,10 +52,6 @@ begin
   if CurStep <> ssPostInstall then
     Exit;
   ServerPath := ExpandConstant('{app}\WPSProofreadingServer.exe');
-  if (not Exec(ServerPath, '--register', '', SW_HIDE, ewWaitUntilTerminated, ExitCode)) or (ExitCode <> 0) then
-    RaiseException('无法注册 WPS 加载项。请查看 %LOCALAPPDATA%\WPSProofreading\service-error.log。');
-  if (not Exec(ServerPath, '--check-port', '', SW_HIDE, ewWaitUntilTerminated, ExitCode)) or (ExitCode <> 0) then
-    MsgBox('安装已完成，但 3891 端口被其他程序占用。请关闭现有开发服务后重新登录，或重新运行安装程序。', mbError, MB_OK)
-  else
-    Exec(ServerPath, '--serve', '', SW_HIDE, ewNoWait, ExitCode);
+  if (not Exec(ServerPath, '--install', '', SW_HIDE, ewWaitUntilTerminated, ExitCode)) or (ExitCode <> 0) then
+    RaiseException('安装未完成：本机服务检查、启动或 WPS 注册失败。请查看 %LOCALAPPDATA%\WPSProofreading\service-error.log。');
 end;
