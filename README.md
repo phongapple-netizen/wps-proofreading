@@ -55,6 +55,16 @@ http://127.0.0.1:3891
 
 ### macOS / Mac mini 兼容
 
+面向其他 Mac 的安装包可在 macOS 上构建：
+
+```bash
+npm run build:mac:installer
+```
+
+安装包生成在 `dist/mac/`，包含 Intel 与 Apple 芯片通用的应用。打开 DMG，按其中的《安装说明》操作。应用会注册 WPS 并启动当前用户的登录服务；目标电脑无需 Node.js 或 npm。OpenCode、Ollama 和兼容模型接口仍由使用者单独配置。当前安装包采用临时签名，正式对外分发需要 Apple 开发者签名和公证。
+
+以下是从项目源码运行的开发流程。
+
 本项目的调试注册脚本支持 macOS，包括 Intel Mac（例如 Mac mini 2014）和 Apple 芯片 Mac。
 
 首次在 Mac 上运行：
@@ -209,4 +219,4 @@ https://github.com/phongapple-netizen/wps
 
 ## 项目状态
 
-当前仍属于持续开发阶段，尚未发布面向普通用户的正式安装版本。
+当前仍属于持续开发阶段。已提供 macOS 测试安装包；尚未发布经过 Apple 公证、面向普通用户的正式版本。Windows 安装包尚未制作。

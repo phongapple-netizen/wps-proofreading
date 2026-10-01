@@ -9,6 +9,7 @@
     "debug": "node scripts/dev-server.js --port 3891",
     "debug:server": "node scripts/dev-server.js --port 3891",
     "build": "wpsjs build",
+    "build:mac:installer": "bash scripts/build-mac-installer.sh",
     "publish": "wpsjs publish",
     "debug:mac": "node scripts/dev-server.js --port 3891",
     "service:mac:install": "node scripts/mac-service.js install",
