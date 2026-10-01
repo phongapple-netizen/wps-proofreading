@@ -281,6 +281,131 @@ test("thinking-model responses explain exhausted output budgets without exposing
     }] }), '{"issues":[]}');
 });
 
+test("DeepSeek Flash enables high thinking with a 64K JSON output budget", async () => {
+    const result = await core.requestModel({
+        provider: "openai", endpoint: "https://api.deepseek.com/chat/completions",
+        model: "deepseek-flash", apiKey: "test-key", maxOutputTokens: 64 * 1024
+    }, '{"task":"proofread"}', async (url, init) => {
+        assert.equal(url, "https://api.deepseek.com/chat/completions");
+        const body = JSON.parse(init.body);
+        assert.deepEqual(body.thinking, { type: "enabled" });
+        assert.equal(body.reasoning_effort, "high");
+        assert.equal(body.temperature, undefined);
+        assert.equal(body.max_tokens, 64 * 1024);
+        assert.deepEqual(body.response_format, { type: "json_object" });
+        assert.equal(body.model, "deepseek-flash");
+        assert.equal(body.stream, false);
+        assert.equal(init.headers.Authorization, "Bearer test-key");
+        assert.equal(init.body.includes("test-key"), false);
+        return { ok: true, json: async () => ({ choices: [{
+            finish_reason: "stop", message: { content: '{"issues":[]}' }
+        }] }) };
+    });
+    assert.equal(result, '{"issues":[]}');
+});
+
+test("DeepSeek Flash policy matches only its exact model name and preserves other providers", () => {
+    const request = (model, provider = "openai") => core.createModelRequest(provider,
+        provider === "ollama" ? "http://127.0.0.1:11434" : "https://model.example/v1/chat/completions",
+        model, "", "JSON prompt");
+    assert.deepEqual(request(" DEEPSEEK-FLASH ").body.thinking, { type: "enabled" });
+    assert.equal(request(" DEEPSEEK-FLASH ").body.max_tokens, 64 * 1024);
+    for (const model of ["deepseek-reasoner", "deepseek-chat", "deepseek-v4-pro", "deepseek-flash-custom", "other-model"]) {
+        assert.equal(request(model).body.thinking, undefined, model);
+    }
+    assert.equal(request("deepseek-flash", "ollama").body.thinking, undefined);
+});
+
+test("DeepSeek Flash still rejects a truncated JSON response", async () => {
+    await assert.rejects(core.requestModel({
+        provider: "openai", endpoint: "https://api.deepseek.com/chat/completions",
+        model: "deepseek-flash", maxOutputTokens: 64 * 1024
+    }, "JSON prompt", async () => ({ ok: true, json: async () => ({ choices: [{
+        finish_reason: "length", message: { content: '{"issues":[]}' }
+    }] }) })), /token 上限/);
+});
+
+test("DeepSeek Flash accepts larger budgets up to 384K without changing other model limits", () => {
+    const request = (model, maxOutputTokens) => core.createModelRequest("openai",
+        "https://model.example/v1/chat/completions", model, "", "JSON prompt", { maxOutputTokens });
+    assert.equal(request("deepseek-flash", 128 * 1024).body.max_tokens, 128 * 1024);
+    assert.equal(request("deepseek-flash", 1024 * 1024).body.max_tokens, 384 * 1024);
+    assert.equal(request("other-model", 64 * 1024).body.max_tokens, 16000);
+    for (const value of [undefined, NaN, -1, 0, Infinity]) {
+        assert.equal(request("deepseek-flash", value).body.max_tokens, 64 * 1024);
+    }
+    assert.equal(request("deepseek-flash", 0.1).body.max_tokens, 1);
+});
+
+function timedCore() {
+    const fs = require("node:fs");
+    const vm = require("node:vm");
+    let now = 0;
+    const timers = [];
+    const context = vm.createContext({ window: {}, AbortController,
+        Date: class extends Date { static now() { return now; } },
+        setTimeout(callback, delay) { const timer = { callback, delay, cleared: false }; timers.push(timer); return timer; },
+        clearTimeout(timer) { timer.cleared = true; }
+    });
+    vm.runInContext(fs.readFileSync(require.resolve("../js/proofreading-core.js"), "utf8"), context);
+    return { core: context.window.WpsProofreadingCore, timers, advance(value) { now += value; } };
+}
+
+test("DeepSeek Flash shares a ten-minute deadline across fetch and body and aborts a stalled body", async () => {
+    const h = timedCore();
+    let networkSignal;
+    const pending = h.core.requestModel({ provider: "openai",
+        endpoint: "https://api.deepseek.com/chat/completions", model: "deepseek-flash"
+    }, "JSON prompt", async (url, init) => {
+        networkSignal = init.signal;
+        h.advance(120000);
+        return { ok: true, json: () => new Promise(() => {}) };
+    });
+    const rejected = assert.rejects(pending, /模型请求超时/);
+    await new Promise(setImmediate);
+    assert.deepEqual(h.timers.map((timer) => timer.delay), [600000, 480000]);
+    assert.equal(h.timers[0].cleared, true);
+    h.timers[1].callback();
+    await rejected;
+    assert.equal(networkSignal.aborted, true);
+    assert.equal(h.timers[1].cleared, true);
+});
+
+test("cancelling a DeepSeek Flash body read aborts the underlying request", async () => {
+    const h = timedCore();
+    const controller = new AbortController();
+    let networkSignal;
+    const pending = h.core.requestModel({ provider: "openai",
+        endpoint: "https://api.deepseek.com/chat/completions", model: "deepseek-flash", signal: controller.signal
+    }, "JSON prompt", async (url, init) => {
+        networkSignal = init.signal;
+        return { ok: true, json: () => new Promise(() => {}) };
+    });
+    const rejected = assert.rejects(pending, (error) => error.name === "AbortError");
+    await new Promise(setImmediate);
+    controller.abort();
+    await rejected;
+    assert.equal(networkSignal.aborted, true);
+    assert.equal(h.timers.every((timer) => timer.cleared), true);
+});
+
+test("other models retain their existing timeout and output policy", async () => {
+    const h = timedCore();
+    const result = await h.core.requestModel({ provider: "openai",
+        endpoint: "https://model.example/v1/chat/completions", model: "other-model"
+    }, "JSON prompt", async (url, init) => {
+        const body = JSON.parse(init.body);
+        assert.equal(body.max_tokens, 2000);
+        assert.equal(body.thinking, undefined);
+        assert.equal(body.reasoning_effort, undefined);
+        return { ok: true, json: async () => ({ choices: [{
+            finish_reason: "stop", message: { content: '{"issues":[]}' }
+        }] }) };
+    });
+    assert.equal(result, '{"issues":[]}');
+    assert.deepEqual(h.timers.map((timer) => timer.delay), [180000, 180000]);
+});
+
 test("batching keeps whole paragraphs and respects the batch character budget", () => {
     const paragraphs = [
         { paragraphIndex: 1, text: "短段落。", offset: 0 },
