@@ -4,6 +4,7 @@
     var lastTestCounts = Object.create(null);
     var builtinCatalog = [];
     var simpleDraftIssueId = "";
+    var simpleDraftIssue = null;
 
     function byId(id) {
         return root.document && root.document.getElementById
@@ -157,6 +158,7 @@
             context.textContent = "";
         }
         simpleDraftIssueId = "";
+        simpleDraftIssue = null;
     }
 
     function openFixedEditor(issue) {
@@ -189,6 +191,7 @@
                 : "";
         }
         simpleDraftIssueId = fromIssue ? String(value.id || "") : "";
+        simpleDraftIssue = fromIssue ? value : null;
         editor.hidden = false;
         if (typeof editor.scrollIntoView === "function") editor.scrollIntoView({ block: "nearest" });
         if (pattern && !fromIssue && typeof pattern.focus === "function") pattern.focus();
@@ -197,6 +200,11 @@
 
     function saveFixedEditor(event) {
         if (event && typeof event.preventDefault === "function") event.preventDefault();
+        if (simpleDraftIssue && typeof root.canUseProofreadingIssue === "function" &&
+            !root.canUseProofreadingIssue(simpleDraftIssue.id, simpleDraftIssue.runId)) {
+            setStatus("请切回原文档或在当前文档重新校对。", "warning");
+            return false;
+        }
         if (!api() || typeof api().saveUserReplacementRule !== "function") return false;
         function value(id) {
             var field = byId(id);
@@ -233,6 +241,8 @@
     }
 
     function openIssueRuleDraft(issue) {
+        if (issue && typeof root.canUseProofreadingIssue === "function" &&
+            !root.canUseProofreadingIssue(issue.id, issue.runId)) return false;
         setOpen(true);
         var opened = openFixedEditor(issue);
         if (!opened) setStatus("这条建议不能保存为固定替换规则。", "warning");

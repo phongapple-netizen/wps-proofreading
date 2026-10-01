@@ -11,10 +11,17 @@
     var currentController = null;
     var busy = false;
     var issueActionBusy = false;
+    var issueActionDocumentKey = null;
     var waitingForFullDocumentConfirmation = false;
     var runCounter = 0;
     var runAttemptCounter = 0;
     var actionCounter = 0;
+    var documentSessions = Object.create(null);
+    var activeDocumentKey = null;
+    var currentResultRunId = 0;
+    var currentStatus = { text: "当前文档尚未校对", tone: "idle" };
+    var documentEventSource = null;
+    var documentEventsBound = false;
     var ANCHOR_CHARACTERS = 40;
 
     function actionClock() {
@@ -59,6 +66,7 @@
 
     function setIssueActionBusy(value) {
         issueActionBusy = value === true;
+        issueActionDocumentKey = issueActionBusy ? activeDocumentKey : null;
         try {
             if (typeof root.setProofreadingActionBusy === "function") {
                 root.setProofreadingActionBusy(issueActionBusy);
@@ -84,6 +92,7 @@
     }
 
     function setStatus(message, tone) {
+        currentStatus = { text: message, tone: tone || "idle" };
         if (typeof root.setProofreadingStatus === "function") {
             root.setProofreadingStatus({ text: message, tone: tone || "idle" });
         }
@@ -130,6 +139,95 @@
         } catch (error) {
             return "";
         }
+    }
+
+    function syncDocumentSession() {
+        var document = activeDocument(app());
+        var key = document ? documentKey(document) : "";
+        if (key === activeDocumentKey) return false;
+        if (typeof root.getProofreadingStatus === "function") {
+            currentStatus = root.getProofreadingStatus();
+        }
+        if (busy) {
+            if (currentController) currentController.abort();
+            runAttemptCounter += 1;
+            currentController = null;
+            waitingForFullDocumentConfirmation = false;
+            if (typeof root.dismissFullDocumentConfirmation === "function") {
+                root.dismissFullDocumentConfirmation();
+            }
+            setStatus("校对已取消 · 已保留已完成的 " + currentIssues.length + " 项结果", "warning");
+        }
+        // A write may be awaiting its existing deferred verification. Its old
+        // coordinates must not become usable if the user switches away and back.
+        if (issueActionBusy && issueActionDocumentKey === activeDocumentKey) {
+            currentSnapshot = null;
+            currentIssues = currentIssues.map(function (issue) {
+                return Object.assign({}, issue, { status: "stale" });
+            });
+            setStatus("正文在写入后发生变化，请重新校对。", "warning");
+        }
+        if (activeDocumentKey) {
+            documentSessions[activeDocumentKey] = {
+                snapshot: currentSnapshot,
+                issues: currentIssues,
+                runId: currentResultRunId,
+                status: currentStatus,
+                view: typeof root.captureProofreadingView === "function"
+                    ? root.captureProofreadingView() : null
+            };
+        }
+        activeDocumentKey = key;
+        var session = key ? documentSessions[key] : null;
+        currentSnapshot = session ? session.snapshot : null;
+        currentIssues = session ? session.issues : [];
+        currentResultRunId = session ? session.runId : 0;
+        currentStatus = session ? session.status : { text: "当前文档尚未校对", tone: "idle" };
+        // Clear the previous view before rendering, so UI-local saved-rule and
+        // expanded-card state cannot be inherited from another document.
+        if (typeof root.restoreProofreadingView === "function") {
+            root.restoreProofreadingView(session && session.view);
+        }
+        setBusy(false);
+        viewIssues();
+        setStatus(currentStatus.text, currentStatus.tone);
+        return true;
+    }
+
+    function bindDocumentEvents() {
+        if (documentEventsBound) return;
+        try {
+            var application = app();
+            var events = application && application.ApiEvent || root.wps && root.wps.ApiEvent;
+            if (!events || typeof events.AddApiEventListener !== "function") return;
+            events.AddApiEventListener("WindowActivate", syncDocumentSession);
+            documentEventSource = events;
+            documentEventsBound = true;
+            try {
+                events.AddApiEventListener("DocumentAfterClose", documentAfterClose);
+            } catch (error) { /* Older versions can leave cleanup to pane teardown. */ }
+        } catch (error) { /* Identity-only polling remains available. */ }
+    }
+
+    function documentAfterClose(document) {
+        var key = document ? documentKey(document) : "";
+        syncDocumentSession();
+        if (key && key !== activeDocumentKey) delete documentSessions[key];
+    }
+
+    function proofreadDocumentMatches() {
+        var document = activeDocument(app());
+        return !!document && !!activeDocumentKey &&
+            documentKey(document) === activeDocumentKey;
+    }
+
+    function canUseProofreadingIssue(issueId, runId) {
+        if (!proofreadDocumentMatches() || (runId != null && runId !== currentResultRunId) ||
+            !findPendingIssue(issueId)) {
+            setStatus("请切回原文档或在当前文档重新校对。", "warning");
+            return false;
+        }
+        return true;
     }
 
     function getSelectionRange(application, document) {
@@ -522,7 +620,7 @@
         root.setProofreadingIssues(currentIssues.map(function (issue) {
             return {
                 id: issue.id,
-                runId: runCounter,
+                runId: currentResultRunId,
                 category: issue.category,
                 categoryLabel: categoryLabel(issue.category),
                 title: categoryLabel(issue.category) + (issue.needsReview ? " · 请复核" : ""),
@@ -553,7 +651,7 @@
         if (typeof root.pushProofreadingRecord !== "function") return;
         root.pushProofreadingRecord({
             id: issue.id,
-            runId: runCounter,
+            runId: currentResultRunId,
             category: issue.category,
             categoryLabel: categoryLabel(issue.category),
             original: issue.original,
@@ -651,13 +749,29 @@
     }
 
     function initConfiguration() {
+        syncDocumentSession();
+        bindDocumentEvents();
         syncFromStore();
         if (modelOptions().provider === "opencode" && canManageOpenCode()) {
             // The native service is already running when this page is served.
             refreshProviderModels();
         }
         if (root.document && typeof root.setInterval === "function") {
-            root.setInterval(syncFromStore, 1000);
+            root.setInterval(function () {
+                syncDocumentSession();
+                bindDocumentEvents();
+                syncFromStore();
+            }, 1000);
+        }
+        if (typeof root.addEventListener === "function") {
+            root.addEventListener("unload", function () {
+                if (currentController) currentController.abort();
+                if (!documentEventSource) return;
+                ["WindowActivate", "DocumentAfterClose"].forEach(function (event) {
+                    try { documentEventSource.RemoveApiEventListener(event); }
+                    catch (error) { /* The host may already be tearing down. */ }
+                });
+            });
         }
     }
 
@@ -809,6 +923,7 @@
     }
 
     function ensureRunActive(controller, runId, attempt) {
+        syncDocumentSession();
         if (attempt !== runAttemptCounter || controller !== currentController || runId !== runCounter ||
             (controller && controller.signal && controller.signal.aborted)) {
             var error = new Error("已取消校对。");
@@ -1062,6 +1177,7 @@
     }
 
     async function runProofreading(restart) {
+        syncDocumentSession();
         if (issueActionBusy) return { accepted: false, reason: "action-busy" };
         if (busy && restart !== true) return { accepted: false, reason: "busy" };
         if (typeof root.getTaskBusyState === "function" && root.getTaskBusyState().rewrite) {
@@ -1086,11 +1202,13 @@
             if (root.WpsRulesReady && typeof root.WpsRulesReady.then === "function") {
                 await root.WpsRulesReady;
             }
+            syncDocumentSession();
             if (runAttempt !== runAttemptCounter ||
                 (runController && runController.signal && runController.signal.aborted)) {
                 return { accepted: false, reason: "cancelled" };
             }
             snapshot = captureSnapshot();
+            if (!snapshot.documentKey) throw new Error("无法确认当前文档身份，请重新打开文档后重试。");
             var options = validateModelOptions(modelOptions());
             var providerLabel = providerDisplayName(options.provider);
             var scopeLabel = snapshot.mode === "full" ? "全文" : "选区";
@@ -1106,6 +1224,7 @@
                     providerLabel: providerLabel,
                     model: options.model || ""
                 });
+                syncDocumentSession();
                 if (runAttempt !== runAttemptCounter ||
                     (runController && runController.signal && runController.signal.aborted)) {
                     return { accepted: false, reason: "cancelled" };
@@ -1125,6 +1244,7 @@
             currentSnapshot = null;
             currentIssues = [];
             runCounter += 1;
+            currentResultRunId = runCounter;
             var activeRunId = runCounter;
             if (typeof root.beginProofreadingRun === "function") {
                 root.beginProofreadingRun();
@@ -1256,6 +1376,7 @@
                     consistencyCompleted = true;
                     reportProgress(100, "全文一致性复核完成");
                 } catch (consistencyError) {
+                    ensureRunActive(runController, activeRunId, runAttempt);
                     if ((currentController && currentController.signal && currentController.signal.aborted) ||
                         (consistencyError && consistencyError.name === "AbortError") ||
                         discarded) {
@@ -1302,6 +1423,7 @@
                 consistencyWarning: consistencyWarning
             };
         } catch (error) {
+            syncDocumentSession();
             if (runAttempt !== runAttemptCounter || currentController !== runController) {
                 return { accepted: false, reason: "cancelled" };
             }
@@ -1323,6 +1445,7 @@
                 : (error && error.message ? error.message : "校对失败，请重试。"), "error");
             return { accepted: false, reason: "error" };
         } finally {
+            syncDocumentSession();
             if (runAttempt === runAttemptCounter && currentController === runController) {
                 waitingForFullDocumentConfirmation = false;
                 if (typeof root.dismissFullDocumentConfirmation === "function") {
@@ -1335,6 +1458,7 @@
     }
 
     function cancelProofreading() {
+        if (syncDocumentSession()) return false;
         if (busy && waitingForFullDocumentConfirmation &&
             typeof root.dismissFullDocumentConfirmation === "function") {
             if (currentController) currentController.abort();
@@ -1371,6 +1495,10 @@
     }
 
     function issueActionUnavailable() {
+        if (!proofreadDocumentMatches()) {
+            setStatus("请切回原文档或在当前文档重新校对。", "warning");
+            return true;
+        }
         if (!busy && !issueActionBusy) return false;
         setStatus(issueActionBusy
             ? "上一条操作正在收尾，请稍候。"
@@ -1398,6 +1526,7 @@
         var outcome = "rejected";
         setIssueActionBusy(true);
         try {
+            if (!canUseProofreadingIssue(issueId)) return false;
             var issue = actionStage(perf, "issueLookup", function () { return findPendingIssue(issueId); });
             if (!issue || issue.status !== "pending") {
                 setStatus("这条建议已处理或已失效，请重新校对。", "warning");
@@ -1418,6 +1547,7 @@
     }
 
     function ignoreProofreadingIssue(issueId) {
+        if (!canUseProofreadingIssue(issueId)) return false;
         if (issueActionUnavailable()) return false;
         var issue = findPendingIssue(issueId);
         if (!issue || issue.status !== "pending") {
@@ -1642,6 +1772,8 @@
         var locked = false;
         var change = null;
         var committed = false;
+        var operationKey = activeDocumentKey;
+        var operationSnapshot = currentSnapshot;
         try {
             if (issueActionUnavailable()) return false;
             setIssueActionBusy(true);
@@ -1668,6 +1800,10 @@
             if (perf) perf.timings.writeComplete = writtenAt - perf.started;
             // A timer (not a microtask) releases the synchronous WPS/UI call stack.
             await nextActionTurn();
+            if (operationKey !== activeDocumentKey || operationSnapshot !== currentSnapshot) {
+                outcome = "post-write-changed";
+                return false;
+            }
             if (perf) perf.timings.deferredDelay = actionClock() - writtenAt;
             if (!verifyWrittenChange(change, perf)) {
                 // The document may have been edited, undone, switched, or become
@@ -1837,6 +1973,7 @@
     root.applyProofreadingIssue = applyProofreadingIssue;
     root.undoProofreadingIssue = undoProofreadingIssue;
     root.applyAllProofreadingIssues = applyAllProofreadingIssues;
+    root.canUseProofreadingIssue = canUseProofreadingIssue;
     root.getWpsProofreadingState = function () {
         return {
             snapshot: currentSnapshot,

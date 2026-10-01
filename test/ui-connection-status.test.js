@@ -279,3 +279,30 @@ test('configuration observation in a form getter or late response cannot consume
   assert.equal((await pending).stale, true);
   assertRequiresDetection(h);
 });
+
+test('document session swaps preserve shared provider, model, password, settings and verified connection', async () => {
+  const h = harness();
+  const a = { FullName: '/private/A.docx' };
+  const b = { Name: '文档2' };
+  h.win.WpsNativeDocument = { getApplication: () => application };
+  const application = { ActiveDocument: a };
+  h.tick();
+  h.change('model-provider', 'openai');
+  h.change('model-api-key', 'document-switch-session-secret');
+  h.win.WpsSettingsStore.updateSettings({ deep: true, autoAdvance: false });
+  await h.win.refreshProviderModels();
+  const settings = JSON.stringify(h.win.WpsSettingsStore.loadSettings());
+  const connection = JSON.stringify(h.win.getModelConnectionState());
+  const connectionText = h.elements['connection-status'].textContent;
+  const key = h.win.WpsSettingsStore.loadPassword('openai');
+  assert.equal(key, 'document-switch-session-secret');
+  for (const document of [b, a, b, null, a]) {
+    application.ActiveDocument = document;
+    h.tick();
+    assert.equal(JSON.stringify(h.win.WpsSettingsStore.loadSettings()), settings);
+    assert.equal(JSON.stringify(h.win.getModelConnectionState()), connection);
+    assert.equal(h.elements['connection-status'].textContent, connectionText);
+    assert.equal(h.win.WpsSettingsStore.loadPassword('openai'), key);
+  }
+  assert.equal(JSON.stringify([...h.storage.values()]).includes('/private/A.docx'), false);
+});

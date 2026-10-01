@@ -11,7 +11,8 @@
         appMode: "proofread",
         tab: "issues",
         history: [],
-        historyIds: {}
+        historyIds: {},
+        emptyMessage: "校对结果会显示在这里。"
     };
     var pendingFullDocumentConfirmation = null;
     var renderedIssueActionButtons = [];
@@ -510,12 +511,67 @@
     }
 
     function beginProofreadingRun() {
+        state.emptyMessage = "校对结果会显示在这里。";
         state.filter = "all";
         var filter = byId("issue-filter");
         if (filter) filter.value = "all";
         clearIssues();
         switchTab("issues");
         return true;
+    }
+
+    function captureProofreadingView() {
+        var list = byId("proofreading-issues");
+        var expanded = Object.create(null);
+        Array.prototype.forEach.call(list && list.querySelectorAll
+            ? list.querySelectorAll(".issue-card[data-issue-id]") : [], function (card) {
+            var analysis = card.querySelector && card.querySelector(".issue-analysis");
+            if (analysis && analysis.open) expanded[card.getAttribute("data-issue-id")] = true;
+        });
+        var processed = list && list.querySelector && list.querySelector(".processed-issues");
+        return {
+            issues: state.issues.slice(), history: state.history.slice(),
+            historyIds: Object.assign({}, state.historyIds), filter: state.filter,
+            tab: state.tab, emptyMessage: state.emptyMessage,
+            scrollTop: list ? list.scrollTop : 0, expanded: expanded,
+            processedOpen: !!(processed && processed.open)
+        };
+    }
+
+    function restoreProofreadingView(view) {
+        var saved = view || {};
+        state.issues = saved.issues || [];
+        state.history = saved.history || [];
+        state.historyIds = saved.historyIds || {};
+        state.filter = saved.filter || "all";
+        state.emptyMessage = saved.emptyMessage || "当前文档尚未校对";
+        var filter = byId("issue-filter");
+        if (filter) filter.value = state.filter;
+        var list = byId("proofreading-issues");
+        if (list) list.textContent = "";
+        if (locateToastTimer !== null && root.clearTimeout) root.clearTimeout(locateToastTimer);
+        locateToastTimer = null;
+        var toast = byId("proofreading-toast");
+        if (toast) toast.hidden = true;
+        activeIssueMenu = null;
+        renderedIssueActionButtons = [];
+        switchTab("issues");
+        // Expanded cards and scroll belong to this document, not the previous DOM.
+        Array.prototype.forEach.call(list && list.querySelectorAll
+            ? list.querySelectorAll(".issue-card[data-issue-id]") : [], function (card) {
+            var analysis = card.querySelector && card.querySelector(".issue-analysis");
+            if (analysis) analysis.open = !!(saved.expanded && saved.expanded[card.getAttribute("data-issue-id")]);
+        });
+        var processed = list && list.querySelector && list.querySelector(".processed-issues");
+        if (processed) processed.open = saved.processedOpen === true;
+        if (list) list.scrollTop = saved.scrollTop || 0;
+        renderHistory();
+        switchTab(saved.tab || "issues");
+    }
+
+    function issueContextAvailable(issue) {
+        return typeof root.canUseProofreadingIssue !== "function" ||
+            root.canUseProofreadingIssue(issue.id, issue.runId);
     }
 
     function callAction(name, issueId, fallbackMessage) {
@@ -581,7 +637,7 @@
         if (!button._proofreadingActionDisabled) {
             button.addEventListener("click", function (event) {
                 if (event && typeof event.stopPropagation === "function") event.stopPropagation();
-                if (state.actionBusy) return;
+                if (state.actionBusy || !issueContextAvailable(issue)) return;
                 if (typeof root.openIssueRuleDraft !== "function") {
                     setProofreadingStatus("规则中心尚未就绪。", "warning");
                     return;
@@ -655,7 +711,7 @@
         renderedIssueActionButtons.push(save);
         if (!save._proofreadingActionDisabled) save.addEventListener("click", function (event) {
             if (event && event.stopPropagation) event.stopPropagation();
-            if (state.actionBusy) return;
+            if (state.actionBusy || !issueContextAvailable(issue)) return;
             if (typeof root.openIssueRuleDraft !== "function") {
                 setProofreadingStatus("规则中心尚未就绪。", "warning");
                 return;
@@ -756,7 +812,7 @@
             if (emptyState) {
                 emptyState.textContent = state.issues.length
                     ? "当前筛选类型没有问题。"
-                    : "校对结果会显示在这里。";
+                    : state.emptyMessage;
                 emptyState.hidden = false;
             }
             return state.issues.slice();
@@ -1044,6 +1100,8 @@
     };
     root.clearProofreadingIssues = root.clearProofreadingIssues || clearIssues;
     root.beginProofreadingRun = root.beginProofreadingRun || beginProofreadingRun;
+    root.captureProofreadingView = captureProofreadingView;
+    root.restoreProofreadingView = restoreProofreadingView;
     root.refreshProofreadingSelection = root.refreshProofreadingSelection || refreshProofreadingSelection;
     root.readSelectedText = root.readSelectedText || readSelectedText;
     root.replaceSelectedText = root.replaceSelectedText || function (value) {
