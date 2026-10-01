@@ -1,6 +1,6 @@
 {
   "name": "wps-text-proofreading",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "WPS 文字原生智能文本校对加载项",
   "addonType": "wps",
@@ -10,6 +10,7 @@
     "debug:server": "node scripts/dev-server.js --port 3891",
     "build": "wpsjs build",
     "build:mac:installer": "bash scripts/build-mac-installer.sh",
+    "build:windows:server": "node scripts/build-windows-server.js",
     "publish": "wpsjs publish",
     "debug:mac": "node scripts/dev-server.js --port 3891",
     "service:mac:install": "node scripts/mac-service.js install",

@@ -110,6 +110,12 @@ npm run debug:mac
 
 `js/wps-api.js` 本身不依赖 Windows 专用接口，会依次兼容 `window.Application`、`wps.WpsApplication()` 和旧版 `wps` 对象。
 
+### Windows x64 测试安装包
+
+Windows 10/11 x64 安装程序由 GitHub Actions 在 Windows 环境构建与验证。双击 Setup.exe 即可为当前用户安装；它会注册 WPS 加载项，启动只监听 `127.0.0.1:3891` 的网页服务，并设置登录自启。目标电脑无需 Node.js 或 npm。卸载入口位于 Windows“已安装的应用”。WPS 和模型服务仍需单独准备；当前安装程序未签名，SmartScreen 可能提示未知发布者。
+
+开发者可在 macOS 或 Windows 上先运行 `npm run build:windows:server` 交叉编译 x64 服务程序；完整安装程序由 `windows/installer.iss` 在 Windows 上通过 Inno Setup 编译。
+
 ## OpenCode
 
 可在本机启动 OpenCode：
@@ -219,4 +225,4 @@ https://github.com/phongapple-netizen/wps
 
 ## 项目状态
 
-当前仍属于持续开发阶段。已提供 macOS 测试安装包；尚未发布经过 Apple 公证、面向普通用户的正式版本。Windows 安装包尚未制作。
+当前仍属于持续开发阶段。macOS 和 Windows x64 均提供测试安装包；正式公开分发前仍需代码签名及目标电脑上的 WPS 交互验证。

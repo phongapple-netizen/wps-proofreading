@@ -1,0 +1,105 @@
+name: Release Windows x64 installer
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/release-windows.yml
+      - windows/**
+      - scripts/build-windows-server.js
+      - package.json
+      - package-lock.json
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[release-windows]')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - name: Install dependencies
+        run: npm ci
+      - name: Run project tests
+        run: npm test
+      - name: Build x64 server
+        run: npm run build:windows:server
+      - name: Compile Inno Setup installer
+        shell: pwsh
+        run: |
+          $env:WPS_RELEASE_VERSION = (node -p "require('./package.json').version")
+          $env:WPS_DIST_DIR = (Resolve-Path 'dist/windows').Path
+          $command = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+          $iscc = if ($command) { $command.Source } else { $null }
+          foreach ($candidate in @('C:\Program Files (x86)\Inno Setup 6\ISCC.exe', 'C:\Program Files\Inno Setup 6\ISCC.exe')) {
+            if (-not $iscc -and (Test-Path $candidate)) { $iscc = $candidate }
+          }
+          if (-not $iscc) { throw 'Inno Setup compiler not found on Windows runner.' }
+          & $iscc 'windows/installer.iss'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Smoke test install, service, and uninstall
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          $server = (Resolve-Path 'dist/windows/WPSProofreadingServer.exe').Path
+          $selfTest = Start-Process -FilePath $server -ArgumentList '--self-test' -Wait -PassThru
+          if ($selfTest.ExitCode -ne 0) { throw 'Windows server self-test failed.' }
+
+          $publish = Join-Path $env:APPDATA 'kingsoft\wps\jsaddons\publish.xml'
+          New-Item -ItemType Directory -Force -Path (Split-Path $publish) | Out-Null
+          Set-Content -Path $publish -Encoding UTF8 -Value '<?xml version="1.0"?><jsplugins><jspluginonline name="other-addon" url="https://example.test/"/></jsplugins>'
+
+          $installer = (Resolve-Path "dist/windows/WPS-Proofreading-$version-Windows-x64-Setup.exe").Path
+          $install = Start-Process -FilePath $installer -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "Installer failed: $($install.ExitCode)" }
+
+          $registered = Get-Content $publish -Raw
+          if ($registered -notmatch 'name="wps-text-proofreading"' -or $registered -notmatch 'name="other-addon"') { throw 'WPS registration did not preserve the other add-on.' }
+          $startup = (Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name WPSProofreading -ErrorAction Stop).WPSProofreading
+          if ($startup -notmatch 'WPSProofreadingServer.exe') { throw 'Login startup entry missing.' }
+
+          $ready = $false
+          for ($attempt = 0; $attempt -lt 20; $attempt++) {
+            try {
+              $response = Invoke-WebRequest -Uri 'http://127.0.0.1:3891/package.json' -UseBasicParsing -TimeoutSec 2
+              if (($response.Content | ConvertFrom-Json).name -eq 'wps-text-proofreading') { $ready = $true; break }
+            } catch { Start-Sleep -Seconds 1 }
+          }
+          if (-not $ready) { throw 'Installed local service did not start.' }
+
+          $uninstaller = Join-Path $env:LOCALAPPDATA 'Programs\WPSProofreading\unins000.exe'
+          $uninstall = Start-Process -FilePath $uninstaller -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0) { throw "Uninstaller failed: $($uninstall.ExitCode)" }
+          $remaining = Get-Content $publish -Raw
+          if ($remaining -match 'name="wps-text-proofreading"' -or $remaining -notmatch 'name="other-addon"') { throw 'Uninstall did not preserve the other add-on.' }
+          if (Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name WPSProofreading -ErrorAction SilentlyContinue) { throw 'Login startup entry remained after uninstall.' }
+      - name: Create Windows beta release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = node -p "require('./package.json').version"
+          $asset = "dist/windows/WPS-Proofreading-$version-Windows-x64-Setup.exe"
+          $hash = (Get-FileHash -Algorithm SHA256 $asset).Hash.ToLowerInvariant()
+          $notes = @"
+          Windows 10/11 x64 测试安装包。双击 EXE 即可为当前用户安装，无需 Node.js 或管理员权限。
+
+          安装器会注册 WPS 加载项、启动本机网页服务并设置登录自启；卸载时会移除本加载项和启动项，保留其他 WPS 加载项。需要预先安装 WPS，OpenCode、Ollama 或兼容模型接口仍需另行配置。本包不含 AI 模型。
+
+          当前为未签名测试版，Windows SmartScreen 可能提示未知发布者。真实 WPS 环境中的交互仍需在 Windows 电脑上验证。
+
+          SHA-256: $hash  $asset
+          "@
+          Set-Content -Path release-notes.md -Value $notes -Encoding UTF8
+          gh release create "v$version" $asset --target $env:GITHUB_SHA --title "WPS 文本校对 v$version · Windows x64 测试版" --notes-file release-notes.md --prerelease
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
