@@ -1,3 +1,4 @@
+// Shared release notes generator for the Windows and macOS installer workflows.
 const fs = require('node:fs');
 const version = require('../package.json').version;
 const notes = `Windows 10/11 x64 与 macOS 11 及以上版本的测试安装包。macOS 安装包支持 Intel 和 Apple 芯片。
