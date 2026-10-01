@@ -26,6 +26,26 @@ const DEFAULT_SETTINGS = {
     }
 };
 
+test("DeepSeek Flash proofreading settings pass the full 64K thinking budget to the API", async () => {
+    const harness = createHarness();
+    harness.window.WpsSettingsStore.updateSettings({ provider: "openai", profile: {
+        endpoint: "https://api.deepseek.com/chat/completions", model: "deepseek-flash"
+    } });
+    harness.window.WpsSettingsStore.saveRuntimeEndpoint("openai", "https://api.deepseek.com/chat/completions");
+    let requestBody;
+    harness.window.fetch = async (url, init) => {
+        requestBody = JSON.parse(init.body);
+        return { ok: true, json: async () => ({ choices: [{ finish_reason: "stop", message: {
+            content: '{"issues":[]}', reasoning_content: "test-only reasoning"
+        } }] }) };
+    };
+    await harness.window.runProofreading();
+    assert.ok(requestBody, "proofreading did not make a request: " + harness.status.text);
+    assert.equal(requestBody.max_tokens, 64 * 1024);
+    assert.equal(requestBody.thinking.type, "enabled");
+    assert.equal(requestBody.reasoning_effort, "high");
+});
+
 function createHarness(options = {}) {
     const selectedText = options.selectedText || "本段有错字。";
     const prefix = options.prefix === undefined ? "机密前文。" : options.prefix;

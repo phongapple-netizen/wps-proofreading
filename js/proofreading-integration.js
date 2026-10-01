@@ -461,7 +461,9 @@
             apiKey: api && typeof api.loadPassword === "function" ? api.loadPassword(settings.provider) : "",
             signal: currentController ? currentController.signal : undefined,
             maxOutputTokens: settings.provider === "openai" && profile &&
-                /deepseek/i.test(profile.model || "") ? 10000 : undefined
+                /deepseek/i.test(profile.model || "")
+                ? (String(profile.model || "").trim().toLowerCase() === "deepseek-flash" ? 64 * 1024 : 10000)
+                : undefined
         };
     }
 

@@ -1049,13 +1049,16 @@
 
     function createModelRequest(provider, endpoint, model, apiKey, prompt, requestOptions) {
         requestOptions = requestOptions || {};
-        var maxOutputTokens = Number(requestOptions.maxOutputTokens);
-        if (!Number.isFinite(maxOutputTokens) || maxOutputTokens <= 0) maxOutputTokens = 2000;
-        maxOutputTokens = Math.min(16000, Math.round(maxOutputTokens));
         var mode = provider === "ollama" ? "ollama" : "openai";
         var url = normalizeEndpoint(mode, endpoint);
         var modelName = String(model || "").trim();
         if (!modelName) throw new Error("请填写模型名称。");
+        var deepSeekFlash = mode === "openai" && modelName.toLowerCase() === "deepseek-flash";
+        var maxOutputTokens = Number(requestOptions.maxOutputTokens);
+        if (!Number.isFinite(maxOutputTokens) || maxOutputTokens <= 0) {
+            maxOutputTokens = deepSeekFlash ? 64 * 1024 : 2000;
+        }
+        maxOutputTokens = Math.max(1, Math.min(deepSeekFlash ? 384 * 1024 : 16000, Math.round(maxOutputTokens)));
         if (mode === "openai" && !/\/chat\/completions\/?$/i.test(url)) {
             throw new Error("请填写完整的 Chat Completions API 地址，例如 /v1/chat/completions。");
         }
@@ -1080,6 +1083,13 @@
                 response_format: { type: "json_object" },
                 messages: [{ role: "user", content: prompt }]
             };
+            // Reserve the model's standard thinking budget for reasoning and
+            // final JSON. DeepSeek ignores temperature in thinking mode.
+            if (deepSeekFlash) {
+                body.thinking = { type: "enabled" };
+                body.reasoning_effort = "high";
+                delete body.temperature;
+            }
         }
         return { url: url, headers: headers, body: body };
     }
@@ -1115,16 +1125,25 @@
         });
         var fetcher = fetchImpl || root.fetch;
         if (typeof fetcher !== "function") throw new Error("当前 WPS 内核不支持网络请求。");
+        var deepSeekFlash = provider === "openai" && request.body.model.toLowerCase() === "deepseek-flash";
+        var deadline = deepSeekFlash ? Date.now() + 600000 : 0;
+        var parent = options && options.signal;
+        // Reuse the fetch controller while reading the body, so cancellation
+        // and a body timeout also stop the actual network request.
+        var controller = typeof AbortController === "function" ? new AbortController() : null;
+
+        function stageTimeout() {
+            return deepSeekFlash ? Math.max(1, deadline - Date.now()) : 180000;
+        }
 
         function timed(operation, timeoutMs) {
             return new Promise(function (resolve, reject) {
-                var parent = options && options.signal;
                 if (parent && parent.aborted) {
+                    if (controller) controller.abort();
                     var early = new Error("已取消校对。");
                     early.name = "AbortError";
                     return reject(early);
                 }
-                var controller = typeof AbortController === "function" ? new AbortController() : null;
                 var settled = false;
                 var timer;
                 function finish(error, value) {
@@ -1160,7 +1179,7 @@
                 headers: request.headers,
                 body: JSON.stringify(request.body),
                 signal: signal
-            }); }, 180000);
+            }); }, stageTimeout());
         } catch (error) {
             if (error && error.name === "AbortError") throw error;
             if (error && /超时/.test(error.message)) throw error;
@@ -1173,7 +1192,7 @@
         }
         var payload;
         try {
-            payload = await timed(function () { return response.json(); }, 180000);
+            payload = await timed(function () { return response.json(); }, stageTimeout());
         } catch (error) {
             if (error && (error.name === "AbortError" || /超时/.test(error.message))) throw error;
             throw new Error("模型服务返回了无法识别的响应。");
