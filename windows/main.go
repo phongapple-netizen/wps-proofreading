@@ -140,10 +140,12 @@ func portAvailable() bool {
 }
 
 type opencodeState struct {
-	State   string `json:"state"`
-	Found   bool   `json:"found"`
-	Version string `json:"version"`
-	Managed bool   `json:"managed"`
+	State     string `json:"state"`
+	Found     bool   `json:"found"`
+	Version   string `json:"version"`
+	Managed   bool   `json:"managed"`
+	ErrorCode string `json:"errorCode,omitempty"`
+	Detail    string `json:"detail,omitempty"`
 }
 
 type opencodeCandidate struct {
@@ -230,6 +232,13 @@ func candidateFrom(path string) (opencodeCandidate, bool) {
 	if err != nil || info.IsDir() {
 		return opencodeCandidate{}, false
 	}
+	// npm's shim wraps a native binary. Prefer that binary to avoid cmd.exe.
+	if ext == ".cmd" {
+		native := filepath.Join(filepath.Dir(path), "node_modules", "opencode-ai", "bin", "opencode.exe")
+		if candidate, ok := candidateFrom(native); ok {
+			return candidate, true
+		}
+	}
 	return opencodeCandidate{path: path, cmd: ext == ".cmd"}, true
 }
 
@@ -265,8 +274,12 @@ func discoverFrom(lookup func(string) (string, error), profile, appData, program
 }
 
 func commandFor(candidate opencodeCandidate, args ...string) (*exec.Cmd, error) {
+	return commandForContext(context.Background(), candidate, args...)
+}
+
+func commandForContext(ctx context.Context, candidate opencodeCandidate, args ...string) (*exec.Cmd, error) {
 	if !candidate.cmd {
-		return exec.Command(candidate.path, args...), nil
+		return exec.CommandContext(ctx, candidate.path, args...), nil
 	}
 	// cmd.exe is needed for npm's opencode.cmd shim. Reject command metacharacters
 	// in the discovered executable path; API callers can never supply this path.
@@ -280,17 +293,17 @@ func commandFor(candidate opencodeCandidate, args ...string) (*exec.Cmd, error) 
 		}
 		command += ` "` + arg + `"`
 	}
-	return exec.Command("cmd.exe", "/d", "/s", "/c", `"`+command+`"`), nil
+	return batchCommand(ctx, command), nil
 }
 
 func (m *openCodeManager) version(c opencodeCandidate) string {
-	cmd, err := commandFor(c, "--version")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd, err := commandForContext(ctx, c, "--version")
 	if err != nil {
 		return ""
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	cmd = exec.CommandContext(ctx, cmd.Path, cmd.Args[1:]...)
+	hideWindow(cmd)
 	out, err := cmd.Output()
 	if err != nil {
 		return ""
@@ -381,18 +394,21 @@ func (m *openCodeManager) startServer() opencodeState {
 	if err != nil {
 		m.mu.Unlock()
 		state.State = "error"
+		state.ErrorCode, state.Detail = "invalid_command", "OpenCode 启动路径或参数无效。"
 		return state
 	}
 	logPath := filepath.Join(os.Getenv("LOCALAPPDATA"), "WPSProofreading", "opencode.log")
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
 		m.mu.Unlock()
 		state.State = "error"
+		state.ErrorCode, state.Detail = "log_unavailable", "无法创建本机启动日志目录，请检查目录权限。"
 		return state
 	}
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		m.mu.Unlock()
 		state.State = "error"
+		state.ErrorCode, state.Detail = "log_unavailable", "无法写入本机启动日志，请检查文件权限或占用情况。"
 		return state
 	}
 	output := &boundedLog{file: logFile}
@@ -403,6 +419,7 @@ func (m *openCodeManager) startServer() opencodeState {
 		output.Close()
 		m.mu.Unlock()
 		state.State = "error"
+		state.ErrorCode, state.Detail = "process_start_failed", "无法创建 OpenCode 进程，请检查程序是否可执行或被系统拦截。"
 		return state
 	}
 	run := &openCodeRun{process: process, output: output, done: make(chan struct{})}
@@ -459,11 +476,19 @@ func (m *openCodeManager) waitReady(c opencodeCandidate, run *openCodeRun) openc
 		if healthy, _, version := m.health(); healthy {
 			return opencodeState{State: "ready", Found: true, Version: firstNonempty(version, versionFn(c)), Managed: m.isManaged()}
 		}
+		if run != nil {
+			select {
+			case <-run.done:
+				m.stopManaged(run)
+				return opencodeState{State: "error", Found: true, ErrorCode: "process_exited", Detail: "OpenCode 启动进程已提前退出，请查看本机启动日志。"}
+			default:
+			}
+		}
 		// Our process may bind the port before its health endpoint is ready.
 		time.Sleep(interval)
 	}
 	m.stopManaged(run)
-	return opencodeState{State: "error", Found: true, Version: versionFn(c), Managed: m.isManaged()}
+	return opencodeState{State: "error", Found: true, Version: versionFn(c), Managed: m.isManaged(), ErrorCode: "startup_timeout", Detail: "等待 OpenCode 服务就绪超时，请查看本机启动日志。"}
 }
 func firstNonempty(a, b string) string {
 	if a != "" {
