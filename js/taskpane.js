@@ -1383,12 +1383,12 @@
                 var version = packageInfo && packageInfo.version
                     ? String(packageInfo.version).trim() : "";
                 element.textContent = version
-                    ? "WPS 文本校对 · v" + version
-                    : "WPS 文本校对 · 版本未知";
+                    ? "WPS 文本校改 · v" + version
+                    : "WPS 文本校改 · 版本未知";
                 return version;
             })
             .catch(function () {
-                element.textContent = "WPS 文本校对 · 版本未知";
+                element.textContent = "WPS 文本校改 · 版本未知";
                 return "";
             });
     }
