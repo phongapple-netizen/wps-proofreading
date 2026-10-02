@@ -783,18 +783,40 @@
     }
 
     async function nativeOpenCodeRequest(method, path) {
-        var response = await root.fetch("http://127.0.0.1:3891/api/opencode/" + path, {
-            method: method,
-            headers: method === "POST" ? { "Content-Type": "application/json" } : {},
-            credentials: "same-origin"
-        });
-        if (!response.ok) throw new Error("OpenCode 本机管理服务暂时不可用，请查看高级 / 故障排查。");
-        return response.json();
+        var controller = makeAbortController();
+        var timer;
+        try {
+            return await Promise.race([
+                (async function () {
+                    var response = await root.fetch("http://127.0.0.1:3891/api/opencode/" + path, {
+                        method: method,
+                        headers: method === "POST" ? { "Content-Type": "application/json" } : {},
+                        credentials: "same-origin",
+                        signal: controller ? controller.signal : undefined
+                    });
+                    if (!response.ok) throw new Error("OpenCode 本机管理服务暂时不可用，请查看高级 / 故障排查。");
+                    return response.json();
+                })(),
+                new Promise(function (_, reject) {
+                    timer = setTimeout(function () {
+                        if (controller) controller.abort();
+                        reject(new Error("OpenCode 自动连接超时，请重试。"));
+                    }, method === "POST" ? 30000 : 5000);
+                })
+            ]);
+        } finally { clearTimeout(timer); }
     }
 
     async function ensureOpenCodeReady(isCurrentDetection, showState) {
         if (!canManageOpenCode()) return null;
-        var status = await nativeOpenCodeRequest("GET", "status");
+        var status;
+        try {
+            status = await nativeOpenCodeRequest("GET", "status");
+        } catch (error) {
+            // Older asset servers lack the manager API. An already running
+            // OpenCode can still be used through its own health/model endpoints.
+            return null;
+        }
         if (!isCurrentDetection()) return { stale: true };
         if (status.state === "stopped") {
             showState("正在启动 OpenCode…", "working");
@@ -902,6 +924,7 @@
     async function requestProofreadingModel(options, prompt) {
         if (options.provider === "opencode") {
             if (!root.WpsOpenCodeClient) throw new Error("OpenCode 客户端模块没有加载。");
+            await ensureOpenCodeConnection(options);
             return root.WpsOpenCodeClient.request({
                 endpoint: options.endpoint,
                 model: options.model,
@@ -910,6 +933,19 @@
             }, prompt, root.fetch);
         }
         return root.WpsProofreadingCore.requestModel(options, prompt);
+    }
+
+    async function ensureOpenCodeConnection(options) {
+        if (options.provider !== "opencode" || !canManageOpenCode() || options.apiKey ||
+            options.endpoint.replace(/\/+$/, "") !== "http://127.0.0.1:4096") return;
+        function isCurrent() {
+            var current = modelOptions();
+            return !(options.signal && options.signal.aborted) && current.provider === options.provider &&
+                current.endpoint === options.endpoint && current.apiKey === options.apiKey;
+        }
+        if (!isCurrent()) throw new Error("模型设置已变化或请求已取消，请重试。");
+        var status = await ensureOpenCodeReady(isCurrent, function () {});
+        if ((status && status.stale) || !isCurrent()) throw new Error("模型设置已变化或请求已取消，请重试。");
     }
 
     function reportProgress(percent, label) {
@@ -1966,6 +2002,7 @@
     root.runProofreading = runProofreading;
     root.cancelProofreading = cancelProofreading;
     root.refreshProviderModels = refreshProviderModels;
+    root.ensureOpenCodeConnection = ensureOpenCodeConnection;
     root.getModelConnectionState = modelConnectionState;
     root.invalidateModelConnection = invalidateModelConnection;
     root.locateProofreadingIssue = locateProofreadingIssue;
