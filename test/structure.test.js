@@ -28,6 +28,7 @@ function makeTaskPaneElement(tag) {
     children: [],
     parent: null,
     listeners: {},
+    operations: { append: 0, insert: 0, remove: 0 },
     attributes: {},
     className: '',
     hidden: false,
@@ -36,15 +37,37 @@ function makeTaskPaneElement(tag) {
     open: false,
     style: {}
   };
+  function detach(child) {
+    if (!child.parent) return;
+    const index = child.parent.children.indexOf(child);
+    if (index >= 0) {
+      child.parent.children.splice(index, 1);
+      child.parent.operations.remove++;
+    }
+    child.parent = null;
+  }
   node.appendChild = (child) => {
+    detach(child);
     child.parent = node;
     node.children.push(child);
+    node.operations.append++;
     return child;
   };
   node.insertBefore = (child, before) => {
+    if (child === before) return child;
+    detach(child);
     child.parent = node;
     const index = node.children.indexOf(before);
     node.children.splice(index < 0 ? node.children.length : index, 0, child);
+    node.operations.insert++;
+    return child;
+  };
+  node.removeChild = (child) => {
+    const index = node.children.indexOf(child);
+    if (index < 0) throw new Error('removeChild target is not a child');
+    node.children.splice(index, 1);
+    child.parent = null;
+    node.operations.remove++;
     return child;
   };
   node.setAttribute = (name, value) => { node.attributes[name] = String(value); };
@@ -93,7 +116,11 @@ function makeTaskPaneElement(tag) {
   };
   Object.defineProperty(node, 'textContent', {
     get() { return node._textContent || node.children.map((child) => child.textContent).join(''); },
-    set(value) { node._textContent = String(value == null ? '' : value); node.children = []; }
+    set(value) {
+      node.children.forEach(child => { child.parent = null; node.operations.remove++; });
+      node._textContent = String(value == null ? '' : value);
+      node.children = [];
+    }
   });
   node.focus = () => {};
   return node;
@@ -116,7 +143,8 @@ function createResultHarness(extraWindow = {}) {
       activeElement: null,
       getElementById: (id) => elements[id] || null,
       createElement: (tag) => makeTaskPaneElement(tag),
-      addEventListener(type, fn) { (documentListeners[type] = documentListeners[type] || []).push(fn); }
+      addEventListener(type, fn) { (documentListeners[type] = documentListeners[type] || []).push(fn); },
+      fire(type, event) { (documentListeners[type] || []).forEach(fn => fn(event || {})); }
     },
     locateProofreadingIssue: (id) => { calls.push(['locate', id]); return true; },
     applyProofreadingIssue: (id) => { calls.push(['apply', id]); return true; },
@@ -971,6 +999,124 @@ test('incremental cards keep filter, tab, scroll, and expanded analysis while wr
   assert.equal(elements['apply-all'].disabled, false);
 });
 
+test('first-pass completion unlocks apply actions while busy, keeps rule saving locked, and permits ignore', () => {
+  const { win, elements, calls, ruleDrafts } = createResultHarness();
+  const list = elements['proofreading-issues'];
+  const issue = { id: 'busy-item', category: 'typo', original: '错字', suggestion: '正字',
+    reason: '分析', status: 'pending', autoFixable: true, confidence: 0.95 };
+  win.setProofreadingBusy(true);
+  win.setProofreadingIssues([issue]);
+  const card = list.children[0];
+  const actions = issueActions(card).children;
+  const apply = actions.find(button => button.textContent === '修正');
+  const ignore = actions.find(button => button.textContent === '忽略');
+  const save = findNode(card, node => node.tag === 'button' && node.textContent === '保存为规则');
+  assert.equal(apply.disabled, true);
+  assert.equal(ignore.disabled, false);
+  assert.equal(elements['apply-all'].disabled, true);
+  assert.equal(save.disabled, true);
+  ignore.fire('click');
+  assert.deepEqual(calls.at(-1), ['ignore', 'busy-item']);
+
+  assert.equal(win.setProofreadingFirstPassComplete(true), true);
+  assert.equal(apply.disabled, false);
+  assert.equal(ignore.disabled, false);
+  assert.equal(elements['apply-all'].disabled, false);
+  elements['apply-all'].fire('click');
+  assert.deepEqual(calls.at(-1), ['apply-all']);
+  apply.fire('click');
+  assert.deepEqual(calls.at(-1), ['apply', 'busy-item']);
+  save.fire('click');
+  assert.equal(ruleDrafts.length, 0, 'rule saving stays locked during a run');
+  win.setProofreadingActionBusy(true);
+  assert.equal(apply.disabled, true, 'actionBusy keeps actions locked after first-pass completion');
+});
+
+test('100+ issue updates reuse unchanged keyed cards and create only changed and new cards in input order', () => {
+  const { win, elements, calls } = createResultHarness();
+  const list = elements['proofreading-issues'];
+  let articleCreates = 0;
+  const createElement = win.document.createElement;
+  win.document.createElement = tag => {
+    if (tag === 'article') articleCreates++;
+    return createElement(tag);
+  };
+  const initial = Array.from({ length: 120 }, (_, index) => ({
+    id: `issue-${index}`, category: 'typo', original: `错${index}`, suggestion: `正${index}`,
+    status: 'pending', reason: `分析${index}`
+  }));
+  win.setProofreadingIssues(initial);
+  assert.equal(articleCreates, 120);
+  const identities = new Map(list.children.map(card => [card.getAttribute('data-issue-id'), card]));
+  Object.keys(list.operations).forEach(key => { list.operations[key] = 0; });
+  articleCreates = 0;
+  win.setProofreadingIssues(initial.map(issue => Object.assign({}, issue)));
+  assert.equal(articleCreates, 0);
+  assert.deepEqual(list.operations, { append: 0, insert: 0, remove: 0 });
+
+  articleCreates = 0;
+  const next = initial.map(issue => issue.id === 'issue-57'
+    ? Object.assign({}, issue, { reason: '已更新分析' }) : issue);
+  next.push({ id: 'issue-new', category: 'grammar', original: '病句',
+    suggestion: '通顺', status: 'pending', reason: '新增分析' });
+  Object.keys(list.operations).forEach(key => { list.operations[key] = 0; });
+  win.setProofreadingIssues(next);
+  assert.equal(articleCreates, 2);
+  assert.equal(list.children.length, 121);
+  assert.equal(list.operations.remove, 1, 'only the changed card is detached');
+  assert.equal(list.operations.insert, 2, 'only the changed card and appended card are inserted');
+  assert.deepEqual(list.children.map(card => card.getAttribute('data-issue-id')),
+    next.map(issue => issue.id));
+  for (const issue of next) {
+    if (issue.id === 'issue-57' || issue.id === 'issue-new') continue;
+    assert.equal(list.children.find(card => card.getAttribute('data-issue-id') === issue.id), identities.get(issue.id));
+  }
+  list.children.find(card => card.getAttribute('data-issue-id') === 'issue-new').fire('click');
+  assert.deepEqual(calls.at(-1), ['locate', 'issue-new']);
+});
+
+test('an open reused issue menu still dismisses with Escape after an incremental batch', () => {
+  const { win, elements } = createResultHarness();
+  const issue = { id: 'menu', category: 'typo', original: '错字', suggestion: '正字', status: 'pending' };
+  win.setProofreadingIssues([issue]);
+  const card = elements['proofreading-issues'].children[0];
+  const toggle = findNode(card, node => node.className === 'issue-more-toggle');
+  const menu = findNode(card, node => node.className === 'issue-menu');
+  toggle.fire('click');
+  assert.equal(menu.hidden, false);
+  win.setProofreadingIssues([issue, { ...issue, id: 'new-menu' }]);
+  assert.equal(elements['proofreading-issues'].children[0], card);
+  win.document.fire('keydown', { key: 'Escape' });
+  assert.equal(menu.hidden, true);
+  assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+});
+
+test('status changes replace one card in the processed section and preserve details state', () => {
+  const { win, elements } = createResultHarness();
+  const list = elements['proofreading-issues'];
+  const pending = { id: 'transition', category: 'typo', original: '错字', suggestion: '正字',
+    reason: '分析', status: 'pending' };
+  const accepted = { id: 'already-done', category: 'typo', original: '原字', suggestion: '新字',
+    status: 'accepted' };
+  win.setProofreadingIssues([pending, accepted]);
+  const details = list.children.find(child => child.className === 'processed-issues');
+  details.open = true;
+  const oldCard = list.children[0];
+  findNode(oldCard, node => node.className === 'issue-analysis').open = true;
+  list.scrollTop = 88;
+  Object.keys(list.operations).forEach(key => { list.operations[key] = 0; });
+
+  win.setProofreadingIssues([{ ...pending, status: 'accepted' }, accepted]);
+  assert.equal(list.children.length, 1);
+  assert.equal(list.children[0], details);
+  assert.equal(details.open, true);
+  assert.equal(details.children[1].children.length, 2);
+  assert.notEqual(details.children[1].children[0], oldCard);
+  assert.equal(findNode(details.children[1].children[0], node => node.className === 'issue-analysis').open, true);
+  assert.equal(list.scrollTop, 88);
+  assert.equal(list.operations.remove, 1, 'only the replaced pending card is removed from the issue list');
+});
+
 test('result summaries count pending review, processed, stale, and strict safe-format actions', () => {
   const { win, elements, calls } = createResultHarness();
   win.setProofreadingIssues([
@@ -1010,7 +1156,7 @@ test('result summaries count pending review, processed, stale, and strict safe-f
 
   win.setProofreadingBusy(true);
   const waitingCard = elements['proofreading-issues'].children.find((card) =>
-    card.className === 'issue-card' && issueActions(card).children[0].textContent === '修正');
+    card.className.split(/\s+/).includes('issue-card') && issueActions(card).children[0].textContent === '修正');
   assert.ok(waitingCard);
   assert.equal(issueActions(waitingCard).children[0].disabled, true);
   win.setProofreadingBusy(false);

@@ -7,6 +7,7 @@
         filter: "all",
         busy: false,
         actionBusy: false,
+        firstPassComplete: false,
         rewriteBusy: false,
         appMode: "proofread",
         tab: "issues",
@@ -16,6 +17,10 @@
     };
     var pendingFullDocumentConfirmation = null;
     var renderedIssueActionButtons = [];
+    var issueCardCache = Object.create(null);
+    var processedIssuesDetails = null;
+    var processedIssuesSummary = null;
+    var processedIssuesList = null;
     var locateToastTimer = null;
     var activeIssueMenu = null;
     var issueMenuDismissBound = false;
@@ -95,6 +100,7 @@
         }
         if (!state.busy) setProofreadingProgress(0, "");
         renderIssues();
+        updateIssueBusyControls();
         updateActionControls();
         return state.busy;
     }
@@ -106,13 +112,35 @@
 
         if (runButton) runButton.disabled = state.busy || state.actionBusy;
         if (applyAllButton) {
-            applyAllButton.disabled = state.busy || state.actionBusy || !autoFixableCount();
-            if (state.busy) applyAllButton.title = "校对完成后可修改正文";
+            applyAllButton.disabled = issueWriteLocked() || state.actionBusy || !autoFixableCount();
+            applyAllButton.title = issueWriteLocked() ? "校对完成后可修改正文" :
+                pendingCount() > autoFixableCount()
+                    ? "仅自动修正内置低风险标点格式规则" : "";
         }
         if (rerunButton) rerunButton.disabled = state.actionBusy;
         renderedIssueActionButtons.forEach(function (button) {
-            button.disabled = state.actionBusy || button._proofreadingActionDisabled === true;
+            button.disabled = state.actionBusy || button._proofreadingActionDisabled === true ||
+                (state.busy && button._proofreadingWriteAction === true && !state.firstPassComplete) ||
+                (state.busy && button._proofreadingRuleAction === true);
         });
+    }
+
+    function issueWriteLocked() { return state.busy && !state.firstPassComplete; }
+
+    function updateIssueBusyControls() {
+        renderedIssueActionButtons.forEach(function (button) {
+            button.disabled = state.actionBusy || button._proofreadingActionDisabled === true ||
+                (state.busy && button._proofreadingWriteAction === true && !state.firstPassComplete) ||
+                (state.busy && button._proofreadingRuleAction === true);
+            if (button._proofreadingWriteAction) button.title = issueWriteLocked() ? "校对完成后可修改正文" : "";
+        });
+        updateActionControls();
+    }
+
+    function setProofreadingFirstPassComplete(value) {
+        state.firstPassComplete = value === true;
+        updateIssueBusyControls();
+        return state.firstPassComplete;
     }
 
     function setProofreadingActionBusy(value) {
@@ -386,8 +414,8 @@
         var applyAllButton = byId("apply-all");
         if (applyAllButton) {
             applyAllButton.textContent = "修正安全格式项（" + autoFixable + "）";
-            applyAllButton.disabled = state.busy || state.actionBusy || autoFixable === 0;
-            applyAllButton.title = state.busy ? "校对完成后可修改正文" :
+            applyAllButton.disabled = issueWriteLocked() || state.actionBusy || autoFixable === 0;
+            applyAllButton.title = issueWriteLocked() ? "校对完成后可修改正文" :
                 pendingCount() > autoFixableCount()
                     ? "仅自动修正内置低风险标点格式规则" : "";
         }
@@ -497,6 +525,10 @@
 
     function clearIssues() {
         state.issues = [];
+        issueCardCache = Object.create(null);
+        processedIssuesDetails = null;
+        processedIssuesSummary = null;
+        processedIssuesList = null;
         renderedIssueActionButtons = [];
         updateCount();
         var list = byId("proofreading-issues");
@@ -512,6 +544,7 @@
     }
 
     function beginProofreadingRun() {
+        state.firstPassComplete = false;
         state.emptyMessage = "校对结果会显示在这里。";
         state.filter = "all";
         var filter = byId("issue-filter");
@@ -542,6 +575,10 @@
     function restoreProofreadingView(view) {
         var saved = view || {};
         state.issues = saved.issues || [];
+        issueCardCache = Object.create(null);
+        processedIssuesDetails = null;
+        processedIssuesSummary = null;
+        processedIssuesList = null;
         state.history = saved.history || [];
         state.historyIds = saved.historyIds || {};
         state.filter = saved.filter || "all";
@@ -602,15 +639,17 @@
         button.className = "issue-action " + className;
         button.textContent = label;
         button._proofreadingActionDisabled = disabled === true;
-        button.disabled = state.actionBusy || button._proofreadingActionDisabled;
-        if (state.busy && (callbackName === "applyProofreadingIssue" ||
-            callbackName === "undoProofreadingIssue")) button.title = "校对完成后可修改正文";
+        button._proofreadingWriteAction = callbackName === "applyProofreadingIssue" ||
+            callbackName === "undoProofreadingIssue";
+        button.disabled = state.actionBusy || button._proofreadingActionDisabled ||
+            (issueWriteLocked() && button._proofreadingWriteAction);
+        if (button._proofreadingWriteAction && issueWriteLocked()) button.title = "校对完成后可修改正文";
         renderedIssueActionButtons.push(button);
         button.setAttribute("data-issue-id", issue.id);
         if (!button._proofreadingActionDisabled) {
             button.addEventListener("click", function (event) {
                 if (event && typeof event.stopPropagation === "function") event.stopPropagation();
-                if (state.actionBusy) return;
+                if (state.actionBusy || (button._proofreadingWriteAction && issueWriteLocked())) return;
                 callAction(callbackName, issue.id, "当前操作未能完成。");
             });
         }
@@ -632,13 +671,19 @@
         button.className = "issue-action issue-action-secondary";
         button.textContent = issue.ruleSaved ? "已保存规则" : "保存为规则";
         button._proofreadingActionDisabled = disabled === true || issue.ruleSaved === true;
-        button.disabled = state.actionBusy || button._proofreadingActionDisabled;
+        button._proofreadingRuleAction = true;
+        button.disabled = state.actionBusy || state.busy || button._proofreadingActionDisabled;
         button.setAttribute("data-issue-id", issue.id);
         renderedIssueActionButtons.push(button);
         if (!button._proofreadingActionDisabled) {
             button.addEventListener("click", function (event) {
                 if (event && typeof event.stopPropagation === "function") event.stopPropagation();
-                if (state.actionBusy || !issueContextAvailable(issue)) return;
+                if (state.actionBusy) return;
+                if (!issueContextAvailable(issue)) {
+                    setProofreadingStatus("请切回原文档或在当前文档重新校对。", "warning");
+                    return;
+                }
+                if (state.busy) return;
                 if (typeof root.openIssueRuleDraft !== "function") {
                     setProofreadingStatus("规则中心尚未就绪。", "warning");
                     return;
@@ -707,12 +752,18 @@
         save.type = "button";
         save.textContent = issue.ruleSaved ? "已保存规则" : "保存为规则";
         save._proofreadingActionDisabled = disabled === true || !canSaveIssueAsRule(issue) || issue.ruleSaved === true;
-        save.disabled = state.actionBusy || save._proofreadingActionDisabled;
+        save._proofreadingRuleAction = true;
+        save.disabled = state.actionBusy || state.busy || save._proofreadingActionDisabled;
         save.setAttribute("data-issue-id", issue.id);
         renderedIssueActionButtons.push(save);
         if (!save._proofreadingActionDisabled) save.addEventListener("click", function (event) {
             if (event && event.stopPropagation) event.stopPropagation();
-            if (state.actionBusy || !issueContextAvailable(issue)) return;
+            if (state.actionBusy) return;
+            if (!issueContextAvailable(issue)) {
+                setProofreadingStatus("请切回原文档或在当前文档重新校对。", "warning");
+                return;
+            }
+            if (state.busy) return;
             if (typeof root.openIssueRuleDraft !== "function") {
                 setProofreadingStatus("规则中心尚未就绪。", "warning");
                 return;
@@ -771,17 +822,176 @@
             (issue.suggestion === "" && !isDeleteIssue(issue));
     }
 
+    function reconcileChildren(parent, desiredChildren) {
+        if (!parent) return;
+        var children = parent.children;
+        var desiredLookup = new Set(desiredChildren);
+        for (var staleIndex = children.length - 1; staleIndex >= 0; staleIndex--) {
+            if (!desiredLookup.has(children[staleIndex]) && parent.removeChild) {
+                parent.removeChild(children[staleIndex]);
+            }
+        }
+        children = parent.children;
+        for (var index = 0; index < desiredChildren.length; index++) {
+            var desired = desiredChildren[index];
+            var current = children[index] || null;
+            if (current === desired) continue;
+            if (parent.insertBefore) parent.insertBefore(desired, current);
+            else parent.appendChild(desired);
+            children = parent.children;
+        }
+        while (children.length > desiredChildren.length) {
+            if (parent.removeChild) parent.removeChild(children[children.length - 1]);
+            else parent.textContent = "";
+            children = parent.children;
+        }
+    }
+
+    function createIssueCard(issue, expanded) {
+        var pending = issue.status === "pending";
+        var reviewOnly = isReviewOnlyIssue(issue);
+        var deleteIssue = isDeleteIssue(issue);
+        var card = root.document.createElement("article");
+        card.setAttribute("data-issue-id", issue.id);
+        card.className = "issue-card" + ((issue.needsReview || reviewOnly) ? " is-review" : "") + (pending && !state.busy ? " is-locatable" : "");
+        if (pending) {
+            card.addEventListener("click", function () {
+                if (state.actionBusy) return;
+                callAction("locateProofreadingIssue", issue.id, "当前操作未能完成。");
+            });
+        }
+
+        var header = root.document.createElement("div");
+        header.className = "issue-card-header";
+
+        var badges = root.document.createElement("div");
+        badges.className = "issue-badges";
+        var chip = root.document.createElement("span");
+        chip.className = "chip chip-" + (issue.category || "general");
+        chip.textContent = issue.categoryLabel;
+        badges.appendChild(chip);
+        if (issue.origin === "rule+ai") {
+            var sourceBadge = root.document.createElement("span");
+            sourceBadge.className = issue.aiConflict ? "badge-conflict" : "badge-source";
+            sourceBadge.textContent = issue.aiConflict ? "规则与 AI 意见不同" : "规则 + AI";
+            badges.appendChild(sourceBadge);
+        } else if (issue.origin === "ai-review") {
+            var reviewBadge = root.document.createElement("span");
+            reviewBadge.className = "badge-source";
+            reviewBadge.textContent = "AI核查规则";
+            badges.appendChild(reviewBadge);
+        } else if (issue.origin === "rule") {
+            var ruleBadge = root.document.createElement("span");
+            ruleBadge.className = "badge-source";
+            ruleBadge.textContent = "本地规则";
+            badges.appendChild(ruleBadge);
+        }
+        if (issue.needsReview) {
+            var deepBadge = root.document.createElement("span");
+            deepBadge.className = "badge-deep";
+            deepBadge.textContent = "需人工复核";
+            badges.appendChild(deepBadge);
+        }
+        header.appendChild(badges);
+
+        var actions = root.document.createElement("div");
+        actions.className = "issue-actions";
+        if (!pending || !reviewOnly) {
+            actions.appendChild(actionButton(
+                issue.status === "accepted" ? "撤销" :
+                    issue.status === "ignored" ? "已忽略" :
+                        issue.status === "stale" ? "需重查" : issue.needsReview ? "确认修正" : "修正",
+                issue.needsReview ? "issue-action-review issue-action-secondary" : "issue-action-primary",
+                issue,
+                issue.status === "accepted" ? "undoProofreadingIssue" : "applyProofreadingIssue",
+                (!pending && issue.status !== "accepted") ||
+                    (pending && issue.actionable === false)
+            ));
+        }
+        actions.appendChild(actionButton("忽略", "issue-action-secondary button-text", issue, "ignoreProofreadingIssue", !pending));
+        if (canSaveIssueAsRule(issue) || issue.ruleSaved) {
+            appendIssueMenu(actions, issue, (!pending && issue.status !== "accepted"));
+        }
+        card.appendChild(header);
+
+        if (issue.original || issue.suggestion) {
+            var diff = root.document.createElement("p");
+            diff.className = "issue-diff";
+            if (issue.original === issue.suggestion) {
+                appendChangedText(diff, issue.original, issue.suggestion);
+            } else if (reviewOnly) {
+                var reviewLabel = root.document.createElement("span");
+                reviewLabel.className = "issue-review-label";
+                reviewLabel.textContent = "需核对";
+                diff.appendChild(reviewLabel);
+                var reviewText = root.document.createElement("span");
+                reviewText.className = "issue-review-text";
+                reviewText.textContent = issue.original || issue.suggestion;
+                diff.appendChild(reviewText);
+            } else {
+                appendChangedText(diff, issue.original, deleteIssue ? "" : issue.suggestion);
+                if (deleteIssue) {
+                    var deleteLabel = root.document.createElement("span");
+                    deleteLabel.className = "diff-delete-note";
+                    deleteLabel.textContent = "（建议删除）";
+                    diff.appendChild(deleteLabel);
+                }
+            }
+            card.appendChild(diff);
+        }
+
+        if ((issue.origin === "rule" || issue.origin === "rule+ai" ||
+            issue.origin === "ai-review") && (issue.ruleName || issue.ruleSource)) {
+            var ruleMeta = root.document.createElement("p");
+            ruleMeta.className = "issue-state";
+            ruleMeta.textContent = (issue.ruleName ? "规则：" + issue.ruleName : "自定义规则") +
+                (issue.ruleSource ? " · 来源：" + issue.ruleSource : "");
+            card.appendChild(ruleMeta);
+        }
+
+        if (issue.reason) {
+            var analysis = root.document.createElement("details");
+            analysis.className = "issue-analysis";
+            analysis.open = expanded[issue.id] === true;
+            analysis.addEventListener("click", function (event) {
+                if (event && typeof event.stopPropagation === "function") event.stopPropagation();
+            });
+            var summary = root.document.createElement("summary");
+            summary.textContent = "错误分析";
+            analysis.appendChild(summary);
+            var quote = root.document.createElement("blockquote");
+            quote.textContent = issue.reason;
+            analysis.appendChild(quote);
+            card.appendChild(analysis);
+        }
+
+        var stateChip = root.document.createElement("span");
+        stateChip.className = "issue-status" + ((issue.needsReview || reviewOnly) ? " is-review" : "");
+        stateChip.textContent = issue.status === "pending"
+            ? issue.needsReview || reviewOnly ? "需复核" : "待确认"
+            : issue.status === "stale" ? "需重查" : issue.status === "accepted" ? "已修正" : issue.status === "ignored" ? "已忽略" : issue.status;
+        header.appendChild(stateChip);
+        if (issue.ruleSaved) {
+            var savedLine = root.document.createElement("p");
+            savedLine.className = "issue-state rule-saved-feedback";
+            savedLine.textContent = "已保存为固定替换规则，下次校对时生效。";
+            card.appendChild(savedLine);
+        }
+        card.appendChild(actions);
+
+        return card;
+
+    }
+
     function renderIssues(issues) {
         if (Array.isArray(issues)) {
-            var previous = state.issues;
+            var previousById = Object.create(null);
+            state.issues.forEach(function (candidate) { previousById[candidate.id] = candidate; });
             state.issues = issues.map(function (issue, index) {
                 var normalized = normalizeIssue(issue, index);
-                var prior = previous.find(function (candidate) {
-                    return candidate.id === normalized.id &&
-                        candidate.original === normalized.original &&
-                        candidate.suggestion === normalized.suggestion;
-                });
-                if (prior && prior.ruleSaved) normalized.ruleSaved = true;
+                var prior = previousById[normalized.id];
+                if (prior && prior.original === normalized.original &&
+                    prior.suggestion === normalized.suggestion && prior.ruleSaved) normalized.ruleSaved = true;
                 return normalized;
             });
         }
@@ -797,6 +1007,11 @@
         }
 
         var shown = visibleIssues();
+        var visibleIds = Object.create(null);
+        state.issues.forEach(function (issue) { visibleIds[issue.id] = true; });
+        Object.keys(issueCardCache).forEach(function (id) {
+            if (!visibleIds[id]) delete issueCardCache[id];
+        });
         var previousScrollTop = list.scrollTop;
         var expanded = Object.create(null);
         var processedWasOpen = !!(list.querySelector &&
@@ -806,9 +1021,14 @@
             if (analysis && analysis.open) expanded[card.getAttribute("data-issue-id")] = true;
         });
         renderedIssueActionButtons = [];
-        activeIssueMenu = null;
-        list.textContent = "";
         if (!shown.length) {
+            if (activeIssueMenu) {
+                activeIssueMenu.menu.hidden = true;
+                activeIssueMenu.toggle.setAttribute("aria-expanded", "false");
+                activeIssueMenu = null;
+            }
+            reconcileChildren(list, []);
+            if (processedIssuesList) reconcileChildren(processedIssuesList, []);
             list.hidden = true;
             if (emptyState) {
                 emptyState.textContent = state.issues.length
@@ -820,156 +1040,58 @@
         }
 
         var processed = shown.filter(isProcessedIssue);
-        var processedDetails = null;
-        var processedList = null;
-        if (processed.length) {
-            processedDetails = root.document.createElement("details");
-            processedDetails.className = "processed-issues";
-            processedDetails.open = processedWasOpen;
-            var processedSummary = root.document.createElement("summary");
-            processedSummary.textContent = "已处理（" + processed.length + "）";
-            processedDetails.appendChild(processedSummary);
-            processedList = root.document.createElement("div");
-            processedList.className = "processed-issues-list";
-            processedDetails.appendChild(processedList);
+        if (processed.length && !processedIssuesDetails) {
+            processedIssuesDetails = root.document.createElement("details");
+            processedIssuesDetails.className = "processed-issues";
+            processedIssuesDetails.open = processedWasOpen;
+            processedIssuesSummary = root.document.createElement("summary");
+            processedIssuesSummary.textContent = "已处理（" + processed.length + "）";
+            processedIssuesDetails.appendChild(processedIssuesSummary);
+            processedIssuesList = root.document.createElement("div");
+            processedIssuesList.className = "processed-issues-list";
+            processedIssuesDetails.appendChild(processedIssuesList);
+        }
+        if (processed.length && processedIssuesDetails) {
+            processedIssuesDetails.open = processedWasOpen || processedIssuesDetails.open;
+            processedIssuesSummary.textContent = "已处理（" + processed.length + "）";
         }
 
+        var pendingCards = [];
+        var processedCards = [];
+        var nextActionButtons = [];
         shown.forEach(function (issue) {
-            var pending = issue.status === "pending";
-            var reviewOnly = isReviewOnlyIssue(issue);
-            var deleteIssue = isDeleteIssue(issue);
-            var card = root.document.createElement("article");
-            card.setAttribute("data-issue-id", issue.id);
-            card.className = "issue-card" + ((issue.needsReview || reviewOnly) ? " is-review" : "") + (pending && !state.busy ? " is-locatable" : "");
-            if (pending) {
-                card.addEventListener("click", function () {
-                    if (state.actionBusy) return;
-                    callAction("locateProofreadingIssue", issue.id, "当前操作未能完成。");
-                });
+            var signature = JSON.stringify(issue);
+            var cached = issueCardCache[issue.id];
+            var card;
+            if (cached && cached.signature === signature) {
+                card = cached.card;
+                cached.buttons.forEach(function (button) { nextActionButtons.push(button); });
+            } else {
+                renderedIssueActionButtons = nextActionButtons;
+                var buttonStart = renderedIssueActionButtons.length;
+                card = createIssueCard(issue, expanded);
+                issueCardCache[issue.id] = { signature: signature, card: card,
+                    buttons: renderedIssueActionButtons.slice(buttonStart) };
+                nextActionButtons = renderedIssueActionButtons;
             }
-
-            var header = root.document.createElement("div");
-            header.className = "issue-card-header";
-
-            var badges = root.document.createElement("div");
-            badges.className = "issue-badges";
-            var chip = root.document.createElement("span");
-            chip.className = "chip chip-" + (issue.category || "general");
-            chip.textContent = issue.categoryLabel;
-            badges.appendChild(chip);
-            if (issue.origin === "rule+ai") {
-                var sourceBadge = root.document.createElement("span");
-                sourceBadge.className = issue.aiConflict ? "badge-conflict" : "badge-source";
-                sourceBadge.textContent = issue.aiConflict ? "规则与 AI 意见不同" : "规则 + AI";
-                badges.appendChild(sourceBadge);
-            } else if (issue.origin === "ai-review") {
-                var reviewBadge = root.document.createElement("span");
-                reviewBadge.className = "badge-source";
-                reviewBadge.textContent = "AI核查规则";
-                badges.appendChild(reviewBadge);
-            } else if (issue.origin === "rule") {
-                var ruleBadge = root.document.createElement("span");
-                ruleBadge.className = "badge-source";
-                ruleBadge.textContent = "本地规则";
-                badges.appendChild(ruleBadge);
-            }
-            if (issue.needsReview) {
-                var deepBadge = root.document.createElement("span");
-                deepBadge.className = "badge-deep";
-                deepBadge.textContent = "需人工复核";
-                badges.appendChild(deepBadge);
-            }
-            header.appendChild(badges);
-
-            var actions = root.document.createElement("div");
-            actions.className = "issue-actions";
-            if (!pending || !reviewOnly) {
-                actions.appendChild(actionButton(
-                    issue.status === "accepted" ? "撤销" :
-                        issue.status === "ignored" ? "已忽略" :
-                            issue.status === "stale" ? "需重查" : issue.needsReview ? "确认修正" : "修正",
-                    issue.needsReview ? "issue-action-review issue-action-secondary" : "issue-action-primary",
-                    issue,
-                    issue.status === "accepted" ? "undoProofreadingIssue" : "applyProofreadingIssue",
-                    state.busy || (!pending && issue.status !== "accepted") ||
-                        (pending && issue.actionable === false)
-                ));
-            }
-            actions.appendChild(actionButton("忽略", "issue-action-secondary button-text", issue, "ignoreProofreadingIssue", state.busy || !pending));
-            if (canSaveIssueAsRule(issue) || issue.ruleSaved) {
-                appendIssueMenu(actions, issue, state.busy || (!pending && issue.status !== "accepted"));
-            }
-            card.appendChild(header);
-
-            if (issue.original || issue.suggestion) {
-                var diff = root.document.createElement("p");
-                diff.className = "issue-diff";
-                if (issue.original === issue.suggestion) {
-                    appendChangedText(diff, issue.original, issue.suggestion);
-                } else if (reviewOnly) {
-                    var reviewLabel = root.document.createElement("span");
-                    reviewLabel.className = "issue-review-label";
-                    reviewLabel.textContent = "需核对";
-                    diff.appendChild(reviewLabel);
-                    var reviewText = root.document.createElement("span");
-                    reviewText.className = "issue-review-text";
-                    reviewText.textContent = issue.original || issue.suggestion;
-                    diff.appendChild(reviewText);
-                } else {
-                    appendChangedText(diff, issue.original, deleteIssue ? "" : issue.suggestion);
-                    if (deleteIssue) {
-                        var deleteLabel = root.document.createElement("span");
-                        deleteLabel.className = "diff-delete-note";
-                        deleteLabel.textContent = "（建议删除）";
-                        diff.appendChild(deleteLabel);
-                    }
-                }
-                card.appendChild(diff);
-            }
-
-            if ((issue.origin === "rule" || issue.origin === "rule+ai" ||
-                issue.origin === "ai-review") && (issue.ruleName || issue.ruleSource)) {
-                var ruleMeta = root.document.createElement("p");
-                ruleMeta.className = "issue-state";
-                ruleMeta.textContent = (issue.ruleName ? "规则：" + issue.ruleName : "自定义规则") +
-                    (issue.ruleSource ? " · 来源：" + issue.ruleSource : "");
-                card.appendChild(ruleMeta);
-            }
-
-            if (issue.reason) {
-                var analysis = root.document.createElement("details");
-                analysis.className = "issue-analysis";
-                analysis.open = expanded[issue.id] === true;
-                analysis.addEventListener("click", function (event) {
-                    if (event && typeof event.stopPropagation === "function") event.stopPropagation();
-                });
-                var summary = root.document.createElement("summary");
-                summary.textContent = "错误分析";
-                analysis.appendChild(summary);
-                var quote = root.document.createElement("blockquote");
-                quote.textContent = issue.reason;
-                analysis.appendChild(quote);
-                card.appendChild(analysis);
-            }
-
-            var stateChip = root.document.createElement("span");
-            stateChip.className = "issue-status" + ((issue.needsReview || reviewOnly) ? " is-review" : "");
-            stateChip.textContent = issue.status === "pending"
-                ? issue.needsReview || reviewOnly ? "需复核" : "待确认"
-                : issue.status === "stale" ? "需重查" : issue.status === "accepted" ? "已修正" : issue.status === "ignored" ? "已忽略" : issue.status;
-            header.appendChild(stateChip);
-            if (issue.ruleSaved) {
-                var savedLine = root.document.createElement("p");
-                savedLine.className = "issue-state rule-saved-feedback";
-                savedLine.textContent = "已保存为固定替换规则，下次校对时生效。";
-                card.appendChild(savedLine);
-            }
-            card.appendChild(actions);
-
-            (isProcessedIssue(issue) ? processedList : list).appendChild(card);
+            var pendingCard = issue.status === "pending";
+            var reviewCard = isReviewOnlyIssue(issue);
+            card.className = "issue-card" + ((issue.needsReview || reviewCard) ? " is-review" : "") +
+                (pendingCard ? " is-locatable" : "");
+            (isProcessedIssue(issue) ? processedCards : pendingCards).push(card);
         });
 
-        if (processedDetails) list.appendChild(processedDetails);
+        renderedIssueActionButtons = nextActionButtons;
+        if (activeIssueMenu && renderedIssueActionButtons.indexOf(activeIssueMenu.toggle) < 0) {
+            activeIssueMenu.menu.hidden = true;
+            activeIssueMenu.toggle.setAttribute("aria-expanded", "false");
+            activeIssueMenu = null;
+        }
+        if (processed.length && processedIssuesList) reconcileChildren(processedIssuesList, processedCards);
+        else if (processedIssuesList) reconcileChildren(processedIssuesList, []);
+        var desiredListChildren = pendingCards.slice();
+        if (processed.length && processedIssuesDetails) desiredListChildren.push(processedIssuesDetails);
+        reconcileChildren(list, desiredListChildren);
 
         list.hidden = false;
         list.scrollTop = previousScrollTop;
@@ -1081,6 +1203,7 @@
     root.pushProofreadingRecord = root.pushProofreadingRecord || pushProofreadingRecord;
     root.setModelConnectionStatus = root.setModelConnectionStatus || setModelConnectionStatus;
     root.setProofreadingBusy = root.setProofreadingBusy || setProofreadingBusy;
+    root.setProofreadingFirstPassComplete = setProofreadingFirstPassComplete;
     root.setProofreadingActionBusy = root.setProofreadingActionBusy || setProofreadingActionBusy;
     root.setRewriteBusy = setRewriteBusy;
     root.getTaskBusyState = taskBusyState;
