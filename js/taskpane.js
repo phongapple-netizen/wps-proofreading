@@ -953,7 +953,7 @@
             }
 
             var stateText = issue.status === "pending"
-                ? (issue.needsReview || reviewOnly ? "需复核" : "")
+                ? (!issue.needsReview && reviewOnly ? "需复核" : "")
                 : issue.status === "stale" ? "需重查" : issue.status === "accepted" ? "已修正" :
                     issue.status === "ignored" ? "已忽略" : issue.status;
             if (stateText) {
