@@ -1221,7 +1221,7 @@ test("tracked bulk reports a later stale safe rule as failed", async () => {
         issues: [],
         rules: [basicRule("basic-ascii-comma-between-hanzi"), basicRule("basic-duplicate-period")],
         onWrite: () => harness.changeDocument(
-            harness.readDocument().replace("后段有多余句号", "后段内容已修改"))
+            harness.readDocument().replace("本段,", "本段；"))
     });
     await harness.window.runProofreading();
     assert.equal(harness.window.getWpsProofreadingState().issues.length, 2);
@@ -1234,9 +1234,9 @@ test("tracked bulk reports a later stale safe rule as failed", async () => {
     assert.match(harness.status.text, /已修正 1 条，请重新校对/);
     assert.equal(harness.status.tone, "warning");
     const issues = harness.window.getWpsProofreadingState().issues;
-    assert.equal(issues[0].status, "accepted");
-    assert.equal(issues[1].status, "stale");
-    assert.match(harness.readDocument(), /后段内容已修改。。/);
+    assert.equal(issues[0].status, "stale");
+    assert.equal(issues[1].status, "accepted");
+    assert.match(harness.readDocument(), /本段；有错字/);
 });
 
 test("tracked bulk counts every remaining safe rule when reanchoring stops the batch", async () => {
@@ -1248,7 +1248,7 @@ test("tracked bulk counts every remaining safe rule when reanchoring stops the b
         issues: [],
         rules: [basicRule("basic-ascii-comma-between-hanzi"), basicRule("basic-duplicate-period")],
         onWrite: () => harness.changeDocument(
-            harness.readDocument().replace("后段有多余句号", "后段内容已修改"))
+            harness.readDocument().replace("后段有多余句号。。", "后段内容已修改。"))
     });
     await harness.window.runProofreading();
     assert.equal(harness.window.getWpsProofreadingState().issues.length, 3);
@@ -1259,7 +1259,7 @@ test("tracked bulk counts every remaining safe rule when reanchoring stops the b
     assert.equal(result.stale, true);
     assert.deepEqual(Array.from(harness.window.getWpsProofreadingState().issues,
         (issue) => issue.status),
-        ["accepted", "stale", "stale"]);
+        ["stale", "stale", "accepted"]);
 });
 
 test("tracked selection ignores identical context outside the proofreading range", async () => {
@@ -1487,7 +1487,7 @@ test("tracked one-click fix keeps skipped issues anchored by logical text offset
     });
     await harness.window.runProofreading();
     const before = harness.window.getWpsProofreadingState().issues;
-    const manual = before.find((issue) => issue.origin === "ai");
+    const manual = before.find((issue) => issue.original === "错字");
     assert.ok(manual);
 
     const result = harness.window.applyAllProofreadingIssues();
