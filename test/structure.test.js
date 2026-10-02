@@ -164,7 +164,7 @@ test('settings displays the package version and keeps package metadata aligned',
   assert.equal(calls.length, 1);
   assert.equal(calls[0][0], '../package.json');
   assert.equal(calls[0][1].cache, 'no-store');
-  assert.equal(elements['app-version'].textContent, 'WPS 文本校对 · v0.3.0');
+  assert.equal(elements['app-version'].textContent, 'WPS 文本校改 · v0.3.0');
 
   const packageInfo = JSON.parse(read('package.json'));
   const packageLock = JSON.parse(read('package-lock.json'));
