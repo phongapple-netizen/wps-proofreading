@@ -385,7 +385,7 @@
         }
         var applyAllButton = byId("apply-all");
         if (applyAllButton) {
-            applyAllButton.textContent = "修正安全格式项（" + autoFixable + "）";
+            applyAllButton.textContent = "一键修正（" + autoFixable + "）";
             applyAllButton.disabled = state.busy || state.actionBusy || autoFixable === 0;
             applyAllButton.title = state.busy ? "校对完成后可修改正文" :
                 pendingCount() > autoFixableCount()

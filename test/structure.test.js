@@ -619,7 +619,8 @@ test('top toolbar and rules center expose the expected controls', () => {
   assert.match(html, /id="result-stale-summary"/);
   assert.match(html, /id="proofreading-history"/);
   assert.match(html, /id="apply-all"/);
-  assert.match(html, /修正安全格式项（0）/);
+  assert.match(html, /一键修正（0）/);
+  assert.doesNotMatch(html, /修正安全格式项/);
   assert.match(html, /仅处理低风险格式规则/);
   assert.match(html, /id="rerun-proofreading"/);
   assert.match(html, /id="proofreading-progress"/);
@@ -637,6 +638,7 @@ test('top toolbar and rules center expose the expected controls', () => {
   assert.match(html, /js\/rules-ui\.js/);
 
   const taskpane = read('js/taskpane.js');
+  assert.doesNotMatch(taskpane, /修正安全格式项/);
   assert.match(taskpane, /applyAllProofreadingIssues/);
   assert.match(taskpane, /pushProofreadingRecord/);
   assert.match(taskpane, /beginProofreadingRun/);
@@ -988,7 +990,7 @@ test('result summaries count pending review, processed, stale, and strict safe-f
   assert.equal(elements['result-summary'].textContent, '待处理 3 · 需复核 1 · 已处理 2 · 需重查 1');
   assert.equal(elements['result-stale-summary'].textContent, '需重查 1');
   assert.equal(elements['result-stale-summary'].hidden, true);
-  assert.equal(elements['apply-all'].textContent, '修正安全格式项（1）');
+  assert.equal(elements['apply-all'].textContent, '一键修正（1）');
   assert.equal(elements['apply-all'].disabled, false);
 
   const processedSection = elements['proofreading-issues'].children.find((child) => child.tag === 'details');

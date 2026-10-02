@@ -2028,6 +2028,24 @@
             Number(issue.confidence) >= 0.9;
     }
 
+    function beginBatchUndoRecord() {
+        try {
+            var application = app();
+            var undoRecord = application && application.UndoRecord;
+            var start = undoRecord && undoRecord.StartCustomRecord;
+            var end = undoRecord && undoRecord.EndCustomRecord;
+            if (typeof start !== "function" || typeof end !== "function") return null;
+            start.call(undoRecord, "一键修正");
+            return function () {
+                try { end.call(undoRecord); }
+                catch (error) { /* Host cleanup errors must not change completed issue state or counts. */ }
+            };
+        } catch (error) {
+            // Older hosts may expose unavailable properties or methods that throw.
+            return null;
+        }
+    }
+
     function applyAllProofreadingIssues() {
         if (issueActionUnavailable()) {
             return { applied: 0, failed: 0, skipped: currentIssues.length };
@@ -2060,43 +2078,49 @@
 
         var applied = 0;
         var failed = 0;
-        for (var index = 0; index < pendingIds.length; index += 1) {
-            var issue = findPendingIssue(pendingIds[index]);
-            if (!issue || !isAutoFixableIssue(issue)) {
-                failed = pendingIds.length - applied;
-                markAllPendingStale("原文或上下文已变化，剩余建议未写入。已修正 " +
-                    applied + " 条，请重新校对。");
-                return { applied: applied, failed: failed, skipped: skipped, stale: true };
-            }
-            var result;
-            try {
-                result = applyOneIssue(issue, true);
-            } catch (error) {
-                result = { ok: false, reason: "error" };
-            }
-            if (result.ok) {
-                applied += 1;
-            } else {
-                failed += 1;
-                if (result.reason === "error") {
-                    viewIssues();
-                    setStatus("WPS 未能写入剩余建议，已停止批量修正；已修正 " + applied + " 条。", "error");
-                    return { applied: applied, failed: failed, skipped: skipped };
+        var endUndoRecord = null;
+        try {
+            endUndoRecord = beginBatchUndoRecord();
+            for (var index = 0; index < pendingIds.length; index += 1) {
+                var issue = findPendingIssue(pendingIds[index]);
+                if (!issue || !isAutoFixableIssue(issue)) {
+                    failed = pendingIds.length - applied;
+                    markAllPendingStale("原文或上下文已变化，剩余建议未写入。已修正 " +
+                        applied + " 条，请重新校对。");
+                    return { applied: applied, failed: failed, skipped: skipped, stale: true };
                 }
-                failed = pendingIds.length - applied;
-                markAllPendingStale("原文已变化，剩余建议未写入。已修正 " + applied + " 条，请重新校对。");
-                return { applied: applied, failed: failed, skipped: skipped, stale: true };
+                var result;
+                try {
+                    result = applyOneIssue(issue, true);
+                } catch (error) {
+                    result = { ok: false, reason: "error" };
+                }
+                if (result.ok) {
+                    applied += 1;
+                } else {
+                    failed += 1;
+                    if (result.reason === "error") {
+                        viewIssues();
+                        setStatus("WPS 未能写入剩余建议，已停止批量修正；已修正 " + applied + " 条。", "error");
+                        return { applied: applied, failed: failed, skipped: skipped };
+                    }
+                    failed = pendingIds.length - applied;
+                    markAllPendingStale("原文已变化，剩余建议未写入。已修正 " + applied + " 条，请重新校对。");
+                    return { applied: applied, failed: failed, skipped: skipped, stale: true };
+                }
             }
-        }
 
-        viewIssues();
-        var suffix = skipped
-            ? "；另有 " + skipped + " 条建议未自动修改，请逐条确认。"
-            : "。";
-        setStatus(applied
-            ? "已一键修正 " + applied + " 条安全格式建议，并在写入前逐条核对了原文" + suffix
-            : "没有可安全自动写入的建议。", applied ? "success" : "warning");
-        return { applied: applied, failed: failed, skipped: skipped };
+            viewIssues();
+            var suffix = skipped
+                ? "；另有 " + skipped + " 条建议未自动修改，请逐条确认。"
+                : "。";
+            setStatus(applied
+                ? "已一键修正 " + applied + " 条安全格式建议，并在写入前逐条核对了原文" + suffix
+                : "没有可安全自动写入的建议。", applied ? "success" : "warning");
+            return { applied: applied, failed: failed, skipped: skipped };
+        } finally {
+            if (endUndoRecord) endUndoRecord();
+        }
     }
 
     root.runProofreading = runProofreading;

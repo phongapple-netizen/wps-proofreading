@@ -1407,6 +1407,204 @@ test("one-click fix applies only fixed low-risk punctuation rules", async () => 
     assert.equal(harness.status.text.includes("已一键修正 2 条"), true);
 });
 
+function undoRecordHarness(extra = {}) {
+    const calls = [];
+    let recording = false;
+    const harness = createHarness(Object.assign({
+        selectedText: "本段,另有错字。",
+        issues: [],
+        rules: [basicRule("basic-ascii-comma-between-hanzi"), basicRule("basic-duplicate-period")]
+    }, extra));
+    harness.window.Application.UndoRecord = {
+        StartCustomRecord(name) {
+            assert.equal(this, harness.window.Application.UndoRecord);
+            assert.equal(recording, false);
+            recording = true;
+            calls.push(["start", name]);
+        },
+        EndCustomRecord() {
+            assert.equal(this, harness.window.Application.UndoRecord);
+            assert.equal(recording, true);
+            recording = false;
+            calls.push(["end"]);
+        }
+    };
+    harness.assertUndoRecordActive = () => assert.equal(recording, true, "writes must stay inside the custom record");
+    return { harness, calls };
+}
+
+test("one-click fix groups successful safe writes in one native undo record", async () => {
+    for (const trackRevisions of [false, true]) {
+        let undoHarness;
+        const state = undoRecordHarness({
+            selectedText: "本段,另有错字。。",
+            trackRevisions,
+            onWrite() { undoHarness.assertUndoRecordActive(); }
+        });
+        undoHarness = state.harness;
+        const { harness, calls } = state;
+        await harness.window.runProofreading();
+
+        const result = harness.window.applyAllProofreadingIssues();
+        assert.equal(result.applied, 2, String(trackRevisions));
+        assert.equal(result.failed, 0, String(trackRevisions));
+        assert.equal(result.skipped, 0, String(trackRevisions));
+        assert.deepEqual(calls, [["start", "一键修正"], ["end"]]);
+        assert.equal(harness.readDocument(), harness.prefix + "本段，另有错字。" + harness.suffix);
+        assert.equal(harness.window.getWpsProofreadingState().issues.every((issue) => issue.status === "accepted"), true);
+    }
+});
+
+test("one-click fix closes its native undo record after a stale partial batch", async () => {
+    let writes = 0;
+    const { harness, calls } = undoRecordHarness({
+        selectedText: "本段,另有错字。。",
+        rules: [basicRule("basic-ascii-comma-between-hanzi"), basicRule("basic-duplicate-period")],
+        onWrite() {
+            writes += 1;
+            if (writes === 1) harness.changeDocument(harness.readDocument().replace("另有错字", "后文已变"));
+        }
+    });
+    await harness.window.runProofreading();
+
+    const result = harness.window.applyAllProofreadingIssues();
+    assert.equal(result.applied, 1);
+    assert.equal(result.stale, true);
+    assert.equal(result.failed, 1);
+    assert.equal(result.skipped, 0);
+    assert.deepEqual(calls, [["start", "一键修正"], ["end"]]);
+    assert.equal(harness.readDocument(), harness.prefix + "本段，后文已变。。" + harness.suffix);
+    const issues = harness.window.getWpsProofreadingState().issues;
+    assert.equal(issues.filter((issue) => issue.status === "accepted").length, 1);
+    assert.equal(issues.filter((issue) => issue.status === "stale").length, 1);
+});
+
+test("one-click fix closes its native undo record when a write throws", async () => {
+    let writes = 0;
+    const { harness, calls } = undoRecordHarness({
+        selectedText: "本段,另有错字。。",
+        onWrite() {
+            writes += 1;
+            if (writes === 1) throw new Error("simulated host write failure");
+        }
+    });
+    await harness.window.runProofreading();
+
+    const result = harness.window.applyAllProofreadingIssues();
+    assert.equal(result.failed > 0, true);
+    assert.deepEqual(calls, [["start", "一键修正"], ["end"]]);
+});
+
+test("unsupported or failing UndoRecord APIs fall back to ordinary one-click writes", async () => {
+    for (const mode of ["missing", "getter", "start", "missing-end", "missing-start"]) {
+        let startCalls = 0;
+        let endCalls = 0;
+        const harness = createHarness({
+            selectedText: "本段,另有错字。",
+            issues: [],
+            rules: [basicRule("basic-ascii-comma-between-hanzi")]
+        });
+        await harness.window.runProofreading();
+        if (mode === "getter") {
+            Object.defineProperty(harness.window.Application, "UndoRecord", {
+                configurable: true,
+                get() { throw new Error("unsupported API"); }
+            });
+        } else if (mode === "start") {
+            harness.window.Application.UndoRecord = {
+                StartCustomRecord() { startCalls += 1; throw new Error("unsupported API"); },
+                EndCustomRecord() { endCalls += 1; }
+            };
+        } else if (mode === "missing-end") {
+            harness.window.Application.UndoRecord = {
+                StartCustomRecord() { startCalls += 1; }
+            };
+        } else if (mode === "missing-start") {
+            harness.window.Application.UndoRecord = {
+                EndCustomRecord() { endCalls += 1; }
+            };
+        }
+        const result = harness.window.applyAllProofreadingIssues();
+        assert.equal(startCalls, mode === "start" ? 1 : 0, mode);
+        assert.equal(endCalls, 0, mode);
+        assert.equal(result.applied, 1, mode);
+        assert.equal(harness.readDocument(), harness.prefix + "本段，另有错字。" + harness.suffix, mode);
+    }
+});
+
+test("one-click fix always closes the record when post-write rendering throws", async () => {
+    const { harness, calls } = undoRecordHarness({ selectedText: "本段,另有错字。", rules: [basicRule("basic-ascii-comma-between-hanzi")] });
+    await harness.window.runProofreading();
+    harness.window.setProofreadingIssues = () => { throw new Error("simulated render failure"); };
+
+    assert.throws(() => harness.window.applyAllProofreadingIssues(), /simulated render failure/);
+    assert.deepEqual(calls, [["start", "一键修正"], ["end"]]);
+    assert.equal(harness.readDocument(), harness.prefix + "本段，另有错字。" + harness.suffix);
+});
+
+test("single issue apply and undo do not use the batch native undo record", async () => {
+    const { harness, calls } = undoRecordHarness({ selectedText: "本段,另有错字。" });
+    await harness.window.runProofreading();
+    const issue = harness.window.getWpsProofreadingState().issues[0];
+
+    assert.equal(await harness.window.applyProofreadingIssue(issue.id), true);
+    assert.equal(await harness.window.undoProofreadingIssue(issue.id), true);
+    assert.deepEqual(calls, []);
+});
+
+test("EndCustomRecord failure preserves the one-click fix result", async () => {
+    const { harness, calls } = undoRecordHarness({ selectedText: "本段,另有错字。", rules: [basicRule("basic-ascii-comma-between-hanzi")] });
+    harness.window.Application.UndoRecord.EndCustomRecord = function () {
+        calls.push(["end"]);
+        throw new Error("undo host failure");
+    };
+    await harness.window.runProofreading();
+
+    const result = harness.window.applyAllProofreadingIssues();
+    assert.equal(result.applied, 1);
+    assert.deepEqual(calls, [["start", "一键修正"], ["end"]]);
+});
+
+test("external Ctrl+Z text changes stay authoritative for later issue actions and proofreading", async () => {
+    for (const action of ["apply", "undo", "locate", "bulk", "rerun"]) {
+        const { harness, calls } = undoRecordHarness({ selectedText: "本段,另有错字。。" });
+        await harness.window.runProofreading();
+        assert.equal(harness.window.applyAllProofreadingIssues().applied, 2);
+        const accepted = harness.window.getWpsProofreadingState().issues;
+        const revertedText = harness.prefix + "本段,另有错字。。" + harness.suffix;
+        // Represents the document after WPS handles Ctrl+Z; no host undo stack is simulated.
+        harness.changeDocument(revertedText);
+
+        if (action === "apply") assert.equal(await harness.window.applyProofreadingIssue(accepted[0].id), false);
+        if (action === "undo") {
+            assert.equal(await harness.window.undoProofreadingIssue(accepted[0].id), false);
+            assert.equal(harness.window.getWpsProofreadingState().issues[0].status, "stale");
+        }
+        if (action === "locate") assert.equal(harness.window.locateProofreadingIssue(accepted[0].id), false);
+        if (action === "bulk") assert.equal(harness.window.applyAllProofreadingIssues().applied, 0);
+        if (action === "rerun") await harness.window.runProofreading();
+
+        if (action !== "rerun") assert.equal(harness.readDocument(), revertedText, action);
+        else assert.equal(harness.window.getWpsProofreadingState().issues.some((issue) => issue.status === "pending"), true);
+        assert.deepEqual(calls, [["start", "一键修正"], ["end"]], action);
+    }
+});
+
+test("one-click fix does not open a record when no safe item exists or the initial snapshot is stale", async () => {
+    const unsafe = undoRecordHarness({ selectedText: "本段有错字。" });
+    await unsafe.harness.window.runProofreading();
+    const unsafeResult = unsafe.harness.window.applyAllProofreadingIssues();
+    assert.equal(unsafeResult.applied, 0);
+    assert.deepEqual(unsafe.calls, []);
+
+    const stale = undoRecordHarness({ selectedText: "本段,另有错字。", rules: [basicRule("basic-ascii-comma-between-hanzi")] });
+    await stale.harness.window.runProofreading();
+    stale.harness.changeDocument(stale.harness.prefix + "正文已变化。" + stale.harness.suffix);
+    const staleResult = stale.harness.window.applyAllProofreadingIssues();
+    assert.equal(staleResult.stale, true);
+    assert.deepEqual(stale.calls, []);
+});
+
 test("one-click fix skips every AI suggestion regardless of confidence", async () => {
     const harness = createHarness({
         selectedText: "本段,有错字，也有可疑表述，另有建议。",
