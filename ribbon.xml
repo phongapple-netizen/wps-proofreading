@@ -1,10 +1,10 @@
 <customUI xmlns="http://schemas.microsoft.com/office/2006/01/customui" onLoad="OnAddinLoad">
     <ribbon startFromScratch="false">
         <tabs>
-            <tab id="wpsProofreadingNativeTab" label="WPS 文本校对">
-                <group id="wpsProofreadingGroup" label="文本校对">
+            <tab id="wpsProofreadingNativeTab" label="WPS 文本校改">
+                <group id="wpsProofreadingGroup" label="文本校改">
                     <button id="wpsProofreadingOpenPanel"
-                            label="打开校对面板"
+                            label="打开校改面板"
                             onAction="OnAction"
                             getEnabled="OnGetEnabled"
                             size="large" />
