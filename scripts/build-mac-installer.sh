@@ -12,7 +12,7 @@ if xcrun swiftc --version | grep -q 'Apple Swift version 5.7.2' && \
     sdk_path=/Library/Developer/CommandLineTools/SDKs/MacOSX12.3.sdk
 fi
 
-app="$working_dir/WPS 文本校对.app"
+app="$working_dir/WPS 文本校改.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/addon" "$output_dir"
 for item in index.html main.js ribbon.xml package.json; do
     cp "$project_root/$item" "$app/Contents/Resources/addon/$item"
@@ -23,8 +23,8 @@ cat > "$app/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>CFBundleName</key><string>WPS 文本校对</string>
-<key>CFBundleDisplayName</key><string>WPS 文本校对</string>
+<key>CFBundleName</key><string>WPS 文本校改</string>
+<key>CFBundleDisplayName</key><string>WPS 文本校改</string>
 <key>CFBundleIdentifier</key><string>net.wps-proofreading.mac</string>
 <key>CFBundleVersion</key><string>$version</string>
 <key>CFBundleShortVersionString</key><string>$version</string>
@@ -56,6 +56,6 @@ ln -s /Applications "$staging/应用程序"
 cp "$project_root/mac/安装说明.txt" "$staging/安装说明.txt"
 cp "$project_root/LICENSE" "$project_root/THIRD_PARTY_NOTICES.md" \
     "$project_root/SOURCE_PROVENANCE.md" "$staging/"
-hdiutil create -quiet -volname "WPS 文本校对 $version" -srcfolder "$staging" \
-    -format UDZO -ov "$output_dir/WPS-文本校对-$version-macOS.dmg"
-echo "$output_dir/WPS-文本校对-$version-macOS.dmg"
+hdiutil create -quiet -volname "WPS 文本校改 $version" -srcfolder "$staging" \
+    -format UDZO -ov "$output_dir/WPS-文本校改-$version-macOS.dmg"
+echo "$output_dir/WPS-文本校改-$version-macOS.dmg"

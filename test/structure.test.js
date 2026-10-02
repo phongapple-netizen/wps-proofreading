@@ -103,7 +103,7 @@ function createResultHarness(extraWindow = {}) {
   const ids = ['issue-filter', 'tab-issues', 'tab-history', 'proofreading-issues', 'empty-state',
     'history-empty', 'proofreading-history', 'result-count', 'result-summary', 'result-stale-summary',
     'apply-all', 'rerun-proofreading', 'proofreading-status', 'proofreading-view', 'rewrite-view',
-    'mode-proofread', 'mode-rewrite', 'deep-enhance-control', 'proofreading-toast'];
+    'mode-proofread', 'mode-rewrite', 'deep-enhance-control', 'proofreading-toast', 'app-version'];
   const elements = {};
   ids.forEach((id) => { elements[id] = makeTaskPaneElement(id === 'proofreading-issues' ? 'section' : 'div'); });
   elements['issue-filter'].value = 'all';
@@ -151,6 +151,28 @@ function issueActionButtons(card) {
   })(issueActions(card));
   return buttons;
 }
+
+test('settings displays the package version and keeps package metadata aligned', async () => {
+  const calls = [];
+  const { elements } = createResultHarness({
+    fetch: async (url, options) => {
+      calls.push([url, options]);
+      return { ok: true, json: async () => ({ version: '0.3.0' }) };
+    }
+  });
+  await new Promise(setImmediate);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], '../package.json');
+  assert.equal(calls[0][1].cache, 'no-store');
+  assert.equal(elements['app-version'].textContent, 'WPS 文本校改 · v0.3.0');
+
+  const packageInfo = JSON.parse(read('package.json'));
+  const packageLock = JSON.parse(read('package-lock.json'));
+  assert.equal(packageInfo.version, '0.3.0');
+  assert.equal(packageLock.version, packageInfo.version);
+  assert.equal(packageLock.packages[''].version, packageInfo.version);
+  assert.match(read('ui/taskpane.html'), /id="app-version"/);
+});
 
 test('WPS root files and ribbon callbacks are present', () => {
   const ribbon = read('ribbon.xml');

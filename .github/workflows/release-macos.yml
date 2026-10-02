@@ -44,16 +44,16 @@ jobs:
         run: |
           version="$(node -p "require('./package.json').version")"
           mount="$(mktemp -d)"
-          hdiutil attach "dist/mac/WPS-文本校对-${version}-macOS.dmg" -mountpoint "$mount" -nobrowse -quiet
+          hdiutil attach "dist/mac/WPS-文本校改-${version}-macOS.dmg" -mountpoint "$mount" -nobrowse -quiet
           trap 'hdiutil detach "$mount" -quiet; rmdir "$mount"' EXIT
-          "$mount/WPS 文本校对.app/Contents/MacOS/WPSProofreading" --self-test
+          "$mount/WPS 文本校改.app/Contents/MacOS/WPSProofreading" --self-test
       - name: Create beta release
         if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           version="$(node -p "require('./package.json').version")"
-          asset="dist/mac/WPS-文本校对-${version}-macOS.dmg"
+          asset="dist/mac/WPS-文本校改-${version}-macOS.dmg"
           public_asset="dist/mac/WPS-Proofreading-${version}-macOS.dmg"
           cp "$asset" "$public_asset"
           node scripts/release-notes.js
@@ -61,9 +61,9 @@ jobs:
             gh release upload "v${version}" "$public_asset" --clobber
           else
             gh release create "v${version}" --target "$GITHUB_SHA" \
-              --title "WPS 文本校对 v${version} · 测试版" \
+              --title "WPS 文本校改 v${version} · 测试版" \
               --notes-file release-notes.md --prerelease || gh release view "v${version}" >/dev/null
             gh release upload "v${version}" "$public_asset" --clobber
           fi
           gh release edit "v${version}" --notes-file release-notes.md \
-            --title "WPS 文本校对 v${version} · 测试版" --prerelease
+            --title "WPS 文本校改 v${version} · 测试版" --prerelease

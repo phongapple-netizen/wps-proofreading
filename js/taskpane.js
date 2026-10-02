@@ -1371,6 +1371,28 @@
         });
     }
 
+    function loadAppVersion() {
+        var element = byId("app-version");
+        if (!element || typeof root.fetch !== "function") return Promise.resolve("");
+        return root.fetch("../package.json", { cache: "no-store" })
+            .then(function (response) {
+                if (!response || !response.ok) throw new Error("version-unavailable");
+                return response.json();
+            })
+            .then(function (packageInfo) {
+                var version = packageInfo && packageInfo.version
+                    ? String(packageInfo.version).trim() : "";
+                element.textContent = version
+                    ? "WPS 文本校改 · v" + version
+                    : "WPS 文本校改 · 版本未知";
+                return version;
+            })
+            .catch(function () {
+                element.textContent = "WPS 文本校改 · 版本未知";
+                return "";
+            });
+    }
+
     function bindUi() {
         var runButton = byId("run-proofreading");
         var cancelButton = byId("cancel-proofreading");
@@ -1417,6 +1439,7 @@
         bindSettingsToggle();
         bindSettingsForm();
         syncFormFromStore();
+        loadAppVersion();
     }
 
     function bindResultTabs() {

@@ -695,7 +695,7 @@ private final class AppController: NSObject, NSApplicationDelegate {
         let height: CGFloat = 310
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: height),
                           styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
-        window.title = "WPS 文本校对 · Mac 安装"
+        window.title = "WPS 文本校改 · Mac 安装"
         window.center()
         let content = window.contentView!
         func label(_ text: String, y: CGFloat, size: CGFloat, bold: Bool = false) -> NSTextField {
@@ -707,7 +707,7 @@ private final class AppController: NSObject, NSApplicationDelegate {
             content.addSubview(view)
             return view
         }
-        _ = label("WPS 文本校对", y: 250, size: 20, bold: true)
+        _ = label("WPS 文本校改", y: 250, size: 20, bold: true)
         _ = label("将本应用放进“应用程序”后点击安装。安装会注册 WPS 加载项，并启动本机网页服务。", y: 192, size: 13)
         _ = label("校对模型请在 WPS 任务窗格内连接 OpenCode、Ollama 或兼容接口。安装后请完全退出并重新打开 WPS。", y: 133, size: 13)
         status = label("尚未安装", y: 85, size: 12)
