@@ -2161,6 +2161,96 @@
             Number(issue.confidence) >= 0.9;
     }
 
+    function buildTrackedBatchPlan(document, pendingIds) {
+        if (!document || !currentSnapshot || !isTrackRevisionsEnabled(document)) return null;
+        var plan = [];
+        for (var index = 0; index < pendingIds.length; index += 1) {
+            var issue = findPendingIssue(pendingIds[index]);
+            if (!issue || !isAutoFixableIssue(issue)) return null;
+            var context = issueContext(issue, issue.original);
+            if (!context) return null;
+            var anchored = findAnchoredRevisionRange(
+                document, issue.original, context.before, context.after,
+                undefined, issue.start);
+            if (!anchored) return null;
+            plan.push({
+                id: issue.id,
+                expected: issue.original,
+                replacement: issue.suggestion,
+                start: anchored.start,
+                end: anchored.end,
+                relativeStart: context.relativeStart
+            });
+        }
+        plan.sort(function (left, right) {
+            return right.start - left.start || right.end - left.end;
+        });
+        for (var planIndex = 1; planIndex < plan.length; planIndex += 1) {
+            if (plan[planIndex].end > plan[planIndex - 1].start) return null;
+        }
+        return plan;
+    }
+
+    function completeTrackedBatchReplacement(entry, issue) {
+        var previousSnapshot = currentSnapshot;
+        var expectedLength = entry.expected.length;
+        var delta = entry.replacement.length - expectedLength;
+        var revisedSnapshot = updateSnapshotAfterReplacement(
+            entry.start, entry.end, entry.replacement, entry.relativeStart, expectedLength);
+        currentIssues = currentIssues.map(function (candidate) {
+            var updated = Object.assign({}, candidate);
+            var relative = Number.isInteger(candidate.textOffset)
+                ? candidate.textOffset
+                : candidate.start - previousSnapshot.start;
+            if (candidate.id === issue.id) {
+                updated.status = "accepted";
+                updated.textOffset = entry.relativeStart;
+                updated.start = entry.start;
+                updated.end = entry.start + entry.replacement.length;
+                return updated;
+            }
+            if (candidate.status !== "pending" && candidate.status !== "accepted") return updated;
+            var candidateExpected = candidate.status === "accepted"
+                ? candidate.suggestion : candidate.original;
+            if (relative >= entry.relativeStart + expectedLength) {
+                updated.textOffset = relative + delta;
+            } else if (relative + candidateExpected.length > entry.relativeStart) {
+                updated.status = "stale";
+            } else {
+                updated.textOffset = relative;
+            }
+            return updated;
+        });
+        currentSnapshot = revisedSnapshot;
+    }
+
+    function applyTrackedBatchEntry(entry, document) {
+        var issue = findPendingIssue(entry.id);
+        if (!issue || !isAutoFixableIssue(issue)) return { ok: false, reason: "changed" };
+        try {
+            if (!document || documentKey(document) !== currentSnapshot.documentKey ||
+                !isTrackRevisionsEnabled(document)) return { ok: false, reason: "changed" };
+            // All tracked targets are preflighted before the first write and then
+            // applied from the end of the document backwards. Later tracked edits
+            // therefore cannot shift the coordinates of an earlier target.
+            var range = document.Range(entry.start, entry.end);
+            if (text(range.Text) !== entry.expected) {
+                issue.status = "stale";
+                return { ok: false, reason: "changed" };
+            }
+            range.Text = entry.replacement;
+            // This batch path is synchronous: there is no event-loop yield between
+            // the pre-write verification and the assignment. WPS may keep the old
+            // text as a deletion Revision, so do not require it to disappear from
+            // Range.Find before continuing.
+            completeTrackedBatchReplacement(entry, issue);
+            recordAction("applied", issue);
+            return { ok: true };
+        } catch (error) {
+            return { ok: false, reason: "error" };
+        }
+    }
+
     function beginBatchUndoRecord() {
         try {
             var application = app();
@@ -2202,12 +2292,18 @@
             return { applied: 0, failed: 0, skipped: skipped };
         }
         var document = activeDocument(app());
-        var uncertainCoordinates = isTrackRevisionsEnabled(document) || currentIssues.some(function (issue) {
+        var trackRevisions = isTrackRevisionsEnabled(document);
+        var uncertainCoordinates = trackRevisions || currentIssues.some(function (issue) {
             return Number.isInteger(issue.textOffset);
         });
         if (!(uncertainCoordinates ? revisionSnapshotMatches(currentSnapshot)
             : currentDocumentMatches(currentSnapshot))) {
             markAllPendingStale("选区内容已变化，未写入任何建议。请重新校对。");
+            return { applied: 0, failed: pendingIds.length, skipped: skipped, stale: true };
+        }
+        var trackedPlan = trackRevisions ? buildTrackedBatchPlan(document, pendingIds) : null;
+        if (trackRevisions && !trackedPlan) {
+            markAllPendingStale("修订模式下未能安全定位全部一键修正项，未写入任何建议。请重新校对。");
             return { applied: 0, failed: pendingIds.length, skipped: skipped, stale: true };
         }
 
@@ -2216,8 +2312,11 @@
         var endUndoRecord = null;
         try {
             endUndoRecord = beginBatchUndoRecord();
-            for (var index = 0; index < pendingIds.length; index += 1) {
-                var issue = findPendingIssue(pendingIds[index]);
+            var batchOrder = trackedPlan || pendingIds;
+            for (var index = 0; index < batchOrder.length; index += 1) {
+                var issue = trackedPlan
+                    ? findPendingIssue(batchOrder[index].id)
+                    : findPendingIssue(batchOrder[index]);
                 if (!issue || !isAutoFixableIssue(issue)) {
                     failed = pendingIds.length - applied;
                     markAllPendingStale("原文或上下文已变化，剩余建议未写入。已修正 " +
@@ -2226,7 +2325,9 @@
                 }
                 var result;
                 try {
-                    result = applyOneIssue(issue, true);
+                    result = trackedPlan
+                        ? applyTrackedBatchEntry(batchOrder[index], document)
+                        : applyOneIssue(issue, true);
                 } catch (error) {
                     result = { ok: false, reason: "error" };
                 }

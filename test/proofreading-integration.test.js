@@ -125,7 +125,13 @@ function createHarness(options = {}) {
                         revisionGaps.push({ index: startIndex + replacement.length,
                             size: options.revisionPadding || 3 });
                     }
-                    if (options.onWrite) options.onWrite();
+                    if (options.onWrite) options.onWrite({
+                        start: range.Start,
+                        end: range.End,
+                        value: replacement,
+                        startIndex,
+                        endIndex
+                    });
                 },
                 Select() {
                     if (options.onSelect) options.onSelect(range.Start, range.End);
@@ -1271,7 +1277,7 @@ test("tracked bulk reports a later stale safe rule as failed", async () => {
         issues: [],
         rules: [basicRule("basic-ascii-comma-between-hanzi"), basicRule("basic-duplicate-period")],
         onWrite: () => harness.changeDocument(
-            harness.readDocument().replace("后段有多余句号", "后段内容已修改"))
+            harness.readDocument().replace("本段,", "本段；"))
     });
     await harness.window.runProofreading();
     assert.equal(harness.window.getWpsProofreadingState().issues.length, 2);
@@ -1284,9 +1290,9 @@ test("tracked bulk reports a later stale safe rule as failed", async () => {
     assert.match(harness.status.text, /已修正 1 条，请重新校对/);
     assert.equal(harness.status.tone, "warning");
     const issues = harness.window.getWpsProofreadingState().issues;
-    assert.equal(issues[0].status, "accepted");
-    assert.equal(issues[1].status, "stale");
-    assert.match(harness.readDocument(), /后段内容已修改。。/);
+    assert.equal(issues[0].status, "stale");
+    assert.equal(issues[1].status, "accepted");
+    assert.match(harness.readDocument(), /本段；有错字/);
 });
 
 test("tracked bulk counts every remaining safe rule when reanchoring stops the batch", async () => {
@@ -1298,7 +1304,7 @@ test("tracked bulk counts every remaining safe rule when reanchoring stops the b
         issues: [],
         rules: [basicRule("basic-ascii-comma-between-hanzi"), basicRule("basic-duplicate-period")],
         onWrite: () => harness.changeDocument(
-            harness.readDocument().replace("后段有多余句号", "后段内容已修改"))
+            harness.readDocument().replace("后段有多余句号。。", "后段内容已修改。"))
     });
     await harness.window.runProofreading();
     assert.equal(harness.window.getWpsProofreadingState().issues.length, 3);
@@ -1309,7 +1315,7 @@ test("tracked bulk counts every remaining safe rule when reanchoring stops the b
     assert.equal(result.stale, true);
     assert.deepEqual(Array.from(harness.window.getWpsProofreadingState().issues,
         (issue) => issue.status),
-        ["accepted", "stale", "stale"]);
+        ["stale", "stale", "accepted"]);
 });
 
 test("tracked selection ignores identical context outside the proofreading range", async () => {
@@ -1492,10 +1498,14 @@ function undoRecordHarness(extra = {}) {
 test("one-click fix groups successful safe writes in one native undo record", async () => {
     for (const trackRevisions of [false, true]) {
         let undoHarness;
+        const writes = [];
         const state = undoRecordHarness({
             selectedText: "本段,另有错字。。",
             trackRevisions,
-            onWrite() { undoHarness.assertUndoRecordActive(); }
+            onWrite(write) {
+                undoHarness.assertUndoRecordActive();
+                writes.push(write);
+            }
         });
         undoHarness = state.harness;
         const { harness, calls } = state;
@@ -1508,7 +1518,35 @@ test("one-click fix groups successful safe writes in one native undo record", as
         assert.deepEqual(calls, [["start", "一键修正"], ["end"]]);
         assert.equal(harness.readDocument(), harness.prefix + "本段，另有错字。" + harness.suffix);
         assert.equal(harness.window.getWpsProofreadingState().issues.every((issue) => issue.status === "accepted"), true);
+        if (trackRevisions) {
+            assert.equal(writes.length, 2);
+            assert.equal(writes[0].start > writes[1].start, true,
+                "tracked batch writes must run from the end of the document backwards");
+        }
     }
+});
+
+test("tracked one-click fix keeps skipped issues anchored by logical text offsets", async () => {
+    const harness = createHarness({
+        trackRevisions: true,
+        selectedText: "甲,乙。。",
+        issues: [],
+        rules: [basicRule("basic-ascii-comma-between-hanzi"), basicRule("basic-duplicate-period")]
+    });
+    await harness.window.runProofreading();
+    const before = harness.window.getWpsProofreadingState().issues;
+    assert.equal(before.length, 2);
+    const skipped = before[0];
+    skipped.autoFixable = false;
+
+    const result = harness.window.applyAllProofreadingIssues();
+    assert.equal(result.applied, 1);
+    assert.equal(result.skipped, 1);
+    const after = harness.window.getWpsProofreadingState().issues;
+    const anchoredSkipped = after.find((issue) => issue.id === skipped.id);
+    assert.equal(anchoredSkipped.status, "pending");
+    assert.equal(Number.isInteger(anchoredSkipped.textOffset), true);
+    assert.equal(harness.window.locateProofreadingIssue(anchoredSkipped.id), true);
 });
 
 test("one-click fix closes its native undo record after a stale partial batch", async () => {
