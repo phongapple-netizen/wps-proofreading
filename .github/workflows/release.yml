@@ -57,6 +57,11 @@ jobs:
             echo "Checkout HEAD $head_commit does not match $tag commit $tag_commit." >&2
             exit 1
           fi
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main; then
+            echo "Release tag $tag must point to a commit already merged into main." >&2
+            exit 1
+          fi
           echo "commit=$tag_commit" >> "$GITHUB_OUTPUT"
 
   windows:
@@ -113,6 +118,7 @@ jobs:
           fi
           node scripts/release-notes.js
           gh release create "$RELEASE_TAG" "$windows_asset" "$macos_asset" \
-            --title "WPS 文本校改 $RELEASE_TAG" \
+            --title "WPS 文本校改 $RELEASE_TAG · 测试版" \
             --notes-file release-notes.md \
+            --prerelease \
             --verify-tag
