@@ -59,6 +59,15 @@ jobs:
           New-Item -ItemType Directory -Force -Path (Split-Path $publish) | Out-Null
           Set-Content -Path $publish -Encoding UTF8 -Value '<?xml version="1.0"?><jsplugins><jspluginonline name="other-addon" url="https://example.test/"/></jsplugins>'
 
+          # Explicitly exercise a clean first install, rather than relying on
+          # the runner's initial registry state or localized reg.exe output.
+          $runPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+          New-Item -Path $runPath -Force | Out-Null
+          Remove-ItemProperty -Path $runPath -Name WPSProofreading -ErrorAction SilentlyContinue
+          $runKey = Get-Item -Path $runPath
+          if ($runKey.GetValueNames() -contains 'WPSProofreading') { throw 'First-install setup still has a startup entry.' }
+          $runKey.Close()
+
           $installer = (Resolve-Path "dist/windows/WPS-Proofreading-$version-Windows-x64-Setup.exe").Path
           $install = [System.Diagnostics.Process]::Start($installer, '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART')
           if (-not $install.WaitForExit(120000)) { $install.Kill(); throw 'Installer timed out.' }

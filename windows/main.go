@@ -498,55 +498,6 @@ func firstNonempty(a, b string) string {
 }
 func (m *openCodeManager) isManaged() bool { m.mu.Lock(); defer m.mu.Unlock(); return m.managed }
 
-type runValue struct {
-	present     bool
-	kind, value string
-}
-
-func readRunValue() (runValue, error) {
-	key := `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
-	out, err := exec.Command("reg.exe", "query", key, "/v", "WPSProofreading").CombinedOutput()
-	if err != nil {
-		msg := strings.ToLower(string(out))
-		if strings.Contains(msg, "unable to find") || strings.Contains(msg, "cannot find") || strings.Contains(msg, "找不到") {
-			return runValue{}, nil
-		}
-		return runValue{}, fmt.Errorf("无法读取现有自启动项: %w", err)
-	}
-	for _, line := range strings.Split(string(out), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) >= 3 && strings.EqualFold(fields[0], "WPSProofreading") {
-			index := strings.Index(line, fields[1])
-			if index < 0 {
-				continue
-			}
-			dataStart := index + len(fields[1])
-			return runValue{present: true, kind: fields[1], value: strings.TrimSpace(line[dataStart:])}, nil
-		}
-	}
-	return runValue{}, errors.New("无法解析现有 WPSProofreading 自启动项")
-}
-
-func writeRunValue(value runValue) error {
-	key := `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
-	if !value.present {
-		out, err := exec.Command("reg.exe", "delete", key, "/v", "WPSProofreading", "/f").CombinedOutput()
-		if err != nil {
-			msg := strings.ToLower(string(out))
-			if strings.Contains(msg, "unable to find") || strings.Contains(msg, "cannot find") || strings.Contains(msg, "找不到") {
-				return nil
-			}
-			return fmt.Errorf("无法删除 WPSProofreading 自启动项: %w", err)
-		}
-		return nil
-	}
-	cmd := exec.Command("reg.exe", "add", key, "/v", "WPSProofreading", "/t", value.kind, "/d", value.value, "/f")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("无法写入 WPSProofreading 自启动项: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
 func runRegistry(set bool) error {
 	if !set {
 		return writeRunValue(runValue{})
@@ -555,7 +506,7 @@ func runRegistry(set bool) error {
 	if err != nil {
 		return err
 	}
-	return writeRunValue(runValue{present: true, kind: "REG_SZ", value: `"` + executable + `" --serve`})
+	return writeRunValue(stringRunValue(`"` + executable + `" --serve`))
 }
 
 // installSteps keeps the externally visible install order explicit and lets
@@ -664,7 +615,7 @@ func install() error {
 		} else if !hadFile {
 			_ = os.Remove(filepath.Dir(filename))
 		}
-		targetRun := runValue{present: true, kind: "REG_SZ", value: `"` + executable + `" --serve`}
+		targetRun := stringRunValue(`"` + executable + `" --serve`)
 		currentRun, runErr := readRunValue()
 		if runErr != nil {
 			failures = append(failures, "读取自启动项以执行回滚失败: "+runErr.Error())
@@ -728,7 +679,7 @@ func install() error {
 		return errors.New("本地服务健康检查超时")
 	}
 	runStep := func() error {
-		return writeRunValue(runValue{present: true, kind: "REG_SZ", value: `"` + executable + `" --serve`})
+		return writeRunValue(stringRunValue(`"` + executable + `" --serve`))
 	}
 	return installSteps(func() error { return register(true) }, startStep, healthStep, runStep, rollback)
 }
