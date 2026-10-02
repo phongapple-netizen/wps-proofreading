@@ -395,6 +395,7 @@ test('locate success toast expires after three seconds and preserves visible war
   win.setProofreadingStatus('文档已经变化，请重新校对。', 'warning');
   win.setProofreadingStatus('已在文档中定位这条问题。', 'success');
   assert.equal(elements['proofreading-toast'].hidden, false);
+  assert.equal(win.getProofreadingStatus().text, '文档已经变化，请重新校对。');
   assert.equal(elements['proofreading-status'].textContent, '文档已经变化，请重新校对。');
   assert.equal(elements['proofreading-status'].className, 'status status-warning');
   win.setProofreadingStatus('已在文档中定位这条问题。', 'success');
@@ -1205,4 +1206,212 @@ test('settings form persists safe settings while provider secrets stay memory-on
   assert.equal(win.WpsSettingsStore.loadSettings().autoAdvance, true);
   win.WpsSettingsStore.saveSettings({ provider: 'ollama', autoAdvance: false });
   assert.equal(win.WpsSettingsStore.loadSettings().autoAdvance, false);
+});
+
+function createDocumentResultHarness() {
+  const { win, elements, calls, ruleDrafts } = createResultHarness();
+  function document(name) {
+    let body = '这里有错字，那里有误字。';
+    return {
+      Name: name, FullName: name, TrackRevisions: false,
+      get Content() { return { Start: 0, End: body.length, Text: body }; },
+      Range(start, end) {
+        return { Start: start, End: end,
+          get Text() { return body.slice(start, end); },
+          set Text(value) { body = body.slice(0, start) + value + body.slice(end); },
+          Select() {} };
+      }
+    };
+  }
+  const a = document('A.docx');
+  const b = document('B.docx');
+  const events = {};
+  win.Application = { ActiveDocument: a, ApiEvent: {
+    AddApiEventListener(name, callback) { events[name] = callback; }
+  }, get Selection() { return { Range: this.ActiveDocument.Range(0, this.ActiveDocument.Content.End) }; } };
+  win.WpsNativeDocument = { getApplication: () => win.Application };
+  win.WpsSettingsStore = { loadSettings: () => ({ provider: 'ollama', autoAdvance: false,
+    profiles: { ollama: { endpoint: 'http://127.0.0.1:11434', model: 'fixture' } } }) };
+  win.AbortController = AbortController;
+  win.setInterval = () => {};
+  loadBrowserScript('js/proofreading-core.js', win);
+  win.WpsProofreadingCore.requestModel = async () => JSON.stringify({ issues: [
+    { category: 'typo', paragraphIndex: 1, original: '错字', suggestion: '正字',
+      reason: '测试分析', confidence: 0.95, needsReview: false },
+    { category: 'wording', paragraphIndex: 1, original: '误字', suggestion: '新字',
+      reason: '测试分析', confidence: 0.95, needsReview: false }
+  ] });
+  loadBrowserScript('js/proofreading-integration.js', win);
+  return { win, elements, calls, ruleDrafts, a, b,
+    activate(doc, notify = true) {
+      win.Application.ActiveDocument = doc;
+      if (notify) events.WindowActivate(doc);
+    } };
+}
+
+test('real document switching isolates history, ruleSaved, filter, tab, expanded analysis and status', async () => {
+  const h = createDocumentResultHarness();
+  const { win, elements } = h;
+  await win.runProofreading();
+  const [first, second] = win.getWpsProofreadingState().issues;
+  assert.equal(await win.applyProofreadingIssue(first.id), true);
+  win.markProofreadingIssueRuleSaved(first.id);
+  const aRunId = win.captureProofreadingView().issues[0].runId;
+  elements['issue-filter'].value = 'typo';
+  elements['issue-filter'].fire('change');
+  const processed = elements['proofreading-issues'].querySelector('.processed-issues');
+  processed.open = true;
+  processed.querySelector('.issue-analysis').open = true;
+  elements['proofreading-issues'].scrollTop = 123;
+  elements['tab-history'].fire('click');
+  const aStatus = win.getProofreadingStatus().text;
+  h.activate(h.b);
+  assert.equal(elements['proofreading-issues'].children.length, 0);
+  assert.equal(elements['proofreading-history'].children.length, 0);
+  assert.equal(elements['empty-state'].textContent, '当前文档尚未校对');
+  assert.equal(elements['empty-state'].hidden, false);
+  assert.equal(win.captureProofreadingView().history.length, 0);
+  assert.equal(elements['issue-filter'].value, 'all');
+  assert.equal(elements['tab-issues'].getAttribute('aria-selected'), 'true');
+  await win.runProofreading();
+  const bIssue = win.getWpsProofreadingState().issues[1];
+  assert.equal(win.ignoreProofreadingIssue(bIssue.id), true);
+  assert.equal(win.captureProofreadingView().history.length, 1);
+  h.activate(h.a);
+  let saved = win.captureProofreadingView();
+  assert.equal(saved.history.length, 1);
+  assert.equal(saved.history[0].id, first.id);
+  assert.equal(saved.issues[0].runId, aRunId);
+  assert.equal(saved.issues[0].ruleSaved, true);
+  assert.equal(saved.issues[1].ruleSaved, false);
+  assert.equal(saved.filter, 'typo');
+  assert.equal(saved.tab, 'history');
+  assert.equal(win.getProofreadingStatus().text, aStatus);
+  assert.equal(elements['proofreading-history'].children.length, 1);
+  elements['tab-issues'].fire('click');
+  assert.equal(elements['proofreading-issues'].scrollTop, 123);
+  // History tab restoration defers card creation until the issues tab is shown.
+  assert.equal(win.getWpsProofreadingState().issues[1].id, second.id);
+  h.activate(h.b);
+  saved = win.captureProofreadingView();
+  assert.equal(saved.history.length, 1);
+  assert.equal(saved.history[0].id, bIssue.id);
+  assert.equal(saved.issues.every(issue => !issue.ruleSaved), true);
+});
+
+test('expanded and processed cards restore per document without inheriting B DOM state', async () => {
+  const h = createDocumentResultHarness();
+  const { win, elements } = h;
+  await win.runProofreading();
+  const id = win.getWpsProofreadingState().issues[0].id;
+  await win.applyProofreadingIssue(id);
+  const list = elements['proofreading-issues'];
+  list.querySelector('.processed-issues').open = true;
+  list.querySelector('.issue-analysis').open = true;
+  list.scrollTop = 222;
+  h.activate(h.b);
+  await win.runProofreading();
+  assert.equal(list.querySelector('.issue-analysis').open, false);
+  h.activate(h.a);
+  assert.equal(list.querySelector('.processed-issues').open, true);
+  assert.equal(list.querySelector('.issue-analysis').open, true);
+  assert.equal(list.scrollTop, 222);
+});
+
+test('no active WPS document clears real issue cards and history while preserving rewrite mode and busy protection', async () => {
+  const h = createDocumentResultHarness();
+  const { win, elements } = h;
+  await win.runProofreading();
+  win.ignoreProofreadingIssue(win.getWpsProofreadingState().issues[0].id);
+  win.setAppMode('rewrite');
+  win.setRewriteBusy(true);
+  h.activate(null);
+  assert.equal(elements['proofreading-issues'].children.length, 0);
+  assert.equal(elements['proofreading-history'].children.length, 0);
+  assert.equal(win.captureProofreadingView().issues.length, 0);
+  assert.equal(win.getAppMode(), 'rewrite');
+  assert.equal(win.getTaskBusyState().rewrite, true);
+  assert.equal((await win.runProofreading()).reason, 'rewrite-busy');
+  assert.equal(win.setAppMode('proofread'), 'rewrite');
+});
+
+test('save-rule UI refuses an A card after an unobserved switch to B', async () => {
+  const h = createDocumentResultHarness();
+  await h.win.runProofreading();
+  const save = findNode(h.elements['proofreading-issues'], node => node.tag === 'button' && node.textContent === '保存为规则');
+  assert.ok(save);
+  h.activate(h.b, false);
+  save.fire('click');
+  assert.equal(h.ruleDrafts.length, 0);
+  assert.match(h.win.getProofreadingStatus().text, /切回原文档/);
+});
+
+test('issue-derived rule drafts validate document identity again at submit and restore rule feedback in A', async () => {
+  const h = createDocumentResultHarness();
+  const { win, elements } = h;
+  const storage = new Map();
+  win.localStorage = {
+    getItem: key => storage.get(key) || '',
+    setItem: (key, value) => storage.set(key, value)
+  };
+  for (const id of ['fixed-rule-editor', 'fixed-rule-cancel', 'fixed-rule-pattern',
+    'fixed-rule-replacement', 'fixed-rule-name', 'fixed-rule-notes', 'fixed-rule-context', 'rules-status']) {
+    elements[id] = makeTaskPaneElement(id === 'fixed-rule-editor' ? 'form' : 'input');
+  }
+  loadBrowserScript('js/rules-center.js', win);
+  loadBrowserScript('js/rules-ui.js', win);
+  await win.runProofreading();
+  const issue = win.captureProofreadingView().issues[0];
+  assert.equal(win.openIssueRuleDraft(issue), true);
+  h.activate(h.b);
+  elements['fixed-rule-editor'].fire('submit', { preventDefault() {} });
+  assert.equal(win.WpsRulesCenter.getRules().length, 0);
+  assert.match(elements['rules-status'].textContent, /切回原文档/);
+  assert.equal(win.captureProofreadingView().issues.length, 0);
+  assert.equal(win.openIssueRuleDraft(issue), false);
+  h.activate(h.a);
+  elements['fixed-rule-editor'].fire('submit', { preventDefault() {} });
+  assert.equal(win.WpsRulesCenter.getRules().length, 1);
+  assert.equal(win.captureProofreadingView().issues[0].ruleSaved, true);
+  const status = win.getProofreadingStatus().text;
+  h.activate(h.b);
+  h.activate(h.a);
+  assert.equal(win.getProofreadingStatus().text, status);
+  assert.equal(elements['proofreading-history'].hidden, true);
+});
+
+test('A locate toast is transient and switching A-B-A restores A persistent status without replaying it', async () => {
+  const h = createDocumentResultHarness();
+  const { win, elements } = h;
+  const timers = new Map();
+  let scheduled = 0;
+  win.setTimeout = (callback, delay) => {
+    assert.equal(delay, 3000);
+    timers.set(++scheduled, callback);
+    return scheduled;
+  };
+  win.clearTimeout = id => timers.delete(id);
+  await win.runProofreading();
+  const aStatus = win.getProofreadingStatus();
+  const id = win.getWpsProofreadingState().issues[0].id;
+  assert.equal(win.locateProofreadingIssue(id), true);
+  assert.equal(elements['proofreading-toast'].hidden, false);
+  assert.equal(scheduled, 1);
+  assert.equal(timers.size, 1);
+  assert.deepEqual(win.getProofreadingStatus(), aStatus);
+  assert.equal(elements['proofreading-status'].textContent, aStatus.text);
+
+  h.activate(h.b);
+  win.setProofreadingStatus('B 的独立持久状态', 'warning');
+  assert.equal(elements['proofreading-toast'].hidden, true);
+  assert.equal(timers.size, 0);
+  h.activate(h.a);
+  assert.equal(elements['proofreading-toast'].hidden, true);
+  assert.equal(scheduled, 1, 'returning to A must not schedule another locate toast');
+  assert.equal(timers.size, 0);
+  assert.deepEqual(win.getProofreadingStatus(), aStatus);
+  assert.equal(elements['proofreading-status'].textContent, aStatus.text);
+  assert.match(elements['proofreading-status'].className, /status-success/);
+  h.activate(h.b);
+  assert.equal(elements['proofreading-status'].textContent, 'B 的独立持久状态');
 });

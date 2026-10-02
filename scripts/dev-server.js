@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
+const { createManager } = require("./opencode-manager");
 
 const host = "127.0.0.1";
 const portArgument = process.argv.indexOf("--port");
@@ -158,11 +159,36 @@ function resolveRequestPath(requestUrl) {
     return target;
 }
 
-function createServer() {
-    return http.createServer((request, response) => {
-        if (request.headers.host !== host + ":" + port) {
+function createServer(options = {}) {
+    const serverPort = options.port || port;
+    const manager = options.manager || createManager();
+    return http.createServer(async (request, response) => {
+        if (request.headers.host !== host + ":" + serverPort) {
             response.writeHead(403, { "Content-Type": "text/plain; charset=utf-8" });
             response.end("Forbidden");
+            return;
+        }
+        let pathname;
+        try { pathname = new URL(request.url || "/", "http://" + host).pathname; }
+        catch (_) { response.writeHead(400); response.end(); return; }
+        if (pathname === "/api/opencode/status" || pathname === "/api/opencode/start") {
+            const startRequest = pathname.endsWith("/start");
+            if (request.method !== (startRequest ? "POST" : "GET")) {
+                response.writeHead(405); response.end(); return;
+            }
+            if (startRequest && (request.headers.origin !== "http://" + host + ":" + serverPort ||
+                request.headers["sec-fetch-site"] === "cross-site" || request.headers["transfer-encoding"] ||
+                Number(request.headers["content-length"] || 0) !== 0)) {
+                response.writeHead(403); response.end(); return;
+            }
+            try {
+                const result = await (startRequest ? manager.start() : manager.status());
+                response.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+                response.end(JSON.stringify(result));
+            } catch (_) {
+                response.writeHead(503, { "Content-Type": "application/json; charset=utf-8" });
+                response.end(JSON.stringify({ state: "error", detail: "本机服务检测失败，请重试。" }));
+            }
             return;
         }
         if (request.method !== "GET" && request.method !== "HEAD") {
@@ -268,6 +294,7 @@ module.exports = {
     resolvePublishPaths,
     updatePublishXml,
     registerPlugin,
+    createServer,
     resolveRequestPath
 };
 

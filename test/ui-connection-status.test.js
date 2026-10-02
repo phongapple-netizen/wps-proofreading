@@ -68,6 +68,31 @@ test('OpenCode selection starts a stopped service and then enumerates models', a
   assert.equal(h.elements['opencode-retry'].hidden, true);
 });
 
+test('an older local server without the manager API still connects directly to OpenCode', async () => {
+  for (const nativeFetch of [async () => ({ ok: false, status: 400 }), async () => { throw new TypeError('Failed to fetch'); },
+    async () => ({ ok: true, json: async () => { throw new SyntaxError('not JSON'); } })]) {
+    const h = harness({ nativeFetch });
+    await new Promise(setImmediate);
+    assert.equal(h.win.getModelConnectionState().detected, true);
+    assert.equal(h.elements['opencode-retry'].hidden, true);
+    assert.doesNotMatch(h.elements['connection-status'].textContent, /管理服务暂时不可用/);
+  }
+});
+
+test('using OpenCode after its service stopped starts it again before a model request', async () => {
+  let stopped = false;
+  const calls = [];
+  const h = harness({ nativeFetch: async (_, init) => {
+    calls.push(init.method);
+    if (init.method === 'POST') stopped = false;
+    return nativeResponse(stopped ? 'stopped' : 'ready');
+  } });
+  await new Promise(setImmediate);
+  stopped = true;
+  await h.win.ensureOpenCodeConnection({ provider: 'opencode', endpoint: 'http://127.0.0.1:4096', apiKey: '' });
+  assert.deepEqual(calls, ['GET', 'GET', 'POST']);
+});
+
 test('OpenCode manager reports missing install, startup failure, and 4096 conflict', async () => {
   for (const [state, pattern] of [
     ['missing', /未检测到 OpenCode/],
@@ -278,4 +303,31 @@ test('configuration observation in a form getter or late response cannot consume
   finish({ provider: 'opencode', models: ['obsolete'], defaultModel: 'obsolete' });
   assert.equal((await pending).stale, true);
   assertRequiresDetection(h);
+});
+
+test('document session swaps preserve shared provider, model, password, settings and verified connection', async () => {
+  const h = harness();
+  const a = { FullName: '/private/A.docx' };
+  const b = { Name: '文档2' };
+  h.win.WpsNativeDocument = { getApplication: () => application };
+  const application = { ActiveDocument: a };
+  h.tick();
+  h.change('model-provider', 'openai');
+  h.change('model-api-key', 'document-switch-session-secret');
+  h.win.WpsSettingsStore.updateSettings({ deep: true, autoAdvance: false });
+  await h.win.refreshProviderModels();
+  const settings = JSON.stringify(h.win.WpsSettingsStore.loadSettings());
+  const connection = JSON.stringify(h.win.getModelConnectionState());
+  const connectionText = h.elements['connection-status'].textContent;
+  const key = h.win.WpsSettingsStore.loadPassword('openai');
+  assert.equal(key, 'document-switch-session-secret');
+  for (const document of [b, a, b, null, a]) {
+    application.ActiveDocument = document;
+    h.tick();
+    assert.equal(JSON.stringify(h.win.WpsSettingsStore.loadSettings()), settings);
+    assert.equal(JSON.stringify(h.win.getModelConnectionState()), connection);
+    assert.equal(h.elements['connection-status'].textContent, connectionText);
+    assert.equal(h.win.WpsSettingsStore.loadPassword('openai'), key);
+  }
+  assert.equal(JSON.stringify([...h.storage.values()]).includes('/private/A.docx'), false);
 });

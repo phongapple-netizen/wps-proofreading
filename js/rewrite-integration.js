@@ -256,9 +256,10 @@
         };
     }
 
-    function requestRewriteModel(options, prompt) {
+    async function requestRewriteModel(options, prompt) {
         if (options.provider === "opencode") {
             if (!root.WpsOpenCodeClient) throw new Error("OpenCode 客户端模块没有加载。");
+            if (typeof root.ensureOpenCodeConnection === "function") await root.ensureOpenCodeConnection(options);
             return root.WpsOpenCodeClient.request({
                 endpoint: options.endpoint,
                 model: options.model,
