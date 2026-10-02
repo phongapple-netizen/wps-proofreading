@@ -1,0 +1,118 @@
+name: Publish release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Confirm that this run should publish the named version
+        required: true
+        type: boolean
+        default: false
+      tag:
+        description: Existing version tag to publish, for example v0.3.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      commit: ${{ steps.version.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          fetch-depth: 0
+      - name: Validate release request and package version
+        id: version
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_TAG: ${{ inputs.tag }}
+          PUBLISH_CONFIRMED: ${{ inputs.publish }}
+        run: |
+          set -euo pipefail
+          tag="${REQUESTED_TAG:-${GITHUB_REF_NAME}}"
+          version="$(node -p "require('./package.json').version")"
+          RELEASE_TAG="$tag" PACKAGE_VERSION="$version" RELEASE_EVENT="$EVENT_NAME" PUBLISH_CONFIRMED="$PUBLISH_CONFIRMED" \
+            node scripts/validate-release.js
+          if ! git rev-parse -q --verify "refs/tags/$tag^{commit}" >/dev/null; then
+            echo "Release tag does not exist: $tag" >&2
+            exit 1
+          fi
+          tag_commit="$(git rev-parse "refs/tags/$tag^{commit}")"
+          head_commit="$(git rev-parse HEAD)"
+          if [[ "$head_commit" != "$tag_commit" ]]; then
+            echo "Checkout HEAD $head_commit does not match $tag commit $tag_commit." >&2
+            exit 1
+          fi
+          echo "commit=$tag_commit" >> "$GITHUB_OUTPUT"
+
+  windows:
+    needs: validate
+    uses: ./.github/workflows/release-windows.yml
+    with:
+      release_ref: ${{ needs.validate.outputs.commit }}
+
+  macos:
+    needs: validate
+    uses: ./.github/workflows/release-macos.yml
+    with:
+      release_ref: ${{ needs.validate.outputs.commit }}
+
+  publish:
+    needs: [validate, windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-installer
+          path: dist/release
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-installer
+          path: dist/release
+      - name: Create one release with both platform assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          test "$RELEASE_TAG" = "v$version"
+          tag_commit="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+          head_commit="$(git rev-parse HEAD)"
+          if [[ "$head_commit" != "$RELEASE_COMMIT" || "$tag_commit" != "$RELEASE_COMMIT" ]]; then
+            echo "Tag $RELEASE_TAG no longer points to the validated release commit." >&2
+            exit 1
+          fi
+          windows_asset="dist/release/WPS-Proofreading-${version}-Windows-x64-Setup.exe"
+          macos_asset="dist/release/WPS-Proofreading-${version}-macOS.dmg"
+          if [[ ! -f "$windows_asset" || ! -f "$macos_asset" ]]; then
+            echo "Expected versioned assets $windows_asset and $macos_asset." >&2
+            exit 1
+          fi
+          node scripts/release-notes.js
+          gh release create "$RELEASE_TAG" "$windows_asset" "$macos_asset" \
+            --title "WPS 文本校改 $RELEASE_TAG" \
+            --notes-file release-notes.md \
+            --verify-tag

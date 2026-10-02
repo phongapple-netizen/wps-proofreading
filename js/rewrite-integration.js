@@ -13,6 +13,50 @@
     var busy = false;
     var undoBusy = false;
     var operationCounter = 0;
+    var activeDocumentKey = null;
+    var sessionRevision = 0;
+    var activeRun = null;
+    var documentEventsBound = false;
+    var disposed = false;
+
+    function invalidateRun() {
+        var previousController = controller;
+        activeRun = null;
+        controller = null;
+        if (previousController) previousController.abort();
+    }
+
+    function syncDocumentSession() {
+        var key = documentKey(activeDocument(application()));
+        if (key === activeDocumentKey) return false;
+        activeDocumentKey = key;
+        sessionRevision += 1;
+        invalidateRun();
+        undoRecord = null;
+        undoBusy = false;
+        clearResult();
+        setBusy(false);
+        setStatus("请选择文字进行改写。", "idle");
+        return true;
+    }
+
+    function bindDocumentEvents() {
+        if (documentEventsBound || disposed) return;
+        try {
+            var app = application();
+            var events = app && app.ApiEvent || root.wps && root.wps.ApiEvent;
+            if (!events || typeof events.AddApiEventListener !== "function") return;
+            events.AddApiEventListener("WindowActivate", function () {
+                if (!disposed) syncDocumentSession();
+            });
+            documentEventsBound = true;
+        } catch (error) { /* Identity polling remains available. */ }
+    }
+
+    function runIsCurrent(run) {
+        syncDocumentSession();
+        return !disposed && activeRun === run && run.revision === sessionRevision;
+    }
 
     function actionClock() {
         return root.performance && typeof root.performance.now === "function"
@@ -222,6 +266,7 @@
     }
 
     function refreshRewriteSelection() {
+        syncDocumentSession();
         var selected = activeSelection();
         var value = selected ? selected.selectedText : "";
         selectionCount(value);
@@ -256,10 +301,11 @@
         };
     }
 
-    async function requestRewriteModel(options, prompt) {
+    async function requestRewriteModel(options, prompt, run) {
         if (options.provider === "opencode") {
             if (!root.WpsOpenCodeClient) throw new Error("OpenCode 客户端模块没有加载。");
             if (typeof root.ensureOpenCodeConnection === "function") await root.ensureOpenCodeConnection(options);
+            if (!runIsCurrent(run)) return null;
             return root.WpsOpenCodeClient.request({
                 endpoint: options.endpoint,
                 model: options.model,
@@ -357,6 +403,14 @@
 
     function clearResult() {
         result = null;
+        ["rewrite-original-preview", "rewrite-text-preview", "rewrite-length-summary",
+            "rewrite-risk-title"].forEach(function (id) {
+            var element = byId(id);
+            if (element) element.textContent = "";
+        });
+        ["rewrite-summary-list", "rewrite-risk-list"].forEach(function (id) {
+            appendList(byId(id), []);
+        });
         var panel = byId("rewrite-result");
         var actions = byId("rewrite-result-actions");
         var completed = byId("rewrite-completed");
@@ -369,6 +423,7 @@
     }
 
     async function generateRewrite(savedSnapshot) {
+        syncDocumentSession();
         if (busy || undoBusy) return false;
         if (typeof root.getTaskBusyState === "function") {
             var tasks = root.getTaskBusyState();
@@ -418,11 +473,14 @@
 
         controller = typeof root.AbortController === "function" ? new root.AbortController() : null;
         options.signal = controller ? controller.signal : undefined;
+        var run = { revision: sessionRevision, controller: controller };
+        activeRun = run;
         setBusy(true);
         setStatus("正在生成理顺改写预览…", "working");
         try {
-            var response = await requestRewriteModel(options, prompt);
-            if (controller && controller.signal.aborted) throw new Error("改写已取消。");
+            var response = await requestRewriteModel(options, prompt, run);
+            if (!runIsCurrent(run)) return false;
+            if (run.controller && run.controller.signal.aborted) throw new Error("改写已取消。");
             if (!contextMatches(nextSnapshot.original, nextSnapshot, nextSnapshot.end)) {
                 throw new Error("原文在生成改写后已发生变化，请重新选择并生成。");
             }
@@ -444,16 +502,21 @@
                     : "改写预览已生成，请检查后再替换。", risk.level === "safe" ? "success" : "warning");
             return true;
         } catch (error) {
+            if (!runIsCurrent(run)) return false;
             var message = error && error.message ? error.message : "改写生成失败，请重试。";
             setStatus(message, /取消/.test(message) ? "warning" : "error");
             return false;
         } finally {
-            controller = null;
-            setBusy(false);
+            if (runIsCurrent(run)) {
+                activeRun = null;
+                controller = null;
+                setBusy(false);
+            }
         }
     }
 
     function replaceOriginal() {
+        syncDocumentSession();
         if (undoBusy || !result || result.risk.hardRisks.length ||
             (result.risk.requiresConfirmation && !checked("rewrite-risk-confirm"))) return false;
         var saved = result.snapshot;
@@ -491,10 +554,12 @@
     }
 
     async function undoRewrite() {
+        syncDocumentSession();
         if (!undoRecord || undoBusy) return false;
         undoBusy = true;
         var perf = startUndoPerf();
         var outcome = "rejected";
+        var revision = sessionRevision;
         var record = undoRecord;
         var saved = record.snapshot;
         var wrote = false;
@@ -524,6 +589,8 @@
             }
             catch (error) { /* The local lock remains authoritative. */ }
             await nextActionTurn();
+            syncDocumentSession();
+            if (revision !== sessionRevision || undoRecord !== record) return false;
             var verified = undoStage(perf, "postcheck", function () {
                 return contextMatches(saved.original, saved, saved.end);
             });
@@ -548,6 +615,8 @@
             outcome = "completed";
             return true;
         } catch (error) {
+            syncDocumentSession();
+            if (revision !== sessionRevision) return false;
             if (writeAttempted) {
                 undoRecord = null;
                 undoStage(perf, "ui", function () {
@@ -560,18 +629,21 @@
             outcome = wrote ? "post-write-error" : writeAttempted ? "write-unconfirmed" : "precheck-error";
             return false;
         } finally {
-            undoBusy = false;
-            try {
-                undoStage(perf, "ui", function () {
-                    if (typeof root.setRewriteBusy === "function") root.setRewriteBusy(false);
-                });
+            if (revision === sessionRevision) {
+                undoBusy = false;
+                try {
+                    undoStage(perf, "ui", function () {
+                        if (typeof root.setRewriteBusy === "function") root.setRewriteBusy(false);
+                    });
+                }
+                catch (error) { /* The local lock remains authoritative. */ }
             }
-            catch (error) { /* The local lock remains authoritative. */ }
             finishUndoPerf(perf, outcome);
         }
     }
 
     function discardRewrite() {
+        syncDocumentSession();
         if (busy || undoBusy) return false;
         clearResult();
         undoRecord = null;
@@ -580,8 +652,11 @@
     }
 
     function cancelRewrite() {
-        if (!controller) return false;
-        controller.abort();
+        syncDocumentSession();
+        if (!activeRun) return false;
+        invalidateRun();
+        setBusy(false);
+        setStatus("改写已取消。", "warning");
         return true;
     }
 
@@ -603,8 +678,19 @@
         if (undo) undo.addEventListener("click", undoRewrite);
         if (confirm) confirm.addEventListener("change", updateReplaceButton);
         refreshRewriteSelection();
+        bindDocumentEvents();
+        if (typeof root.addEventListener === "function") {
+            root.addEventListener("unload", function () {
+                disposed = true;
+                invalidateRun();
+                // Do not remove WindowActivate by name: proofreading also listens to it.
+            });
+        }
         if (typeof root.setInterval === "function") {
             root.setInterval(function () {
+                if (disposed) return;
+                syncDocumentSession();
+                bindDocumentEvents();
                 if (typeof root.getAppMode !== "function" || root.getAppMode() === "rewrite") {
                     refreshRewriteSelection();
                 }
