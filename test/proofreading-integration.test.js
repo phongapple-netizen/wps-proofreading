@@ -125,7 +125,13 @@ function createHarness(options = {}) {
                         revisionGaps.push({ index: startIndex + replacement.length,
                             size: options.revisionPadding || 3 });
                     }
-                    if (options.onWrite) options.onWrite();
+                    if (options.onWrite) options.onWrite({
+                        start: range.Start,
+                        end: range.End,
+                        value: replacement,
+                        startIndex,
+                        endIndex
+                    });
                 },
                 Select() {
                     if (options.onSelect) options.onSelect(range.Start, range.End);
@@ -1436,10 +1442,14 @@ function undoRecordHarness(extra = {}) {
 test("one-click fix groups successful safe writes in one native undo record", async () => {
     for (const trackRevisions of [false, true]) {
         let undoHarness;
+        const writes = [];
         const state = undoRecordHarness({
             selectedText: "本段,另有错字。。",
             trackRevisions,
-            onWrite() { undoHarness.assertUndoRecordActive(); }
+            onWrite(write) {
+                undoHarness.assertUndoRecordActive();
+                writes.push(write);
+            }
         });
         undoHarness = state.harness;
         const { harness, calls } = state;
@@ -1452,7 +1462,41 @@ test("one-click fix groups successful safe writes in one native undo record", as
         assert.deepEqual(calls, [["start", "一键修正"], ["end"]]);
         assert.equal(harness.readDocument(), harness.prefix + "本段，另有错字。" + harness.suffix);
         assert.equal(harness.window.getWpsProofreadingState().issues.every((issue) => issue.status === "accepted"), true);
+        if (trackRevisions) {
+            assert.equal(writes.length, 2);
+            assert.equal(writes[0].start > writes[1].start, true,
+                "tracked batch writes must run from the end of the document backwards");
+        }
     }
+});
+
+test("tracked one-click fix keeps skipped issues anchored by logical text offsets", async () => {
+    const harness = createHarness({
+        trackRevisions: true,
+        selectedText: "甲,乙有错字,丙。。",
+        issues: [{
+            category: "typo",
+            paragraphIndex: 1,
+            original: "错字",
+            suggestion: "正字",
+            reason: "AI suggestion stays manual",
+            confidence: 0.95,
+            needsReview: false
+        }],
+        rules: [basicRule("basic-ascii-comma-between-hanzi"), basicRule("basic-duplicate-period")]
+    });
+    await harness.window.runProofreading();
+    const before = harness.window.getWpsProofreadingState().issues;
+    const manual = before.find((issue) => issue.origin === "ai");
+    assert.ok(manual);
+
+    const result = harness.window.applyAllProofreadingIssues();
+    assert.equal(result.applied >= 2, true);
+    const after = harness.window.getWpsProofreadingState().issues;
+    const anchoredManual = after.find((issue) => issue.id === manual.id);
+    assert.equal(anchoredManual.status, "pending");
+    assert.equal(Number.isInteger(anchoredManual.textOffset), true);
+    assert.equal(harness.window.locateProofreadingIssue(anchoredManual.id), true);
 });
 
 test("one-click fix closes its native undo record after a stale partial batch", async () => {
