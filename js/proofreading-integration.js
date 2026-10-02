@@ -148,6 +148,10 @@
 
     function setBusy(value) {
         busy = value === true;
+        if (typeof root.setProofreadingFirstPassComplete === "function") {
+            var run = documentRuns[activeDocumentKey];
+            root.setProofreadingFirstPassComplete(!!(run && run.firstPassComplete));
+        }
         if (typeof root.setProofreadingBusy === "function") {
             root.setProofreadingBusy(busy);
             return;
@@ -1050,6 +1054,7 @@
         var run = {
             key: activeDocumentKey, document: activeDocument(app()), controller: makeAbortController(),
             busy: true, cancelled: false, started: false, waiting: false,
+            firstPassComplete: false, issueStates: Object.create(null),
             snapshot: currentSnapshot, issues: currentIssues, runId: currentResultRunId,
             status: currentStatus, progress: null
         };
@@ -1084,6 +1089,13 @@
         return (batch || []).reduce(function (total, paragraph) {
             return total + text(paragraph && paragraph.text).length;
         }, 0);
+    }
+
+    function mergeRunIssues(run, collected) {
+        return mergeMappedIssues(collected, run.runId).map(function (issue) {
+            var status = run.issueStates[issue.id];
+            return status ? Object.assign({}, issue, { status: status }) : issue;
+        });
     }
 
     function issueOrigin(issue) {
@@ -1438,7 +1450,7 @@
             if (perf) perf.report.localRulesMs = actionClock() - localStarted;
             collected = collected.concat(localRuleIssues);
             currentSnapshot = snapshot;
-            currentIssues = mergeMappedIssues(collected, run.runId);
+            currentIssues = mergeRunIssues(run, collected);
             viewIssues();
             setStatus("规则扫描完成 · 本地检查完成 · " + resultCountLabel() +
                 (aiReviewCandidates.length ? " · AI核查点 " + aiReviewCandidates.length + " 处" : ""), "working");
@@ -1449,7 +1461,8 @@
                 throw new Error(scopeLabel + "中没有可校对的正文文字。");
             }
             var batches = root.WpsProofreadingCore.batchParagraphs(
-                paragraphs, root.WpsProofreadingCore.defaultBatchCharacters);
+                paragraphs, root.WpsProofreadingCore.defaultBatchCharacters,
+                root.WpsProofreadingCore.firstBatchCharacters);
             var consistencyCandidates = root.WpsProofreadingCore.buildGlobalConsistencyCandidates(paragraphs);
             var consistencyBatches = root.WpsProofreadingCore.batchGlobalConsistencyCandidates(consistencyCandidates);
             if (perf) {
@@ -1499,7 +1512,7 @@
                 });
                 collected = collected.concat(
                     annotateAiReviewIssues(mappedFirstPass, aiReviewCandidates));
-                currentIssues = mergeMappedIssues(collected, run.runId);
+                currentIssues = mergeRunIssues(run, collected);
                 currentSnapshot = snapshot;
                 runStage(perf, batchPerf, "publishRenderMs", viewIssues);
                 completedFirstPassCharacters += batchCharacterCount(batches[index]);
@@ -1519,6 +1532,8 @@
             }
 
             if (perf) perf.report.firstPassMs = actionClock() - perf.started;
+            run.firstPassComplete = true;
+            publish("busy");
             var consistencyStarted = perf ? actionClock() : 0;
             if (runConsistencyPass) {
                 if (runController && runController.signal && runController.signal.aborted) {
@@ -1556,7 +1571,7 @@
                                 });
                         });
                         collected = collected.concat(consistencyMapped);
-                        currentIssues = mergeMappedIssues(collected, run.runId);
+                        currentIssues = mergeRunIssues(run, collected);
                         currentSnapshot = snapshot;
                         viewIssues();
                         setStatus("正在进行全文一致性复核 · " + resultCountLabel(), "working");
@@ -1590,7 +1605,7 @@
                 viewIssues();
                 throw new Error("校对期间" + scopeLabel + "内容已变化，结果已丢弃。请重新校对。");
             }
-            currentIssues = mergeMappedIssues(collected, run.runId);
+            currentIssues = mergeRunIssues(run, collected);
             currentSnapshot = snapshot;
             reportProgress(100, currentIssues.length
                 ? "校对完成 · 共发现 " + currentIssues.length + " 项"
@@ -1630,7 +1645,7 @@
             var partial = collected.length > 0 && !discarded && snapshot &&
                 documentSnapshotMatches(run.document, snapshot);
             if (partial) {
-                currentIssues = mergeMappedIssues(collected, run.runId);
+                currentIssues = mergeRunIssues(run, collected);
                 currentSnapshot = snapshot;
                 viewIssues();
             }
@@ -1707,7 +1722,8 @@
             setStatus("请切回原文档或在当前文档重新校对。", "warning");
             return true;
         }
-        if (!busy && !issueActionBusy) return false;
+        var run = documentRuns[activeDocumentKey];
+        if (!issueActionBusy && (!busy || (run && run.firstPassComplete))) return false;
         setStatus(issueActionBusy
             ? "上一条操作正在收尾，请稍候。"
             : "校对进行中，请等待完成或先取消。", "warning");
@@ -1756,13 +1772,15 @@
 
     function ignoreProofreadingIssue(issueId) {
         if (!canUseProofreadingIssue(issueId)) return false;
-        if (issueActionUnavailable()) return false;
+        if (issueActionBusy) return false;
         var issue = findPendingIssue(issueId);
         if (!issue || issue.status !== "pending") {
             setStatus("这条建议已处理或已失效。", "warning");
             return false;
         }
         issue.status = "ignored";
+        var run = documentRuns[activeDocumentKey];
+        if (run && run.started && run.runId === currentResultRunId) run.issueStates[issue.id] = "ignored";
         recordAction("ignored", issue);
         viewIssues();
         setStatus("已忽略这条建议，文档没有修改。", "success");
@@ -1770,6 +1788,7 @@
     }
 
     function writeIssueReplacement(change, perf) {
+        if (!prepareConsistencyWrite()) return false;
         var issue = change.issue;
         var context;
         var range = actionStage(perf, "validation", function () {
@@ -1816,6 +1835,27 @@
         change.written = true;
         // No live WPS Range is carried into the next event-loop turn.
         return true;
+    }
+
+    function prepareConsistencyWrite() {
+        var run = documentRuns[activeDocumentKey];
+        if (!run || !run.busy) return true;
+        if (!run.firstPassComplete) return false;
+        // Strictly validate the complete captured scope before interrupting review.
+        var matches = documentSnapshotMatches(run.document, currentSnapshot);
+        cancelDocumentRun(run);
+        run.busy = false;
+        run.snapshot = currentSnapshot;
+        run.issues = currentIssues;
+        run.status = { text: "正文修改已停止全文一致性复核，旧复核结果将丢弃。", tone: "warning" };
+        publishDocumentRun(run, "busy");
+        publishDocumentRun(run, "status");
+        // Remove ownership before writing, including transports that ignore abort.
+        delete documentRuns[run.key];
+        if (!matches) {
+            markAllPendingStale("正文已变化，一致性复核已停止；未写入修改，请重新校对。");
+        }
+        return matches;
     }
 
     function completeIssueReplacement(change, perf) {
@@ -2188,6 +2228,7 @@
             snapshot: currentSnapshot,
             issues: currentIssues.slice(),
             busy: busy,
+            firstPassComplete: !!(documentRuns[activeDocumentKey] && documentRuns[activeDocumentKey].firstPassComplete),
             actionBusy: issueActionBusy,
             provider: currentSettings().provider
         };

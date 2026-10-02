@@ -1502,7 +1502,7 @@ test("one-click fix stops without writing when the document changed first", asyn
     assert.equal(harness.window.getWpsProofreadingState().issues.every((issue) => issue.status === "stale"), true);
 });
 
-test("issues cannot be applied or ignored while an AI batch is pending", async () => {
+test("issues can be ignored but cannot write while an AI batch is pending", async () => {
     let release;
     const waiting = new Promise((resolve) => { release = resolve; });
     const harness = createHarness({
@@ -1519,14 +1519,64 @@ test("issues cannot be applied or ignored while an AI batch is pending", async (
         const issue = harness.window.getWpsProofreadingState().issues[0];
         assert.ok(issue);
         assert.equal(await harness.window.applyProofreadingIssue(issue.id), false);
-        assert.equal(harness.window.ignoreProofreadingIssue(issue.id), false);
+        assert.equal(harness.window.ignoreProofreadingIssue(issue.id), true);
         assert.equal(harness.window.applyAllProofreadingIssues().applied, 0);
         assert.equal(harness.readDocument(), harness.prefix + harness.selectedText + harness.suffix);
     } finally {
         release();
         await running;
     }
-    assert.equal(harness.window.applyAllProofreadingIssues().applied, 1);
+    assert.equal(harness.window.getWpsProofreadingState().issues[0].status, "ignored");
+    assert.equal(harness.window.applyAllProofreadingIssues().applied, 0);
+});
+
+test("ignoring a completed first batch survives later batches and final merge", async () => {
+    const { harness, gates } = progressiveFixture();
+    const operation = harness.window.runProofreading();
+    await until(() => gates.length === 1);
+    gates[0]();
+    await until(() => gates.length === 2);
+    const id = harness.renderedIssues.find(issue => issue.original === "错字甲").id;
+    assert.equal(harness.window.locateProofreadingIssue(id), true);
+    assert.equal(harness.window.ignoreProofreadingIssue(id), true);
+    assert.equal(await harness.window.applyProofreadingIssue(id), false);
+    gates[1]();
+    assert.equal((await operation).accepted, true);
+    assert.equal(harness.renderedIssues.find(issue => issue.id === id).status, "ignored");
+});
+
+test("first-pass completion unlocks writes and detaches late consistency results", async () => {
+    for (const abortAvailable of [false, true]) {
+        const harness = createHarness({ selectedText: "甲市综协办有错字。\n甲市综合协调办公室负责协调。" });
+        if (abortAvailable) harness.window.AbortController = AbortController;
+        let release, signal;
+        harness.window.WpsProofreadingCore.requestModel = (options, prompt) => {
+            if (prompt.includes("第二遍跨段落一致性复核")) {
+                signal = options.signal;
+                return new Promise(resolve => { release = resolve; });
+            }
+            return Promise.resolve(JSON.stringify({ issues: [{ category: "typo", paragraphIndex: 1,
+                original: "错字", suggestion: "错别字", confidence: 0.95, needsReview: false }] }));
+        };
+        const operation = harness.window.runProofreading();
+        await until(() => release);
+        assert.equal(harness.busy, true);
+        assert.equal(harness.window.getWpsProofreadingState().firstPassComplete, true);
+        const id = harness.renderedIssues[0].id;
+        assert.equal(await harness.window.applyProofreadingIssue(id), true);
+        assert.equal(harness.busy, false);
+        if (signal) assert.equal(signal.aborted, true);
+        const snapshot = harness.window.getWpsProofreadingState().snapshot;
+        const status = harness.status.text;
+        release(JSON.stringify({ issues: [{ category: "consistency", paragraphIndex: 2,
+            original: "甲市综合协调办公室", suggestion: "甲市综协办", needsReview: true, confidence: 0.9 }] }));
+        assert.equal((await operation).reason, "cancelled");
+        assert.equal(harness.window.getWpsProofreadingState().snapshot, snapshot);
+        assert.equal(harness.renderedIssues.length, 1);
+        assert.equal(harness.renderedIssues[0].status, "accepted");
+        assert.equal(harness.status.text, status);
+        assert.equal(harness.statuses.some(item => /修改已停止全文一致性复核/.test(item.text)), true);
+    }
 });
 
 test("ignoring a finding records history without touching the document", async () => {
