@@ -2607,7 +2607,7 @@ test("document sessions hide A in new B and restore two independent result sets 
     assert.equal(harness.requests.length, requests);
 });
 
-test("switching documents aborts an incomplete batch, keeps partial A results, and lets B run immediately", async () => {
+test("switching documents keeps A running in the background while B runs independently", async () => {
     const { harness, gates } = progressiveFixture();
     const monitor = installDocumentMonitor(harness);
     const b = secondDocument(harness);
@@ -2618,7 +2618,7 @@ test("switching documents aborts an incomplete batch, keeps partial A results, a
     const partial = Array.from(harness.renderedIssues, issue => issue.id);
     const signal = harness.sentRequest.options.signal;
     monitor.activate(b.document);
-    assert.equal(signal.aborted, true);
+    assert.equal(signal.aborted, false);
     assert.equal(harness.busy, false);
     assert.equal(harness.renderedIssues.length, 0);
     harness.window.WpsProofreadingCore.requestModel = async () => '{"issues":[]}';
@@ -2627,13 +2627,14 @@ test("switching documents aborts an incomplete batch, keeps partial A results, a
     const bIds = Array.from(harness.renderedIssues, issue => issue.id);
     assert.equal(bIds.some(id => partial.includes(id)), false);
     gates[1]();
-    assert.equal((await run).reason, "cancelled");
+    assert.equal((await run).accepted, true);
     assert.equal(harness.status.text, bStatus);
     assert.deepEqual(Array.from(harness.renderedIssues, issue => issue.id), bIds);
     const requests = harness.requests.length;
     monitor.activate(b.original);
-    assert.deepEqual(Array.from(harness.renderedIssues, issue => issue.id), partial);
-    assert.match(harness.status.text, /校对已取消.*2 项/);
+    assert.equal(harness.renderedIssues.length, 3);
+    assert.deepEqual(Array.from(harness.renderedIssues.slice(0, 2), issue => issue.id), partial);
+    assert.match(harness.status.text, /校对完成.*3 项/);
     assert.equal(harness.busy, false);
     assert.equal(harness.requests.length, requests, "returning must not restart AI");
 });
@@ -2653,7 +2654,7 @@ test("an abort-ignoring old A run cannot pollute a newer A run after an A-B-A sw
     await until(() => calls === 1);
     monitor.activate(b.document);
     monitor.activate(b.original);
-    assert.equal((await harness.window.runProofreading()).accepted, true);
+    assert.equal((await harness.window.runProofreading(true)).accepted, true);
     const ids = Array.from(harness.renderedIssues, issue => issue.id);
     const status = harness.status.text;
     release(JSON.stringify({ issues: [{ category: "typo", paragraphIndex: 1,
@@ -2716,10 +2717,13 @@ test("a missed activation is detected before a model response can publish into B
     await until(() => release);
     monitor.activate(b.document, false);
     release('{"issues":[]}');
-    assert.equal((await run).reason, "cancelled");
+    assert.equal((await run).accepted, true);
     assert.equal(harness.renderedIssues.length, 0);
     assert.equal(harness.status.text, "当前文档尚未校对");
     assert.equal(b.calls.length, 0);
+    monitor.activate(b.original);
+    assert.match(harness.status.text, /校对完成/);
+    assert.equal(harness.busy, false);
 });
 
 test("activation during rules readiness or full-document confirmation sends no old document text", async () => {
@@ -2737,6 +2741,10 @@ test("activation during rules readiness or full-document confirmation sends no o
         assert.equal(harness.requests.length, 0);
         assert.equal(harness.busy, false);
         assert.equal(harness.renderedIssues.length, 0);
+        monitor.activate(b.original);
+        assert.equal(harness.busy, false);
+        assert.match(harness.status.text, /校对已取消/);
+        assert.doesNotMatch(harness.status.text, /等待确认/);
     }
 });
 
@@ -2868,21 +2876,206 @@ test("late ordinary consistency errors cannot publish A progress or status into 
         let resolveB;
         let runningB;
         if (startB) {
-            harness.window.WpsProofreadingCore.requestModel = () => new Promise(resolve => { resolveB = resolve; });
+            let bRequests = 0;
+            harness.window.WpsProofreadingCore.requestModel = () => ++bRequests === 1
+                ? new Promise(resolve => { resolveB = resolve; }) : Promise.resolve('{"issues":[]}');
             runningB = harness.window.runProofreading();
             await until(() => resolveB);
         }
         const status = harness.status.text;
         const progress = harness.progress.length;
         rejectOld(new Error("late transport failure"));
-        assert.equal((await old).reason, "cancelled");
+        const result = await old;
+        assert.equal(result.accepted, true);
+        assert.equal(result.consistencyWarning, "late transport failure");
         assert.equal(harness.progress.length, progress);
         assert.equal(harness.status.text, status);
         assert.equal(harness.busy, startB);
         if (startB) {
             monitor.activate(null);
             resolveB('{"issues":[]}');
-            assert.equal((await runningB).reason, "cancelled");
+            assert.equal((await runningB).accepted, true);
         }
+        monitor.activate(b.original);
+        assert.match(harness.status.text, /一致性复核未完成.*late transport failure/);
+        assert.equal(harness.busy, false);
+    }
+});
+
+
+test("returning to an unfinished run restores its busy state, progress and stable results", async () => {
+    const { harness, gates } = progressiveFixture();
+    const monitor = installDocumentMonitor(harness);
+    const b = secondDocument(harness);
+    const run = harness.window.runProofreading();
+    await until(() => gates.length === 1);
+    gates[0]();
+    await until(() => gates.length === 2);
+    const ids = Array.from(harness.renderedIssues, issue => issue.id);
+    const progress = harness.progress.at(-1);
+    const signal = harness.sentRequest.options.signal;
+    monitor.activate(b.document);
+    assert.equal(harness.busy, false);
+    monitor.activate(b.original);
+    assert.equal(harness.busy, true);
+    assert.equal(signal.aborted, false);
+    assert.deepEqual(Array.from(harness.renderedIssues, issue => issue.id), ids);
+    assert.deepEqual(harness.progress.at(-1), progress);
+    assert.equal((await harness.window.runProofreading()).reason, "busy");
+    gates[1]();
+    assert.equal((await run).accepted, true);
+    assert.equal(harness.busy, false);
+    assert.equal(harness.renderedIssues.length, 3);
+});
+
+function pendingDocumentRuns(harness) {
+    const pending = [];
+    harness.window.AbortController = AbortController;
+    harness.window.WpsProofreadingCore.requestModel = options => new Promise(resolve => {
+        pending.push({ signal: options.signal, finish(suggestion = "正字") {
+            resolve(JSON.stringify({ issues: [{ category: "typo", paragraphIndex: 1,
+                original: "错字", suggestion, confidence: 0.95, needsReview: false }] }));
+        } });
+    });
+    return pending;
+}
+
+test("cancelling and restarting A leaves the overlapping B run intact and ignores late A results", async () => {
+    const harness = createHarness();
+    const monitor = installDocumentMonitor(harness);
+    const b = secondDocument(harness);
+    const pending = pendingDocumentRuns(harness);
+    const oldA = harness.window.runProofreading();
+    await until(() => pending.length === 1);
+    monitor.activate(b.document);
+    const runB = harness.window.runProofreading();
+    await until(() => pending.length === 2);
+    monitor.activate(b.original);
+    assert.equal(harness.busy, true);
+    assert.equal(harness.window.cancelProofreading(), true);
+    assert.equal(pending[0].signal.aborted, true);
+    assert.equal(pending[1].signal.aborted, false);
+    const newA = harness.window.runProofreading(true);
+    await until(() => pending.length === 3);
+    pending[0].finish("旧任务迟到结果");
+    assert.equal((await oldA).reason, "cancelled");
+    assert.equal(harness.busy, true, "old finally must not unlock the new A run");
+    pending[2].finish("A正确结果");
+    assert.equal((await newA).accepted, true);
+    const aIds = Array.from(harness.renderedIssues, issue => issue.id);
+    const aStatus = harness.status.text;
+    const progressCount = harness.progress.length;
+    pending[1].finish("B正确结果");
+    assert.equal((await runB).accepted, true);
+    assert.equal(harness.status.text, aStatus);
+    assert.equal(harness.progress.length, progressCount);
+    assert.deepEqual(Array.from(harness.renderedIssues, issue => issue.id), aIds);
+    monitor.activate(b.document);
+    assert.equal(harness.renderedIssues[0].suggestion, "B正确结果");
+    assert.equal(harness.renderedIssues.some(issue => aIds.includes(issue.id)), false);
+    assert.equal(harness.busy, false);
+    monitor.activate(b.original);
+    assert.equal(harness.renderedIssues[0].suggestion, "A正确结果");
+});
+
+test("editing background A discards its outdated response while leaving B untouched", async () => {
+    const harness = createHarness();
+    const monitor = installDocumentMonitor(harness);
+    const b = secondDocument(harness);
+    const pending = pendingDocumentRuns(harness);
+    const run = harness.window.runProofreading();
+    await until(() => pending.length === 1);
+    monitor.activate(b.document);
+    const status = harness.status.text;
+    const progressCount = harness.progress.length;
+    harness.changeDocument(harness.readDocument().replace("错字", "已改"));
+    pending[0].finish();
+    assert.equal((await run).reason, "error");
+    assert.equal(harness.status.text, status);
+    assert.equal(harness.progress.length, progressCount);
+    assert.equal(b.calls.length, 0);
+    monitor.activate(b.original);
+    assert.equal(harness.window.getWpsProofreadingState().snapshot, null);
+    assert.equal(harness.renderedIssues.length, 0);
+    assert.match(harness.status.text, /内容已变化/);
+    assert.equal(harness.busy, false);
+});
+
+test("closing background A cancels only A and its late response cannot revive a reopened session", async () => {
+    const harness = createHarness();
+    const monitor = installDocumentMonitor(harness);
+    const b = secondDocument(harness);
+    const pending = pendingDocumentRuns(harness);
+    const old = harness.window.runProofreading();
+    await until(() => pending.length === 1);
+    monitor.activate(b.document);
+    const runB = harness.window.runProofreading();
+    await until(() => pending.length === 2);
+    monitor.events.DocumentAfterClose(b.original);
+    assert.equal(pending[0].signal.aborted, true);
+    assert.equal(pending[1].signal.aborted, false);
+    monitor.activate(b.original);
+    assert.equal(harness.renderedIssues.length, 0);
+    const reopened = harness.window.runProofreading();
+    await until(() => pending.length === 3);
+    pending[0].finish("关闭前的迟到结果");
+    assert.equal((await old).reason, "cancelled");
+    assert.equal(harness.busy, true);
+    pending[2].finish("重新打开后的结果");
+    assert.equal((await reopened).accepted, true);
+    assert.equal(harness.renderedIssues[0].suggestion, "重新打开后的结果");
+    monitor.unload();
+    assert.equal(pending[1].signal.aborted, true, "pane teardown cancels all remaining document runs");
+    pending[1].finish();
+    assert.equal((await runB).reason, "cancelled");
+});
+
+test("a close event before ActiveDocument changes releases A's lock and blocks late results", async () => {
+    const harness = createHarness();
+    const monitor = installDocumentMonitor(harness);
+    const b = secondDocument(harness);
+    const pending = pendingDocumentRuns(harness);
+    const run = harness.window.runProofreading();
+    await until(() => pending.length === 1);
+    monitor.events.DocumentAfterClose(b.original);
+    assert.equal(harness.busy, false);
+    assert.equal(pending[0].signal.aborted, true);
+    assert.equal(harness.renderedIssues.length, 0);
+    monitor.activate(b.document);
+    pending[0].finish();
+    assert.equal((await run).reason, "cancelled");
+    assert.equal(harness.status.text, "当前文档尚未校对");
+    assert.equal(harness.busy, false);
+    monitor.activate(b.original);
+    assert.equal(harness.renderedIssues.length, 0);
+});
+
+test("without AbortController cancellation stays idle across switches and late responses preserve issue actions", async () => {
+    for (const action of ["apply", "ignore"]) {
+        const { harness, gates } = progressiveFixture();
+        delete harness.window.AbortController;
+        const monitor = installDocumentMonitor(harness);
+        const b = secondDocument(harness);
+        const run = harness.window.runProofreading();
+        await until(() => gates.length === 1);
+        gates[0]();
+        await until(() => gates.length === 2);
+        const issueId = harness.renderedIssues[1].id;
+        assert.equal(harness.window.cancelProofreading(), true);
+        assert.equal(harness.busy, false);
+        monitor.activate(b.document);
+        monitor.activate(b.original);
+        assert.equal(harness.busy, false, "cancelled run must not regain its busy flag");
+        assert.match(harness.status.text, /校对已取消/);
+        assert.equal(await harness.window[action + "ProofreadingIssue"](issueId), true);
+        const snapshot = harness.window.getWpsProofreadingState().snapshot;
+        const issueStatus = harness.window.getWpsProofreadingState().issues.find(issue => issue.id === issueId).status;
+        const status = harness.status.text;
+        gates[1]();
+        assert.equal((await run).reason, "cancelled");
+        assert.equal(harness.window.getWpsProofreadingState().snapshot, snapshot);
+        assert.equal(harness.window.getWpsProofreadingState().issues.find(issue => issue.id === issueId).status, issueStatus);
+        assert.equal(harness.status.text, status);
+        assert.equal(harness.busy, false);
     }
 });
