@@ -672,6 +672,7 @@
         if (cancel) cancel.addEventListener("click", cancelRewrite);
         if (replace) replace.addEventListener("click", replaceOriginal);
         if (regenerate) regenerate.addEventListener("click", function () {
+            syncDocumentSession();
             if (result) generateRewrite(result.snapshot);
         });
         if (discard) discard.addEventListener("click", discardRewrite);
