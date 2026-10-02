@@ -116,6 +116,10 @@ Windows 10/11 x64 安装程序由 GitHub Actions 在 Windows 环境构建与验�
 
 开发者可在 macOS 或 Windows 上先运行 `npm run build:windows:server` 交叉编译 x64 服务程序；完整安装程序由 `windows/installer.iss` 在 Windows 上通过 Inno Setup 编译。
 
+### 发布流程
+
+Pull request 会分别构建并验证 Windows 和 macOS 安装包；合并到 `main` 只运行常规 CI。发布时推送与 `package.json` 版本一致的现有 tag（例如 `v0.3.0`），或手动运行 `Publish release` workflow 并填写该 tag、将 `publish` 设为 `true`。校验通过后，两个平台的安装包会一起进入同一个 GitHub Release。
+
 ## OpenCode
 
 普通用户按以下步骤连接 OpenCode：

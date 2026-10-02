@@ -10,6 +10,6 @@ macOS：打开 macOS.dmg，将应用拖入“应用程序”，打开应用并�
 
 当前为未签名测试版。Windows SmartScreen 或 macOS“隐私与安全性”可能提示未知开发者。正式分发前仍需签名及目标电脑上的 WPS 交互验证。
 
-版本：v${version}。两个平台的安装包会作为同一个 Release 的独立附件上传；工作流重跑只替换本平台附件。
+版本：v${version}。Windows 与 macOS 安装包会在版本校验和双平台构建全部通过后，一次性上传到同一个测试版 Release。
 `;
 fs.writeFileSync('release-notes.md', notes, 'utf8');

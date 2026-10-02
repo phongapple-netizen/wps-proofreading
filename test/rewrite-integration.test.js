@@ -40,6 +40,9 @@ function createHarness(options = {}) {
   const documentEvents = [];
   const undoTimers = [];
   const perfLogs = [];
+  const events = {};
+  const intervals = [];
+  const requests = [];
   let failNextWrite = false;
   const document = {
     Name: 'test.docx', FullName: '/tmp/test.docx',
@@ -60,11 +63,16 @@ function createHarness(options = {}) {
     }
   };
   const app = {
+    ApiEvent: options.noEvents ? undefined : { AddApiEventListener(name, callback) {
+      if (options.eventThrows) throw new Error("unsupported");
+      events[name] = callback;
+    } },
     ActiveDocument: document,
     Selection: { Range: { Text: selectedText, Start: start, End: start + selectedText.length } }
   };
   let response = JSON.stringify({ rewrittenText: '甲公司拟于2031年4月完成12项资料整理工作。', summary: ['理顺表达'], warnings: [] });
   let resolveModel;
+  let rejectModel;
   let requestCount = 0;
   let lastSystemPrompt = '';
   const win = {
@@ -77,7 +85,8 @@ function createHarness(options = {}) {
     console: { info: (...args) => perfLogs.push(args) },
     location: options.devPerf ? { hostname: '127.0.0.1' } : undefined,
     setTimeout: options.manualUndoTurn ? (callback) => { undoTimers.push(callback); } : undefined,
-    AbortController,
+    AbortController: options.noAbort ? undefined : AbortController,
+    setInterval: (callback) => { intervals.push(callback); },
     WpsNativeDocument: { getApplication: () => app },
     WpsRewriteCore: core,
     WpsSettingsStore: {
@@ -88,20 +97,27 @@ function createHarness(options = {}) {
       normalizeEndpoint: () => 'http://127.0.0.1:4096',
       parseModelName: () => 'm',
       request: (requestOptions) => {
+        requests.push(requestOptions);
         requestCount += 1;
         lastSystemPrompt = requestOptions.systemPrompt;
-        return options.defer ? new Promise((resolve) => { resolveModel = resolve; }) : Promise.resolve(response);
+        return options.defer ? new Promise((resolve, reject) => { resolveModel = resolve; rejectModel = reject; }) : Promise.resolve(response);
       }
     },
     getBody: () => body,
     getResponse: () => response,
     setResponse(value) { response = value; },
     resolveModel: (value) => resolveModel && resolveModel(value),
+    rejectModel: (error) => rejectModel && rejectModel(error),
     getResolveModel: () => resolveModel
   };
   const context = vm.createContext({ window: win, console, AbortController, Date, setTimeout, clearTimeout });
   vm.runInContext(fs.readFileSync(path.join(projectRoot, 'js/rewrite-integration.js'), 'utf8'), context);
   return { win, elements, app, document, getBody: () => body, setBody: (value) => { body = value; },
+    activate(doc, notify = true) {
+      app.ActiveDocument = doc;
+      if (notify && events.WindowActivate) events.WindowActivate(doc);
+    },
+    tick: () => intervals.forEach(callback => callback()), requests,
     getRequestCount: () => requestCount, getDocumentEvents: () => documentEvents.slice(),
     getSystemPrompt: () => lastSystemPrompt,
     clearDocumentEvents: () => { documentEvents.length = 0; },
@@ -233,7 +249,7 @@ test('undo rejects changed text, either surrounding anchor, and a switched docum
     assert.equal(harness.getBody(), expected);
     assert.equal(await harness.win.undoRewrite(), false);
     assert.equal(harness.elements['rewrite-result'].hidden, true);
-    assert.match(harness.elements['rewrite-status'].textContent, /无法安全撤销/);
+    assert.match(harness.elements['rewrite-status'].textContent, /无法安全撤销|请选择文字进行改写/);
     assert.notEqual(written, '', 'the replacement was present before the stale condition');
   }
 });
@@ -360,4 +376,188 @@ test('rewrite selection limit is enforced before any model request', async () =>
   const harness = createHarness({ source: text, selectedText: text });
   assert.equal(await harness.win.generateRewrite(), false);
   assert.match(harness.elements['rewrite-status'].textContent, /超过 5000 字/);
+});
+
+function otherDocument() {
+  return { Name: 'B.docx', FullName: '/tmp/B.docx',
+    Range() { throw new Error('B must not be read or written using A coordinates'); } };
+}
+
+function assertReset(harness) {
+  assert.equal(harness.elements['rewrite-result'].hidden, true);
+  assert.equal(harness.elements['rewrite-original-preview'].textContent, '');
+  assert.equal(harness.elements['rewrite-text-preview'].textContent, '');
+  assert.equal(harness.elements['rewrite-completed'].hidden, true);
+  assert.equal(harness.elements['replace-rewrite'].disabled, true);
+  assert.equal(harness.elements['cancel-rewrite'].hidden, true);
+  assert.equal(harness.elements['run-rewrite'].disabled, false);
+  assert.match(harness.elements['rewrite-status'].textContent, /请选择文字进行改写/);
+}
+
+test('WindowActivate discards the preview and never restores it on returning to A', async () => {
+  const h = createHarness();
+  assert.equal(await h.win.generateRewrite(), true);
+  h.activate(otherDocument());
+  assertReset(h);
+  assert.equal(h.win.replaceRewriteSelection(), false);
+  h.activate(h.document);
+  assertReset(h);
+  assert.equal(await h.win.generateRewrite(), true);
+  assert.equal(h.win.replaceRewriteSelection(), true);
+  assert.equal(await h.win.undoRewrite(), true);
+});
+
+test('switching cancels the request and its late success or failure cannot affect B', async () => {
+  for (const response of ['invalid JSON', JSON.stringify({ rewrittenText: '迟到响应' })]) {
+    const h = createHarness({ defer: true });
+    const pending = h.win.generateRewrite();
+    h.activate(otherDocument());
+    assert.equal(h.requests[0].signal.aborted, true);
+    assertReset(h);
+    h.win.resolveModel(response);
+    assert.equal(await pending, false);
+    assertReset(h);
+  }
+});
+
+test('A to B to A invalidates old runs even without AbortController and preserves the new run lock', async () => {
+  for (const noAbort of [false, true]) {
+    const h = createHarness({ defer: true, noAbort });
+    const oldRun = h.win.generateRewrite();
+    const oldResolve = h.win.getResolveModel();
+    h.activate(otherDocument());
+    h.activate(h.document);
+    assertReset(h);
+    const newRun = h.win.generateRewrite();
+    oldResolve(h.win.getResponse());
+    assert.equal(await oldRun, false);
+    assert.equal(h.elements['rewrite-result'].hidden, true);
+    assert.equal(h.elements['run-rewrite'].disabled, true);
+    assert.match(h.elements['rewrite-status'].textContent, /正在生成/);
+    h.win.resolveModel(h.win.getResponse());
+    assert.equal(await newRun, true);
+    assert.equal(h.elements['rewrite-result'].hidden, false);
+  }
+});
+
+test('switching clears the undo record in B and after returning to A', async () => {
+  const h = createHarness();
+  assert.equal(await h.win.generateRewrite(), true);
+  assert.equal(h.win.replaceRewriteSelection(), true);
+  const rewritten = h.getBody();
+  h.activate(otherDocument());
+  assertReset(h);
+  assert.equal(await h.win.undoRewrite(), false);
+  assert.equal(h.getBody(), rewritten);
+  h.activate(h.document);
+  assert.equal(await h.win.undoRewrite(), false);
+  assertReset(h);
+});
+
+test('identity polling works outside rewrite mode when events are missing or unsupported', async () => {
+  for (const options of [{ noEvents: true }, { eventThrows: true }]) {
+    const h = createHarness({ ...options, defer: true });
+    h.win.getAppMode = () => 'proofreading';
+    const pending = h.win.generateRewrite();
+    h.activate(otherDocument(), false);
+    h.tick();
+    assert.equal(h.requests[0].signal.aborted, true);
+    assertReset(h);
+    h.win.resolveModel(h.win.getResponse());
+    assert.equal(await pending, false);
+    assertReset(h);
+  }
+});
+
+test('response and action checks detect document changes before the next poll', async () => {
+  const h = createHarness({ defer: true, noAbort: true, noEvents: true });
+  const pending = h.win.generateRewrite();
+  h.activate(otherDocument(), false);
+  h.win.resolveModel(h.win.getResponse());
+  assert.equal(await pending, false);
+  assertReset(h);
+  h.activate(h.document, false);
+  const next = h.win.generateRewrite();
+  h.win.resolveModel(h.win.getResponse());
+  assert.equal(await next, true);
+  h.activate(otherDocument(), false);
+  assert.equal(h.win.replaceRewriteSelection(), false);
+  assertReset(h);
+});
+
+test('document switches during deferred undo cannot restore old completion UI or clear a new request', async () => {
+  const h = createHarness({ manualUndoTurn: true, defer: true });
+  const first = h.win.generateRewrite();
+  h.win.resolveModel(h.win.getResponse());
+  assert.equal(await first, true);
+  assert.equal(h.win.replaceRewriteSelection(), true);
+  const undo = h.win.undoRewrite();
+  h.activate(otherDocument());
+  h.activate(h.document);
+  const next = h.win.generateRewrite();
+  h.flushUndoTurn();
+  assert.equal(await undo, false);
+  assert.equal(h.elements['run-rewrite'].disabled, true);
+  h.win.resolveModel(h.win.getResponse());
+  assert.equal(await next, true);
+});
+
+test('document identity prefers FullName and falls back to Name without reading document content', async () => {
+  const h = createHarness();
+  assert.equal(await h.win.generateRewrite(), true);
+  h.document.Name = 'display-only-change.docx';
+  h.tick();
+  assert.equal(h.elements['rewrite-result'].hidden, false);
+  h.clearDocumentEvents();
+  h.activate(otherDocument());
+  assert.deepEqual(h.getDocumentEvents(), []);
+  const legacy = createHarness();
+  legacy.document.FullName = '';
+  assert.equal(await legacy.win.generateRewrite(), true);
+  legacy.document.Name = 'renamed.docx';
+  legacy.tick();
+  assertReset(legacy);
+});
+
+test('explicit cancellation also rejects late results without AbortController', async () => {
+  const h = createHarness({ defer: true, noAbort: true });
+  const pending = h.win.generateRewrite();
+  assert.equal(h.win.cancelRewrite(), true);
+  h.win.resolveModel(h.win.getResponse());
+  assert.equal(await pending, false);
+  assert.equal(h.elements['rewrite-result'].hidden, true);
+  assert.match(h.elements['rewrite-status'].textContent, /已取消/);
+});
+
+test('a late rejected model request cannot overwrite B status', async () => {
+  const h = createHarness({ defer: true, noAbort: true });
+  const pending = h.win.generateRewrite();
+  h.activate(otherDocument());
+  h.win.rejectModel(new Error('old document network failure'));
+  assert.equal(await pending, false);
+  assertReset(h);
+});
+
+test('switching during OpenCode connection setup prevents sending the old model request', async () => {
+  const h = createHarness({ noAbort: true });
+  let ready;
+  h.win.ensureOpenCodeConnection = () => new Promise(resolve => { ready = resolve; });
+  const pending = h.win.generateRewrite();
+  h.activate(otherDocument());
+  h.activate(h.document);
+  ready();
+  assert.equal(await pending, false);
+  assert.equal(h.getRequestCount(), 0);
+  assertReset(h);
+});
+
+
+test('regenerate immediately after an unobserved document switch discards the stale preview', async () => {
+  const h = createHarness({ noEvents: true });
+  assert.equal(await h.win.generateRewrite(), true);
+  assert.equal(h.getRequestCount(), 1);
+  h.activate(otherDocument(), false);
+  h.elements['regenerate-rewrite'].fire('click');
+  assert.equal(h.getRequestCount(), 1);
+  assertReset(h);
 });
