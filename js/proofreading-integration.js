@@ -2035,9 +2035,9 @@
             var start = undoRecord && undoRecord.StartCustomRecord;
             var end = undoRecord && undoRecord.EndCustomRecord;
             if (typeof start !== "function" || typeof end !== "function") return null;
-            start.call(undoRecord, "一键修正");
+            undoRecord.StartCustomRecord("一键修正");
             return function () {
-                try { end.call(undoRecord); }
+                try { undoRecord.EndCustomRecord(); }
                 catch (error) { /* Host cleanup errors must not change completed issue state or counts. */ }
             };
         } catch (error) {
