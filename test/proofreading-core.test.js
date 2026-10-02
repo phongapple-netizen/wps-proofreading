@@ -2,6 +2,20 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const core = require("../js/proofreading-core.js");
 
+test("scheduler bounds concurrency and invalid values safely fall back to serial", async () => {
+    for (const concurrency of [undefined, 0, 1, 2, 4, "2"]) {
+        let active = 0, peak = 0;
+        const completed = [];
+        await core.scheduleBatches([0, 1, 2, 3], concurrency, async (_item, index) => {
+            active++; peak = Math.max(peak, active);
+            await new Promise(resolve => setImmediate(resolve));
+            completed.push(index); active--;
+        });
+        assert.equal(peak, concurrency === 2 ? 2 : 1);
+        assert.deepEqual(completed, [0, 1, 2, 3]);
+    }
+});
+
 test("fast first batch keeps regular segmentation and exact nonoverlapping coverage", () => {
     const text = Array.from({ length: 16 }, (_, i) => String(i) + "甲".repeat(399)).join("\r\n") +
         "\n" + "长段落。".repeat(900);

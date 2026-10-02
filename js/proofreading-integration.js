@@ -1478,7 +1478,10 @@
             var consistencyCompleted = false;
             var consistencyWarning = "";
 
-            for (var index = 0; index < batches.length; index += 1) {
+            var bodyResults = new Array(batches.length);
+            // Developer experiment entry. Only an explicit numeric 2 opts in.
+            var concurrency = root.WpsProofreadingConcurrency === 2 ? 2 : 1;
+            await root.WpsProofreadingCore.scheduleBatches(batches, concurrency, async function (batch, index) {
                 var batchPerf = { batchIndex: index, characters: batchCharacterCount(batches[index]),
                     requestMs: 0, parseAndMapMs: 0, snapshotValidationMs: 0, publishRenderMs: 0 };
                 if (perf) perf.report.batches.push(batchPerf);
@@ -1510,11 +1513,19 @@
                     return root.WpsProofreadingCore.mapIssuesToRanges(batches[index],
                         root.WpsProofreadingCore.parseIssues(response), snapshot.start);
                 });
-                collected = collected.concat(
-                    annotateAiReviewIssues(mappedFirstPass, aiReviewCandidates));
-                currentIssues = mergeRunIssues(run, collected);
-                currentSnapshot = snapshot;
-                runStage(perf, batchPerf, "publishRenderMs", viewIssues);
+                bodyResults[index] = annotateAiReviewIssues(mappedFirstPass, aiReviewCandidates);
+                runStage(perf, batchPerf, "publishRenderMs", function () {
+                    // Completion order never changes overlap arbitration or stable IDs.
+                    collected = localRuleIssues.slice();
+                    bodyResults.forEach(function (results) { if (results) collected = collected.concat(results); });
+                    currentIssues = mergeRunIssues(run, collected);
+                    currentSnapshot = snapshot;
+                    viewIssues();
+                    if (perf && !perf.firstResult) {
+                        perf.firstResult = true;
+                        perf.report.firstResultMs = actionClock() - perf.started;
+                    }
+                });
                 completedFirstPassCharacters += batchCharacterCount(batches[index]);
                 var firstPassPercent = totalFirstPassCharacters > 0
                     ? Math.round((completedFirstPassCharacters / totalFirstPassCharacters) *
@@ -1529,7 +1540,10 @@
                 setStatus("AI 校对 " + firstPassPercent + "% · " + resultCountLabel(), "working");
                 reportProgress(firstPassPercent, "AI 校对 " + firstPassPercent + "% · " +
                     resultCountLabel() + " · " + batchLabel);
-            }
+            }, options.signal, function (error) {
+                if (!error || error.name !== "AbortError") run.failed = true;
+                if (runController) runController.abort();
+            });
 
             if (perf) perf.report.firstPassMs = actionClock() - perf.started;
             run.firstPassComplete = true;
@@ -1635,7 +1649,7 @@
             if (!isDocumentRunCurrent(run)) {
                 return { accepted: false, reason: "cancelled" };
             }
-            var cancelled = run.cancelled || (runController && runController.signal && runController.signal.aborted);
+            var cancelled = run.cancelled || (!run.failed && runController && runController.signal && runController.signal.aborted);
             if (run.started && snapshot && !documentSnapshotMatches(run.document, snapshot)) {
                 currentSnapshot = null;
                 currentIssues = [];
@@ -1659,6 +1673,9 @@
                 : (error && error.message ? error.message : "校对失败，请重试。"), "error");
             return { accepted: false, reason: "error" };
         } finally {
+            if (perf && runConsistencyPass && consistencyStarted) {
+                perf.report.consistencyMs = actionClock() - consistencyStarted;
+            }
             finishRunPerf(perf);
             syncDocumentSession();
             if (isDocumentRunCurrent(run)) {
@@ -1788,6 +1805,8 @@
     }
 
     function writeIssueReplacement(change, perf) {
+        var reviewRun = documentRuns[activeDocumentKey];
+        change.consistencyStopped = !!(reviewRun && reviewRun.busy && reviewRun.firstPassComplete);
         if (!prepareConsistencyWrite()) return false;
         var issue = change.issue;
         var context;
@@ -2090,13 +2109,15 @@
             var hasStale = currentIssues.some(function (candidate) {
                 return candidate.status === "stale";
             });
-            setStatus(warning
+            setStatus((warning
                 ? "正文修改已完成，但部分记录或界面收尾失败。请检查正文后重新校对。"
                 : undo ? "已撤销这条修改，建议恢复为待确认。"
                     : !autoAdvance && navigation.hadPending ? "已应用一条建议，其余建议待确认。"
                     : navigation.located ? "已应用一条建议，并定位到下一条待处理问题。"
                         : navigation.hadPending || hasStale ? "已应用一条建议；其他原文已变化，请重新校对。"
-                            : "本轮待处理问题已经处理完成。", warning ? "warning" : "success");
+                            : "本轮待处理问题已经处理完成。") +
+                (change.consistencyStopped ? " 全文一致性复核已停止，旧结果已丢弃。" : ""),
+                warning ? "warning" : "success");
             return true;
         } catch (error) {
             if (change && change.attempted) {
@@ -2147,6 +2168,8 @@
         var pending = currentIssues.filter(function (candidate) {
             return candidate.status === "pending";
         });
+        var reviewRun = documentRuns[activeDocumentKey];
+        var consistencyStopped = !!(reviewRun && reviewRun.busy && reviewRun.firstPassComplete);
         var pendingIds = pending.filter(isAutoFixableIssue).map(function (candidate) {
             return candidate.id;
         });
@@ -2205,6 +2228,7 @@
         var suffix = skipped
             ? "；另有 " + skipped + " 条建议未自动修改，请逐条确认。"
             : "。";
+        if (consistencyStopped) suffix += " 全文一致性复核已停止，旧结果已丢弃。";
         setStatus(applied
             ? "已一键修正 " + applied + " 条安全格式建议，并在写入前逐条核对了原文" + suffix
             : "没有可安全自动写入的建议。", applied ? "success" : "warning");

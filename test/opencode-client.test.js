@@ -130,6 +130,34 @@ test('Basic auth is only sent as a header and model IDs split at the first slash
   assert.equal(calls[2].init.method, 'DELETE');
 });
 
+test('parallel OpenCode requests use independent sessions and shared cancellation cleans both', async () => {
+  const controller = new AbortController();
+  const paths = [];
+  let sessions = 0, messages = 0;
+  const fetcher = async (url, init) => {
+    paths.push(`${init.method} ${new URL(url).pathname}`);
+    if (init.method === 'POST' && url.endsWith('/session')) return response(200, protectedSession(`parallel-${++sessions}`));
+    if (url.endsWith('/permission')) return response(200, []);
+    if (url.endsWith('/message')) {
+      messages++;
+      return new Promise((_resolve, reject) => init.signal.addEventListener('abort', () => {
+        const error = new Error('cancelled'); error.name = 'AbortError'; reject(error);
+      }, { once: true }));
+    }
+    return response(204, null);
+  };
+  const requests = [1, 2].map(() => client.request({ model: 'local/qwen', signal: controller.signal }, 'fixture', fetcher));
+  const results = Promise.allSettled(requests);
+  for (let i = 0; i < 100 && messages !== 2; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(messages, 2);
+  controller.abort();
+  assert.ok((await results).every(result => result.status === 'rejected'));
+  for (const id of ['parallel-1', 'parallel-2']) {
+    assert.ok(paths.includes(`POST /session/${id}/abort`));
+    assert.ok(paths.includes(`DELETE /session/${id}`));
+  }
+});
+
 test('successful requests delete the temporary session without aborting it', async () => {
   const paths = [];
   await client.request({ model: 'local/qwen' }, 'prompt', async (url, init) => {

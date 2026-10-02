@@ -127,6 +127,49 @@
         });
     }
 
+    function scheduleBatches(items, concurrency, worker, signal, onFailure) {
+        var limit = concurrency === 2 ? 2 : 1;
+        return new Promise(function (resolve, reject) {
+            var next = 0, active = 0, completed = 0, stopped = false;
+            function finish(error) {
+                if (stopped) return;
+                stopped = true;
+                if (signal && signal.removeEventListener) signal.removeEventListener("abort", cancel);
+                if (error) reject(error); else resolve();
+            }
+            function cancel() {
+                var error = new Error("已取消校对。");
+                error.name = "AbortError";
+                finish(error);
+            }
+            function pump() {
+                if (stopped) return;
+                if (completed === items.length) return finish();
+                while (!stopped && active < limit && next < items.length) {
+                    var index = next++;
+                    active++;
+                    launch(index);
+                }
+            }
+            function launch(index) {
+                Promise.resolve().then(function () {
+                    if (stopped) return;
+                    return worker(items[index], index);
+                }).then(function () {
+                    active--; completed++;
+                    pump();
+                }, function (error) {
+                    if (stopped) return;
+                    finish(error);
+                    if (typeof onFailure === "function") onFailure(error);
+                });
+            }
+            if (signal && signal.aborted) return cancel();
+            if (signal && signal.addEventListener) signal.addEventListener("abort", cancel, { once: true });
+            pump();
+        });
+    }
+
     function signalMatches(text) {
         var source = String(text || "");
         var patterns = [
@@ -1231,6 +1274,7 @@
         splitIntoParagraphs: splitIntoParagraphs,
         segmentParagraphs: segmentParagraphs,
         batchParagraphs: batchParagraphs,
+        scheduleBatches: scheduleBatches,
         buildConsistencyIndex: buildConsistencyIndex,
         buildConsistencyIndexes: buildConsistencyIndexes,
         buildGlobalConsistencyCandidates: buildGlobalConsistencyCandidates,

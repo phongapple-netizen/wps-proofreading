@@ -205,8 +205,8 @@ function createHarness(options = {}) {
         fetch: async (url, requestOptions) => {
             const body = requestOptions && requestOptions.body ? JSON.parse(requestOptions.body) : null;
             requests.push({ url, options: requestOptions, body });
-            if (typeof options.waitForRequest === "function") await options.waitForRequest();
             const requestIndex = requests.length - 1;
+            if (typeof options.waitForRequest === "function") await options.waitForRequest();
             const responseIssues = typeof options.issuesForRequest === "function"
                 ? options.issuesForRequest({ url, options: requestOptions, body, requestIndex })
                 : modelIssues;
@@ -367,7 +367,7 @@ test("development benchmark measures independent and queued mock backends", {
             let queue = Promise.resolve();
             harness.window.WpsProofreadingCore.requestModel = (_options, prompt) => {
                 const work = () => new Promise(resolve => setTimeout(() => resolve(JSON.stringify({ issues: [{
-                    category: "typo", paragraphIndex: Number(prompt.match(/"paragraphIndex":(\d+)/)[1]),
+                    category: "typo", paragraphIndex: JSON.parse(prompt.split("待校对段落：\n\n")[1])[0].paragraphIndex,
                     original: "错字", suggestion: "正字", reason: "测试", confidence: 0.95, needsReview: false
                 }] })), 15 + prompt.length / 100));
                 if (!queued) return work();
@@ -1961,6 +1961,155 @@ function progressiveFixture(extra = {}) {
     harness.window.AbortController = AbortController;
     return { harness, gates };
 }
+
+function concurrentFixture(concurrency = 2) {
+    const harness = createHarness({ selectedText: [800, 1800, 1800, 1800].map((size, i) =>
+        "错字" + "甲乙丙丁"[i].repeat(size - 2)).join("\n"), issues: [] });
+    harness.window.AbortController = AbortController;
+    harness.window.WpsProofreadingConcurrency = concurrency;
+    const pending = [];
+    harness.window.WpsProofreadingCore.requestModel = (options, prompt) => new Promise((resolve, reject) => {
+        const paragraphIndex = JSON.parse(prompt.split("待校对段落：\n\n")[1])[0].paragraphIndex;
+        pending.push({ paragraphIndex, signal: options.signal, fail: reject,
+            finish() { resolve(JSON.stringify({ issues: [{ category: "typo", paragraphIndex,
+                original: "错字", suggestion: "正字", confidence: 0.95, needsReview: false }] })); } });
+    });
+    return { harness, pending };
+}
+
+test("bounded concurrency publishes second batch first with sorted stable IDs and character progress", async () => {
+    const outcomes = [];
+    for (const concurrency of [1, 2]) {
+        const { harness, pending } = concurrentFixture(concurrency);
+        const operation = harness.window.runProofreading();
+        await until(() => pending.length === concurrency);
+        assert.equal(pending.length, concurrency);
+        if (concurrency === 2) {
+            pending[1].finish();
+            await until(() => pending.length === 3);
+            assert.equal(harness.renderedIssues.length, 1);
+            assert.equal(harness.window.getWpsProofreadingState().issues[0].start, harness.prefix.length + 801);
+            const progress = harness.progress.at(-1);
+            assert.equal(progress.percent, 29);
+            assert.match(progress.label, /已处理 1800\/6200 字/);
+            assert.equal(harness.window.ignoreProofreadingIssue(harness.renderedIssues[0].id), true);
+            pending[0].finish();
+            await until(() => pending.length === 4);
+            pending[3].finish();
+            pending[2].finish();
+        } else {
+            for (let i = 0; i < 4; i++) {
+                await until(() => pending.length === i + 1);
+                pending[i].finish();
+            }
+        }
+        assert.equal((await operation).accepted, true);
+        const issues = harness.window.getWpsProofreadingState().issues;
+        assert.equal(issues.length, 4);
+        assert.ok(issues.every((issue, i) => !i || issue.start > issues[i - 1].start));
+        const percents = harness.progress.map(entry => entry.percent);
+        assert.ok(percents.every((value, i) => !i || value >= percents[i - 1]));
+        if (concurrency === 2) assert.equal(issues[1].status, "ignored");
+        outcomes.push(Array.from(issues, issue => issue.id));
+    }
+    assert.deepEqual(outcomes[0], outcomes[1]);
+});
+
+test("cancel and restart abort every concurrent request and discard abort-ignoring late results", async () => {
+    for (const restart of [false, true]) {
+        const { harness, pending } = concurrentFixture();
+        const old = harness.window.runProofreading();
+        await until(() => pending.length === 2);
+        let newer;
+        if (restart) {
+            newer = harness.window.runProofreading(true);
+            await until(() => pending.length === 4);
+        } else assert.equal(harness.window.cancelProofreading(), true);
+        assert.ok(pending.slice(0, 2).every(request => request.signal.aborted));
+        assert.equal((await old).reason, "cancelled");
+        pending[1].finish(); pending[0].finish();
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(harness.renderedIssues.length, 0);
+        if (newer) {
+            pending[3].finish(); pending[2].finish();
+            await until(() => pending.length === 6);
+            pending[5].finish(); pending[4].finish();
+            assert.equal((await newer).accepted, true);
+            assert.equal(harness.renderedIssues.length, 4);
+        }
+    }
+});
+
+test("concurrent failure preserves completed findings, aborts siblings and discards late results", async () => {
+    const { harness, pending } = concurrentFixture();
+    const operation = harness.window.runProofreading();
+    await until(() => pending.length === 2);
+    pending[1].finish();
+    await until(() => pending.length === 3);
+    const id = harness.renderedIssues[0].id;
+    harness.window.ignoreProofreadingIssue(id);
+    pending[0].fail(new Error("模拟失败"));
+    assert.equal((await operation).reason, "error");
+    assert.equal(pending[2].signal.aborted, true);
+    assert.equal(harness.renderedIssues.length, 1);
+    assert.equal(harness.renderedIssues[0].id, id);
+    assert.equal(harness.renderedIssues[0].status, "ignored");
+    pending[2].finish();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(pending.length, 3, "failure must stop launching unsent batches");
+    assert.equal(harness.renderedIssues.length, 1);
+});
+
+test("out-of-order background results and ignored state stay isolated across document switches", async () => {
+    const { harness, pending } = concurrentFixture();
+    const monitor = installDocumentMonitor(harness);
+    const b = secondDocument(harness);
+    const operation = harness.window.runProofreading();
+    await until(() => pending.length === 2);
+    pending[1].finish();
+    await until(() => pending.length === 3);
+    const ignoredId = harness.renderedIssues[0].id;
+    assert.equal(harness.window.ignoreProofreadingIssue(ignoredId), true);
+    monitor.activate(b.document);
+    const status = harness.status.text;
+    const progressCount = harness.progress.length;
+    assert.equal(harness.window.ignoreProofreadingIssue(ignoredId), false);
+    pending[0].finish();
+    await until(() => pending.length === 4);
+    pending[3].finish(); pending[2].finish();
+    assert.equal((await operation).accepted, true);
+    assert.equal(harness.renderedIssues.length, 0);
+    assert.equal(harness.progress.length, progressCount);
+    assert.equal(b.calls.length, 0);
+    // Explicit action rejection may show a warning in B, but A publication cannot.
+    assert.notEqual(harness.status.text, status);
+    monitor.activate(b.original);
+    assert.equal(harness.renderedIssues.length, 4);
+    assert.equal(harness.renderedIssues.find(issue => issue.id === ignoredId).status, "ignored");
+});
+
+test("consistency write guard detects equal-length edits outside the issue anchors", async () => {
+    const harness = createHarness({ selectedText: "甲市综协办有错字。" + "甲".repeat(100) +
+        "\n甲市综合协调办公室负责协调。", manualActions: true });
+    harness.window.AbortController = AbortController;
+    let release;
+    harness.window.WpsProofreadingCore.requestModel = (_options, prompt) => {
+        if (prompt.includes("第二遍跨段落一致性复核")) return new Promise(resolve => { release = resolve; });
+        return Promise.resolve(JSON.stringify({ issues: [{ category: "typo", paragraphIndex: 1,
+            original: "错字", suggestion: "正字", confidence: 0.95, needsReview: false }] }));
+    };
+    const operation = harness.window.runProofreading();
+    await until(() => release);
+    const id = harness.renderedIssues[0].id;
+    harness.changeDocument(harness.readDocument().replace("负责协调", "负责处理"));
+    const edited = harness.readDocument();
+    assert.equal(await harness.window.applyProofreadingIssue(id), false);
+    assert.equal(harness.readDocument(), edited);
+    assert.equal(harness.actionTimers.length, 0);
+    release('{"issues":[]}');
+    assert.equal((await operation).reason, "cancelled");
+    assert.equal(harness.renderedIssues[0].status, "stale");
+});
 
 test("local and complete AI batches render progressively with stable IDs and one render per batch", async () => {
     const { harness, gates } = progressiveFixture();
