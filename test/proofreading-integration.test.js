@@ -1473,30 +1473,24 @@ test("one-click fix groups successful safe writes in one native undo record", as
 test("tracked one-click fix keeps skipped issues anchored by logical text offsets", async () => {
     const harness = createHarness({
         trackRevisions: true,
-        selectedText: "甲,乙有错字,丙。。",
-        issues: [{
-            category: "typo",
-            paragraphIndex: 1,
-            original: "错字",
-            suggestion: "正字",
-            reason: "AI suggestion stays manual",
-            confidence: 0.95,
-            needsReview: false
-        }],
+        selectedText: "甲,乙。。",
+        issues: [],
         rules: [basicRule("basic-ascii-comma-between-hanzi"), basicRule("basic-duplicate-period")]
     });
     await harness.window.runProofreading();
     const before = harness.window.getWpsProofreadingState().issues;
-    const manual = before.find((issue) => issue.original === "错字");
-    assert.ok(manual);
+    assert.equal(before.length, 2);
+    const skipped = before[0];
+    skipped.autoFixable = false;
 
     const result = harness.window.applyAllProofreadingIssues();
-    assert.equal(result.applied >= 2, true);
+    assert.equal(result.applied, 1);
+    assert.equal(result.skipped, 1);
     const after = harness.window.getWpsProofreadingState().issues;
-    const anchoredManual = after.find((issue) => issue.id === manual.id);
-    assert.equal(anchoredManual.status, "pending");
-    assert.equal(Number.isInteger(anchoredManual.textOffset), true);
-    assert.equal(harness.window.locateProofreadingIssue(anchoredManual.id), true);
+    const anchoredSkipped = after.find((issue) => issue.id === skipped.id);
+    assert.equal(anchoredSkipped.status, "pending");
+    assert.equal(Number.isInteger(anchoredSkipped.textOffset), true);
+    assert.equal(harness.window.locateProofreadingIssue(anchoredSkipped.id), true);
 });
 
 test("one-click fix closes its native undo record after a stale partial batch", async () => {
