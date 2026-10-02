@@ -25,7 +25,10 @@ test('release entry point is tag or confirmed manual dispatch, and waits for bot
   assert.match(workflow, /workflow_dispatch:\s*\n\s+inputs:/);
   assert.match(workflow, /publish:\s*\n\s+description: Confirm/);
   assert.match(workflow, /needs:\s*\[validate, windows, macos\]/);
-  assert.match(workflow, /gh release create[\s\S]*--verify-tag/);
+  assert.match(workflow, /gh release create[\s\S]*--prerelease[\s\S]*--verify-tag/);
+  assert.match(workflow, /--title "WPS 文本校改 \$RELEASE_TAG · 测试版"/);
+  assert.match(workflow, /git fetch --no-tags origin \+refs\/heads\/main:refs\/remotes\/origin\/main/);
+  assert.match(workflow, /git merge-base --is-ancestor "\$tag_commit" refs\/remotes\/origin\/main/);
   assert.match(workflow, /WPS-Proofreading-\$\{version\}-Windows-x64-Setup\.exe/);
   assert.match(workflow, /WPS-Proofreading-\$\{version\}-macOS\.dmg/);
   assert.match(workflow, /refs\/tags\/\$RELEASE_TAG\^\{commit\}/);
@@ -36,4 +39,11 @@ test('release entry point is tag or confirmed manual dispatch, and waits for bot
     assert.doesNotMatch(platform, /gh release|release create|release upload|\[release-(windows|macos)\]/i);
     assert.doesNotMatch(platform, /pull_request:\s*\n\s+paths:/);
   }
+});
+
+
+test('release notes describe the unified prerelease flow without obsolete per-platform rerun wording', () => {
+  const notes = read('scripts/release-notes.js');
+  assert.match(notes, /一次性上传到同一个测试版 Release/);
+  assert.doesNotMatch(notes, /重跑只替换本平台附件/);
 });
