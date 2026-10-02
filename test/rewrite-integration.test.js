@@ -550,3 +550,14 @@ test('switching during OpenCode connection setup prevents sending the old model 
   assert.equal(h.getRequestCount(), 0);
   assertReset(h);
 });
+
+
+test('regenerate immediately after an unobserved document switch discards the stale preview', async () => {
+  const h = createHarness({ noEvents: true });
+  assert.equal(await h.win.generateRewrite(), true);
+  assert.equal(h.getRequestCount(), 1);
+  h.activate(otherDocument(), false);
+  h.elements['regenerate-rewrite'].fire('click');
+  assert.equal(h.getRequestCount(), 1);
+  assertReset(h);
+});
