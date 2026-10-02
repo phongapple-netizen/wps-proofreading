@@ -49,7 +49,7 @@
             </div>
         </section>
 
-        <section class="panel" aria-labelledby="result-heading">
+        <section class="panel results-panel" aria-labelledby="result-heading">
             <h2 id="result-heading" class="sr-only">校对结果</h2>
             <div class="tab-bar result-tab-row" role="tablist">
                 <button id="tab-issues" class="tab is-active" type="button" role="tab" aria-selected="true">
@@ -74,11 +74,11 @@
             <div id="history-empty" class="empty-state" hidden>本次会话还没有处理记录。</div>
             <div id="proofreading-history" class="history-list" hidden></div>
             <div class="result-footer">
+                <p class="apply-all-note">一键修正仅处理低风险格式规则</p>
                 <div class="apply-all-wrap">
-                    <button id="apply-all" class="button button-primary" type="button" disabled>修正安全格式项（0）</button>
+                    <button id="apply-all" class="button button-primary" type="button" disabled>一键修正（0）</button>
                 </div>
                 <button id="rerun-proofreading" class="button button-secondary" type="button">重新校对</button>
-                <p class="apply-all-note">一键修正仅处理低风险格式规则</p>
             </div>
         </section>
 

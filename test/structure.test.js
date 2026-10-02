@@ -372,6 +372,24 @@ test('review-only cards show neutral text and keep card location with ignore act
   const css = read('ui/taskpane.css');
   assert.match(css, /\.issue-review-text\s*\{[^}]*text-decoration:\s*none/);
   assert.match(css, /\.issue-review-text\s*\{[^}]*overflow-wrap:\s*anywhere/);
+  assert.match(css, /\.results-panel\s*\{/);
+  assert.match(css, /\.issue-main\s*\{/);
+  assert.match(css, /\.issue-title\s*\{/);
+});
+
+test('compact cards promote rule names and omit redundant ordinary pending status', () => {
+  const { win, elements } = createResultHarness();
+  win.setProofreadingIssues([{
+    id: 'compact-rule', category: 'punctuation', original: ',', suggestion: '，',
+    status: 'pending', origin: 'rule', ruleName: '汉字之间误用英文逗号',
+    ruleSource: '内置基础规则'
+  }]);
+  const card = elements['proofreading-issues'].children[0];
+  assert.equal(findNode(card, (node) => node.className === 'issue-title').textContent, '汉字之间误用英文逗号');
+  assert.equal(findNode(card, (node) => node.className === 'badge-source').textContent, '本地规则');
+  assert.equal(findNode(card, (node) => node.className === 'issue-status'), null);
+  assert.ok(findNode(card, (node) => node.className === 'issue-main'));
+  assert.ok(findNode(card, (node) => node.className === 'issue-actions'));
 });
 
 test('replace and delete cards highlight only changed characters and keep writable actions', () => {
@@ -647,7 +665,8 @@ test('top toolbar and rules center expose the expected controls', () => {
   assert.match(html, /id="result-stale-summary"/);
   assert.match(html, /id="proofreading-history"/);
   assert.match(html, /id="apply-all"/);
-  assert.match(html, /修正安全格式项（0）/);
+  assert.match(html, /一键修正（0）/);
+  assert.doesNotMatch(html, /修正安全格式项/);
   assert.match(html, /仅处理低风险格式规则/);
   assert.match(html, /id="rerun-proofreading"/);
   assert.match(html, /id="proofreading-progress"/);
@@ -665,6 +684,7 @@ test('top toolbar and rules center expose the expected controls', () => {
   assert.match(html, /js\/rules-ui\.js/);
 
   const taskpane = read('js/taskpane.js');
+  assert.doesNotMatch(taskpane, /修正安全格式项/);
   assert.match(taskpane, /applyAllProofreadingIssues/);
   assert.match(taskpane, /pushProofreadingRecord/);
   assert.match(taskpane, /beginProofreadingRun/);
@@ -1134,7 +1154,7 @@ test('result summaries count pending review, processed, stale, and strict safe-f
   assert.equal(elements['result-summary'].textContent, '待处理 3 · 需复核 1 · 已处理 2 · 需重查 1');
   assert.equal(elements['result-stale-summary'].textContent, '需重查 1');
   assert.equal(elements['result-stale-summary'].hidden, true);
-  assert.equal(elements['apply-all'].textContent, '修正安全格式项（1）');
+  assert.equal(elements['apply-all'].textContent, '一键修正（1）');
   assert.equal(elements['apply-all'].disabled, false);
 
   const processedSection = elements['proofreading-issues'].children.find((child) => child.tag === 'details');

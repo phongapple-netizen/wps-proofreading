@@ -413,7 +413,7 @@
         }
         var applyAllButton = byId("apply-all");
         if (applyAllButton) {
-            applyAllButton.textContent = "修正安全格式项（" + autoFixable + "）";
+            applyAllButton.textContent = "一键修正（" + autoFixable + "）";
             applyAllButton.disabled = issueWriteLocked() || state.actionBusy || autoFixable === 0;
             applyAllButton.title = issueWriteLocked() ? "校对完成后可修改正文" :
                 pendingCount() > autoFixableCount()
@@ -861,38 +861,43 @@
             });
         }
 
+
         var header = root.document.createElement("div");
         header.className = "issue-card-header";
 
+        var title = root.document.createElement("strong");
+        title.className = "issue-title";
+        title.textContent = issue.ruleName || issue.categoryLabel || "校对建议";
+        header.appendChild(title);
+
         var badges = root.document.createElement("div");
         badges.className = "issue-badges";
-        var chip = root.document.createElement("span");
-        chip.className = "chip chip-" + (issue.category || "general");
-        chip.textContent = issue.categoryLabel;
-        badges.appendChild(chip);
         if (issue.origin === "rule+ai") {
             var sourceBadge = root.document.createElement("span");
             sourceBadge.className = issue.aiConflict ? "badge-conflict" : "badge-source";
             sourceBadge.textContent = issue.aiConflict ? "规则与 AI 意见不同" : "规则 + AI";
+            if (issue.ruleSource) sourceBadge.title = "来源：" + issue.ruleSource;
             badges.appendChild(sourceBadge);
         } else if (issue.origin === "ai-review") {
             var reviewBadge = root.document.createElement("span");
             reviewBadge.className = "badge-source";
-            reviewBadge.textContent = "AI核查规则";
+            reviewBadge.textContent = "AI核查";
+            if (issue.ruleSource) reviewBadge.title = "来源：" + issue.ruleSource;
             badges.appendChild(reviewBadge);
         } else if (issue.origin === "rule") {
             var ruleBadge = root.document.createElement("span");
             ruleBadge.className = "badge-source";
             ruleBadge.textContent = "本地规则";
+            if (issue.ruleSource) ruleBadge.title = "来源：" + issue.ruleSource;
             badges.appendChild(ruleBadge);
         }
         if (issue.needsReview) {
             var deepBadge = root.document.createElement("span");
             deepBadge.className = "badge-deep";
-            deepBadge.textContent = "需人工复核";
+            deepBadge.textContent = "需复核";
             badges.appendChild(deepBadge);
         }
-        header.appendChild(badges);
+        if (badges.children.length) header.appendChild(badges);
 
         var actions = root.document.createElement("div");
         actions.className = "issue-actions";
@@ -913,6 +918,9 @@
             appendIssueMenu(actions, issue, (!pending && issue.status !== "accepted"));
         }
         card.appendChild(header);
+
+        var mainRow = root.document.createElement("div");
+        mainRow.className = "issue-main";
 
         if (issue.original || issue.suggestion) {
             var diff = root.document.createElement("p");
@@ -937,17 +945,10 @@
                     diff.appendChild(deleteLabel);
                 }
             }
-            card.appendChild(diff);
+            mainRow.appendChild(diff);
         }
-
-        if ((issue.origin === "rule" || issue.origin === "rule+ai" ||
-            issue.origin === "ai-review") && (issue.ruleName || issue.ruleSource)) {
-            var ruleMeta = root.document.createElement("p");
-            ruleMeta.className = "issue-state";
-            ruleMeta.textContent = (issue.ruleName ? "规则：" + issue.ruleName : "自定义规则") +
-                (issue.ruleSource ? " · 来源：" + issue.ruleSource : "");
-            card.appendChild(ruleMeta);
-        }
+        mainRow.appendChild(actions);
+        card.appendChild(mainRow);
 
         if (issue.reason) {
             var analysis = root.document.createElement("details");
@@ -965,21 +966,22 @@
             card.appendChild(analysis);
         }
 
-        var stateChip = root.document.createElement("span");
-        stateChip.className = "issue-status" + ((issue.needsReview || reviewOnly) ? " is-review" : "");
-        stateChip.textContent = issue.status === "pending"
-            ? issue.needsReview || reviewOnly ? "需复核" : "待确认"
-            : issue.status === "stale" ? "需重查" : issue.status === "accepted" ? "已修正" : issue.status === "ignored" ? "已忽略" : issue.status;
-        header.appendChild(stateChip);
+        var stateText = issue.status === "pending"
+            ? (!issue.needsReview && reviewOnly ? "需复核" : "")
+            : issue.status === "stale" ? "需重查" : issue.status === "accepted" ? "已修正" :
+                issue.status === "ignored" ? "已忽略" : issue.status;
+        if (stateText) {
+            var stateChip = root.document.createElement("span");
+            stateChip.className = "issue-status" + ((issue.needsReview || reviewOnly) ? " is-review" : "");
+            stateChip.textContent = stateText;
+            header.appendChild(stateChip);
+        }
         if (issue.ruleSaved) {
             var savedLine = root.document.createElement("p");
             savedLine.className = "issue-state rule-saved-feedback";
             savedLine.textContent = "已保存为固定替换规则，下次校对时生效。";
             card.appendChild(savedLine);
-        }
-        card.appendChild(actions);
-
-        return card;
+        }        return card;
 
     }
 
