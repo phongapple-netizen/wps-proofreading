@@ -3,13 +3,13 @@
 
 [Setup]
 AppId={{9EE6317B-F97E-4B4B-B190-9425FA90D447}
-AppName=WPS 文本校对
+AppName=WPS 文本校改
 AppVersion={#AppVersion}
 AppPublisher=WPS Proofreading Contributors
 AppPublisherURL=https://github.com/phongapple-netizen/wps-proofreading
 AppSupportURL=https://github.com/phongapple-netizen/wps-proofreading/issues
 DefaultDirName={localappdata}\Programs\WPSProofreading
-DefaultGroupName=WPS 文本校对
+DefaultGroupName=WPS 文本校改
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
