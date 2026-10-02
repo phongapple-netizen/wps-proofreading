@@ -227,6 +227,7 @@ function createHarness(options = {}) {
         setProofreadingBusy: (value) => { busyValue = value === true; },
         setProofreadingActionBusy: (value) => { actionLocks.push(value); },
         WpsIssueActionPerf: options.perf === true,
+        WpsProofreadingPerf: options.runPerf === true,
         console: { info: (label, report) => { perfLogs.push({ label, report }); } },
         pushProofreadingRecord: (record) => { records.push(record); return true; },
         requestFullDocumentConfirmation: (details) => {
@@ -326,6 +327,61 @@ test("repeated successful model detection updates only connection status", async
     assert.equal(connection[connection.length - 1].tone, "success");
     assert.equal(connection[connection.length - 1].text, "OpenCode 已连接 · 1 个模型");
     assert.equal(harness.status.text, "校对完成，结果仍可处理");
+});
+
+test("run performance diagnostics use only fixed numeric fields and remain opt-in", async () => {
+    for (const enabled of [false, true]) {
+        const harness = createHarness({ runPerf: enabled, password: "private-run-key",
+            selectedText: "甲市综协办有错字。\n甲市综合协调办公室负责协调。" });
+        await harness.window.runProofreading();
+        const logs = harness.perfLogs.filter(log => log.label === "proofreading perf:");
+        assert.equal(logs.length, enabled ? 1 : 0);
+        if (!enabled) continue;
+        const report = logs[0].report;
+        const fields = ["snapshotCaptureMs", "localRulesMs", "firstResultMs", "firstPassMs",
+            "consistencyMs", "totalMs", "batchCount", "consistencyBatchCount", "batches", "consistencyBatches"];
+        assert.deepEqual(Object.keys(report).sort(), fields.sort());
+        function numericLeaves(value) {
+            if (typeof value === "number") return Number.isFinite(value) && value >= 0;
+            return value && typeof value === "object" && Object.values(value).every(numericLeaves);
+        }
+        assert.equal(numericLeaves(report), true);
+        assert.equal(report.batches.length, report.batchCount);
+        assert.equal(report.consistencyBatches.length, report.consistencyBatchCount);
+        for (const forbidden of [harness.selectedText, harness.prefix, "错别字", "private-run-key", "用词错误"]) {
+            assert.equal(JSON.stringify(report).includes(forbidden), false);
+        }
+    }
+});
+
+test("development benchmark measures independent and queued mock backends", {
+    skip: !process.env.WPS_PERF_REPORT
+}, async () => {
+    const reports = [];
+    for (const queued of [false, true]) {
+        for (const concurrency of (process.env.WPS_PERF_BASELINE ? [1] : [1, 2])) {
+            const harness = createHarness({ runPerf: true, issues: [],
+                selectedText: Array.from({ length: 24 }, (_, i) => "第" + i + "段错字。" + "甲".repeat(394)).join("\n") });
+            harness.window.performance = require("node:perf_hooks").performance;
+            harness.window.WpsProofreadingConcurrency = concurrency;
+            let queue = Promise.resolve();
+            harness.window.WpsProofreadingCore.requestModel = (_options, prompt) => {
+                const work = () => new Promise(resolve => setTimeout(() => resolve(JSON.stringify({ issues: [{
+                    category: "typo", paragraphIndex: Number(prompt.match(/"paragraphIndex":(\d+)/)[1]),
+                    original: "错字", suggestion: "正字", reason: "测试", confidence: 0.95, needsReview: false
+                }] })), 15 + prompt.length / 100));
+                if (!queued) return work();
+                queue = queue.then(work);
+                return queue;
+            };
+            assert.equal((await harness.window.runProofreading()).accepted, true);
+            const report = harness.perfLogs.find(log => log.label === "proofreading perf:").report;
+            reports.push({ mockBackend: queued ? "queued" : "independent", concurrency,
+                averageRequestMs: report.batches.reduce((sum, batch) => sum + batch.requestMs, 0) / report.batches.length,
+                ...report });
+        }
+    }
+    fs.writeFileSync(process.env.WPS_PERF_REPORT, JSON.stringify(reports, null, 2) + "\n");
 });
 
 test("repeated failed model detection updates only connection status", async () => {
