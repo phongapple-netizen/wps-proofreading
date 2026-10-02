@@ -40,11 +40,11 @@
     }
 
     function setProofreadingStatus(status, tone) {
-        state.status = normalizeStatus(status, tone);
-        if (state.status.text === "已在文档中定位这条问题。") {
+        var nextStatus = normalizeStatus(status, tone);
+        if (nextStatus.text === "已在文档中定位这条问题。") {
             var toast = byId("proofreading-toast");
             if (toast) {
-                toast.textContent = state.status.text;
+                toast.textContent = nextStatus.text;
                 toast.hidden = false;
                 if (locateToastTimer !== null && root.clearTimeout) root.clearTimeout(locateToastTimer);
                 if (root.setTimeout) locateToastTimer = root.setTimeout(function () {
@@ -52,8 +52,9 @@
                     locateToastTimer = null;
                 }, 3000);
             }
-            return state.status;
+            return nextStatus;
         }
+        state.status = nextStatus;
         var element = byId("proofreading-status");
         if (element) {
             element.textContent = state.status.text;

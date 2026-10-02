@@ -395,6 +395,7 @@ test('locate success toast expires after three seconds and preserves visible war
   win.setProofreadingStatus('文档已经变化，请重新校对。', 'warning');
   win.setProofreadingStatus('已在文档中定位这条问题。', 'success');
   assert.equal(elements['proofreading-toast'].hidden, false);
+  assert.equal(win.getProofreadingStatus().text, '文档已经变化，请重新校对。');
   assert.equal(elements['proofreading-status'].textContent, '文档已经变化，请重新校对。');
   assert.equal(elements['proofreading-status'].className, 'status status-warning');
   win.setProofreadingStatus('已在文档中定位这条问题。', 'success');
@@ -1377,4 +1378,40 @@ test('issue-derived rule drafts validate document identity again at submit and r
   h.activate(h.a);
   assert.equal(win.getProofreadingStatus().text, status);
   assert.equal(elements['proofreading-history'].hidden, true);
+});
+
+test('A locate toast is transient and switching A-B-A restores A persistent status without replaying it', async () => {
+  const h = createDocumentResultHarness();
+  const { win, elements } = h;
+  const timers = new Map();
+  let scheduled = 0;
+  win.setTimeout = (callback, delay) => {
+    assert.equal(delay, 3000);
+    timers.set(++scheduled, callback);
+    return scheduled;
+  };
+  win.clearTimeout = id => timers.delete(id);
+  await win.runProofreading();
+  const aStatus = win.getProofreadingStatus();
+  const id = win.getWpsProofreadingState().issues[0].id;
+  assert.equal(win.locateProofreadingIssue(id), true);
+  assert.equal(elements['proofreading-toast'].hidden, false);
+  assert.equal(scheduled, 1);
+  assert.equal(timers.size, 1);
+  assert.deepEqual(win.getProofreadingStatus(), aStatus);
+  assert.equal(elements['proofreading-status'].textContent, aStatus.text);
+
+  h.activate(h.b);
+  win.setProofreadingStatus('B 的独立持久状态', 'warning');
+  assert.equal(elements['proofreading-toast'].hidden, true);
+  assert.equal(timers.size, 0);
+  h.activate(h.a);
+  assert.equal(elements['proofreading-toast'].hidden, true);
+  assert.equal(scheduled, 1, 'returning to A must not schedule another locate toast');
+  assert.equal(timers.size, 0);
+  assert.deepEqual(win.getProofreadingStatus(), aStatus);
+  assert.equal(elements['proofreading-status'].textContent, aStatus.text);
+  assert.match(elements['proofreading-status'].className, /status-success/);
+  h.activate(h.b);
+  assert.equal(elements['proofreading-status'].textContent, 'B 的独立持久状态');
 });
