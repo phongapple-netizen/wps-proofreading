@@ -346,8 +346,10 @@
                     <select id="proofreading-concurrency" class="field-control">
                         <option value="1">1 · 串行</option>
                         <option value="2" selected>2 · 同时校对两批</option>
+                        <option value="3">3 · 同时校对三批</option>
+                        <option value="4">4 · 同时校对四批</option>
                     </select>
-                    <p class="field-note">仅作用于首轮校对，下次运行生效。一致性复核仍逐批进行；请求受限时，本次运行自动降为串行并重试一次。</p>
+                    <p class="field-note">默认 2，仅作用于首轮校对，下次运行生效。一致性复核仍逐批进行；请求受限时，本次运行自动降为串行并重试一次。模型排队时，提高并发可能没有提速。</p>
                     <div id="proofreading-diagnostics" class="opencode-start-guide">
                         <button id="proofreading-diagnostics-toggle" class="button button-text" type="button" aria-expanded="false">高级 / 故障排查 · 校对性能</button>
                         <div id="proofreading-diagnostics-content" hidden>

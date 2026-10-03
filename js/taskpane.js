@@ -1259,7 +1259,7 @@
         if (autoAdvanceField) autoAdvanceField.checked = settings.autoAdvance !== false;
         var concurrencyField = byId("proofreading-concurrency");
         var timingField = byId("proofreading-timing-enabled");
-        if (concurrencyField) concurrencyField.value = String(settings.concurrency === 1 ? 1 : 2);
+        if (concurrencyField) concurrencyField.value = String(settings.concurrency || 2);
         if (timingField) timingField.checked = settings.timingLogs === true;
         if (root.WpsProofreadingTiming) root.WpsProofreadingTiming.setEnabled(settings.timingLogs === true);
         syncModelSuggestions(settings);

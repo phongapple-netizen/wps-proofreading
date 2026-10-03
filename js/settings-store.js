@@ -131,13 +131,17 @@
         return PROVIDER_IDS.indexOf(provider) >= 0 ? provider : "";
     }
 
+    function normalizeConcurrency(value) {
+        return Number.isInteger(value) && value >= 1 && value <= 4 ? value : 2;
+    }
+
     function loadSettings() {
         var parsed = readJson(SETTINGS_KEY);
         if (!parsed) return null;
         return {
             provider: normalizeProvider(parsed.provider) || "opencode",
             deep: parsed.deep === true,
-            concurrency: parsed.concurrency === 1 ? 1 : 2,
+            concurrency: normalizeConcurrency(parsed.concurrency),
             timingLogs: parsed.timingLogs === true,
             autoAdvance: parsed.autoAdvance !== false,
             profiles: {
@@ -169,7 +173,7 @@
         return writeJson(SETTINGS_KEY, {
             provider: provider,
             deep: value.deep === true,
-            concurrency: value.concurrency === 1 ? 1 : 2,
+            concurrency: normalizeConcurrency(value.concurrency),
             timingLogs: value.timingLogs === true,
             autoAdvance: value.autoAdvance !== false,
             profiles: {
@@ -186,7 +190,7 @@
             provider: patch && patch.provider != null ? patch.provider : current.provider,
             deep: patch && patch.deep != null ? patch.deep === true : current.deep,
             concurrency: patch && patch.concurrency != null
-                ? (patch.concurrency === 1 ? 1 : 2) : current.concurrency,
+                ? normalizeConcurrency(patch.concurrency) : current.concurrency,
             timingLogs: patch && patch.timingLogs != null ? patch.timingLogs === true : current.timingLogs,
             autoAdvance: patch && patch.autoAdvance != null
                 ? patch.autoAdvance !== false : current.autoAdvance,

@@ -1223,7 +1223,7 @@
     }
 
     function scheduleBatches(items, concurrency, worker, signal, onFailure) {
-        var limit = concurrency === 2 ? 2 : 1;
+        var limit = Number.isInteger(concurrency) && concurrency >= 1 && concurrency <= 4 ? concurrency : 1;
         return new Promise(function (resolve, reject) {
             var next = 0, active = 0, completed = 0, stopped = false;
             var results = new Array(items.length), attempts = [], retries = [];

@@ -64,8 +64,13 @@ test('performance settings and numeric logs are accessible and copyable for ever
   assert.equal(h.elements['proofreading-diagnostics-content'].hidden, true);
   h.elements['proofreading-diagnostics-toggle'].fire('click');
   assert.equal(h.elements['proofreading-diagnostics-content'].hidden, false);
-  h.change('proofreading-concurrency', '1');
-  assert.equal(h.win.WpsSettingsStore.loadSettings().concurrency, 1);
+  for (const concurrency of [1, 2, 3, 4]) {
+    h.change('proofreading-concurrency', String(concurrency));
+    assert.equal(h.win.WpsSettingsStore.loadSettings().concurrency, concurrency);
+    assert.equal(h.elements['proofreading-concurrency'].value, String(concurrency));
+    h.tick();
+    assert.equal(h.elements['proofreading-concurrency'].value, String(concurrency));
+  }
   h.elements['proofreading-timing-enabled'].checked = true;
   h.elements['proofreading-timing-enabled'].fire('change');
   assert.equal(h.win.WpsSettingsStore.loadSettings().timingLogs, true);

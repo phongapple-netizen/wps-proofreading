@@ -1837,15 +1837,15 @@ async function until(check) {
     assert.fail("expected asynchronous proofreading state was not reached");
 }
 
-function parallelFixture(concurrency = 2, timingLogs = true) {
-    const names = "甲乙丙丁";
+function parallelFixture(concurrency = 2, timingLogs = true, batchCount = 4) {
+    const names = "甲乙丙丁戊己庚辛壬癸子丑".slice(0, batchCount);
     const selectedText = Array.from(names, name => name.repeat(1600) + "错字" + name + "。").join("\n");
     const harness = createHarness({ selectedText, suffix: "远处正文。" });
     harness.window.AbortController = AbortController;
     harness.window.WpsSettingsStore.updateSettings({ concurrency, timingLogs });
     const calls = [];
     harness.window.WpsProofreadingCore.requestModel = (options, prompt) => {
-        const name = prompt.match(/错字([甲乙丙丁])/)[1];
+        const name = prompt.match(/错字([甲乙丙丁戊己庚辛壬癸子丑])/)[1];
         const index = names.indexOf(name);
         return new Promise((resolve, reject) => calls.push({ index, signal: options.signal, reject,
             resolve: () => resolve(JSON.stringify({ issues: [{ category: "typo", paragraphIndex: index + 1,
@@ -1992,15 +1992,15 @@ test("parallel mode retains consistency warning behavior and logs are off unless
     assert.equal(harness.window.WpsProofreadingTiming.entries().length, 0);
 });
 
-test("simulated delayed model is faster at concurrency two with identical findings", async t => {
+test("simulated delayed model compares concurrency one through four with identical findings", async t => {
     async function measure(concurrency) {
-        const { harness } = parallelFixture(concurrency);
+        const { harness } = parallelFixture(concurrency, true, 12);
         let active = 0, peak = 0;
         harness.window.WpsProofreadingCore.requestModel = async (options, prompt) => {
             active++; peak = Math.max(peak, active);
             await new Promise(resolve => setTimeout(resolve, 70)); active--;
-            const name = prompt.match(/错字([甲乙丙丁])/)[1];
-            return JSON.stringify({ issues: [{ category: "typo", paragraphIndex: "甲乙丙丁".indexOf(name) + 1,
+            const name = prompt.match(/错字([甲乙丙丁戊己庚辛壬癸子丑])/)[1];
+            return JSON.stringify({ issues: [{ category: "typo", paragraphIndex: "甲乙丙丁戊己庚辛壬癸子丑".indexOf(name) + 1,
                 original: "错字" + name, suggestion: "正字" + name, confidence: 0.99 }] });
         };
         const started = performance.now();
@@ -2008,12 +2008,101 @@ test("simulated delayed model is faster at concurrency two with identical findin
         return { ms: performance.now() - started, peak,
             issues: Array.from(harness.renderedIssues, issue => [issue.id, issue.start, issue.original, issue.suggestion]) };
     }
-    const serial = await measure(1), parallel = await measure(2);
-    assert.equal(serial.peak, 1); assert.equal(parallel.peak, 2);
-    assert.deepEqual(parallel.issues, serial.issues);
-    assert.ok(parallel.ms < serial.ms * 0.85, `simulation: serial=${serial.ms}, parallel=${parallel.ms}`);
-    t.diagnostic(`Simulated model only: serial=${serial.ms.toFixed(1)}ms parallel=${parallel.ms.toFixed(1)}ms`);
+    const serial = await measure(1), measurements = [serial];
+    assert.equal(serial.peak, 1);
+    for (const concurrency of [2, 3, 4]) {
+        const parallel = await measure(concurrency);
+        measurements.push(parallel);
+        assert.equal(parallel.peak, concurrency);
+        assert.deepEqual(parallel.issues, serial.issues);
+        assert.ok(parallel.ms < serial.ms * 0.85,
+            `simulation: concurrency=${concurrency}, serial=${serial.ms}, parallel=${parallel.ms}`);
+    }
+    t.diagnostic("Simulated model only: " + measurements.map((value, index) =>
+        `concurrency=${index + 1} ${value.ms.toFixed(1)}ms`).join("; "));
 });
+
+for (const concurrency of [3, 4]) {
+    test(`concurrency ${concurrency} returns serial issue order with out-of-order responses`, async () => {
+        const { harness, calls } = parallelFixture(concurrency, true, 6);
+        const pending = harness.window.runProofreading();
+        await until(() => calls.length === concurrency);
+        harness.window.WpsSettingsStore.updateSettings({ concurrency: 1 });
+        calls[concurrency - 1].resolve();
+        await until(() => calls.length === concurrency + 1);
+        assert.equal(harness.renderedIssues[0].original, "错字" + "甲乙丙丁戊己"[concurrency - 1]);
+        for (let index = 0; index < 6; index++) {
+            await until(() => calls.length > index); calls[index].resolve();
+        }
+        assert.equal((await pending).accepted, true);
+        assert.deepEqual(Array.from(harness.renderedIssues, issue => issue.original),
+            Array.from("甲乙丙丁戊己", name => "错字" + name));
+        assert.equal(harness.window.WpsSettingsStore.loadSettings().concurrency, 1);
+    });
+
+    test(`concurrency ${concurrency} cancels all active requests and stops queued batches`, async () => {
+        const { harness, calls } = parallelFixture(concurrency, true, 6);
+        const pending = harness.window.runProofreading();
+        await until(() => calls.length === concurrency); calls[0].resolve();
+        await until(() => calls.length === concurrency + 1);
+        const ids = Array.from(harness.renderedIssues, issue => issue.id);
+        harness.window.cancelProofreading();
+        assert.equal((await pending).reason, "cancelled");
+        assert.ok(calls.every(call => call.signal.aborted));
+        calls.slice(1).forEach(call => call.resolve()); await new Promise(setImmediate);
+        assert.equal(calls.length, concurrency + 1);
+        assert.deepEqual(Array.from(harness.renderedIssues, issue => issue.id), ids);
+    });
+
+    test(`concurrency ${concurrency} preserves completed results and aborts siblings on failure`, async () => {
+        const { harness, calls } = parallelFixture(concurrency, true, 6);
+        const pending = harness.window.runProofreading();
+        await until(() => calls.length === concurrency); calls[0].resolve();
+        await until(() => calls.length === concurrency + 1);
+        calls[1].reject(new Error("模拟模型失败"));
+        assert.equal((await pending).reason, "error");
+        assert.ok(calls.slice(2).every(call => call.signal.aborted));
+        calls.slice(2).forEach(call => call.resolve()); await new Promise(setImmediate);
+        assert.equal(calls.length, concurrency + 1); assert.equal(harness.renderedIssues.length, 1);
+    });
+
+    test(`concurrency ${concurrency} discards every result after an equal-length snapshot change`, async () => {
+        const { harness, calls } = parallelFixture(concurrency, true, 6);
+        const pending = harness.window.runProofreading();
+        await until(() => calls.length === concurrency); calls[0].resolve();
+        await until(() => calls.length === concurrency + 1);
+        harness.changeDocument(harness.readDocument().replace("错字己", "错词己"));
+        calls[1].resolve(); assert.equal((await pending).reason, "error");
+        calls.slice(2).forEach(call => call.resolve()); await new Promise(setImmediate);
+        assert.equal(calls.length, concurrency + 1); assert.equal(harness.renderedIssues.length, 0);
+        assert.equal(harness.window.getWpsProofreadingState().snapshot, null);
+    });
+
+    test(`concurrency ${concurrency} drains siblings and retries 429 serially without changing settings`, async () => {
+        const { harness, calls } = parallelFixture(concurrency, true, 6);
+        const pending = harness.window.runProofreading();
+        await until(() => calls.length === concurrency);
+        calls[0].reject(Object.assign(new Error("limited"), { code: "MODEL_RATE_LIMITED" }));
+        await new Promise(setImmediate); assert.equal(calls.length, concurrency);
+        for (let index = 1; index < concurrency - 1; index++) {
+            calls[index].resolve(); await new Promise(setImmediate);
+            assert.equal(calls.length, concurrency);
+        }
+        calls[concurrency - 1].resolve(); await until(() => calls.length === concurrency + 1);
+        assert.equal(calls[concurrency].index, 0);
+        for (let index = concurrency; index < 7; index++) {
+            await until(() => calls.length === index + 1); calls[index].resolve();
+        }
+        assert.equal((await pending).accepted, true);
+        assert.equal(harness.window.WpsSettingsStore.loadSettings().concurrency, concurrency);
+        const logs = harness.window.WpsProofreadingTiming.entries().filter(entry => entry.kind === 1);
+        assert.deepEqual(Array.from(logs.filter(entry => entry.batch === 1), entry =>
+            [entry.attempt, entry.outcome, entry.concurrency]), [[1, 3, concurrency], [2, 0, 1]]);
+        const tail = logs.filter(entry => entry.batch > concurrency);
+        assert.equal(tail.length, 6 - concurrency);
+        assert.ok(tail.every(entry => entry.concurrency === 1));
+    });
+}
 
 function progressiveFixture(extra = {}) {
     const gates = [];

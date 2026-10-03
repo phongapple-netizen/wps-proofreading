@@ -25,7 +25,15 @@ test('performance settings default to two requests and logging off; older settin
   settings.updateSettings({ deep: false });
   assert.equal(settings.loadSettings().concurrency, 1);
   assert.equal(settings.loadSettings().timingLogs, true);
-  for (const invalid of [0, 4, '1', -1, null]) {
+  for (const concurrency of [1, 2, 3, 4]) {
+    settings.updateSettings({ concurrency });
+    assert.equal(settings.loadSettings().concurrency, concurrency);
+    settings.updateSettings({ provider: 'openai' });
+    assert.equal(settings.loadSettings().concurrency, concurrency);
+    settings.saveSettings({ concurrency });
+    assert.equal(settings.loadSettings().concurrency, concurrency);
+  }
+  for (const invalid of [0, 5, 1.5, '1', -1, null]) {
     settings.saveSettings({ concurrency: invalid, timingLogs: 'true' });
     assert.equal(settings.loadSettings().concurrency, 2);
     assert.equal(settings.loadSettings().timingLogs, false);

@@ -1361,7 +1361,7 @@
             options.signal = runController ? runController.signal : undefined;
             var runSettings = currentSettings();
             options.timingLogs = runSettings.timingLogs === true;
-            var concurrency = runSettings.concurrency === 1 ? 1 : 2;
+            var concurrency = runSettings.concurrency || 2;
             if (timing) timing.setEnabled(options.timingLogs);
             var providerLabel = providerDisplayName(options.provider);
             var scopeLabel = snapshot.mode === "full" ? "全文" : "选区";
