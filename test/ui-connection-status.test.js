@@ -25,9 +25,14 @@ function harness(options = {}) {
     'provider-help', 'opencode-start-guide', 'opencode-service-state', 'opencode-service-message',
     'opencode-retry', 'opencode-install-help', 'opencode-details', 'opencode-guide-toggle',
     'opencode-guide-content', 'refresh-models', 'model-summary', 'connection-status', 'model-detection-result',
+    'proofreading-concurrency', 'proofreading-timing-enabled', 'proofreading-diagnostics',
+    'proofreading-diagnostics-toggle', 'proofreading-diagnostics-content',
+    'proofreading-timing-log', 'copy-proofreading-timing', 'clear-proofreading-timing',
+    'refresh-proofreading-timing', 'proofreading-timing-status',
     'rules-only', 'deep-enhance-control', 'deep-enhance', 'proofreading-mode-hint']
     .forEach((id) => { elements[id] = field(); });
   elements['opencode-guide-content'].hidden = true;
+  elements['proofreading-diagnostics-content'].hidden = true;
   const storage = new Map();
   if (options.seed) storage.set('wps_text_proofreading_model_settings_v1', JSON.stringify(options.seed));
   const ready = [];
@@ -45,7 +50,7 @@ function harness(options = {}) {
     win.fetch = options.nativeFetch;
   }
   const context = vm.createContext({ window: win, URL, setTimeout, clearTimeout });
-  ['settings-store.js', 'proofreading-integration.js', 'taskpane.js'].forEach((file) => {
+  ['settings-store.js', 'proofreading-timing.js', 'proofreading-integration.js', 'taskpane.js'].forEach((file) => {
     vm.runInContext(fs.readFileSync(path.join(root, 'js', file), 'utf8'), context, { filename: file });
   });
   win.document.readyState = 'complete';
@@ -53,6 +58,77 @@ function harness(options = {}) {
   return { win, elements, storage, tick: () => intervals.forEach((callback) => callback()),
     change(id, value) { elements[id].value = value; elements[id].fire('change'); } };
 }
+
+test('performance settings and numeric logs are accessible and copyable for every provider', async () => {
+  const h = harness();
+  assert.equal(h.elements['proofreading-concurrency'].value, '2');
+  assert.equal(h.elements['proofreading-timing-enabled'].checked, false);
+  assert.equal(h.win.WpsSettingsStore.defaultSettings().timingLogs, false);
+  assert.equal(h.elements['proofreading-diagnostics-content'].hidden, true);
+  h.elements['proofreading-diagnostics-toggle'].fire('click');
+  assert.equal(h.elements['proofreading-diagnostics-content'].hidden, false);
+  for (const concurrency of [1, 2, 3, 4]) {
+    h.change('proofreading-concurrency', String(concurrency));
+    assert.equal(h.win.WpsSettingsStore.loadSettings().concurrency, concurrency);
+    assert.equal(h.elements['proofreading-concurrency'].value, String(concurrency));
+    h.tick();
+    assert.equal(h.elements['proofreading-concurrency'].value, String(concurrency));
+  }
+  h.elements['proofreading-timing-enabled'].checked = true;
+  h.elements['proofreading-timing-enabled'].fire('change');
+  assert.equal(h.win.WpsSettingsStore.loadSettings().timingLogs, true);
+  for (const provider of ['opencode', 'ollama', 'openai']) {
+    h.change('model-provider', provider);
+    assert.equal(h.elements['proofreading-diagnostics'].hidden, false);
+    const token = h.win.WpsProofreadingTiming.start({ kind: 1, batch: 1, characters: 30 });
+    h.win.WpsProofreadingTiming.finish(token, { messageMs: 25 });
+  }
+  const entries = JSON.parse(h.elements['proofreading-timing-log'].value);
+  assert.equal(entries.length, 3);
+  let copied;
+  h.win.navigator = { clipboard: { writeText: async value => { copied = value; } } };
+  h.elements['copy-proofreading-timing'].fire('click'); await new Promise(setImmediate);
+  assert.deepEqual(JSON.parse(copied), entries);
+  assert.match(h.elements['proofreading-timing-status'].textContent, /已复制/);
+  h.elements['clear-proofreading-timing'].fire('click');
+  assert.equal(h.elements['proofreading-timing-log'].value, '[]');
+  h.elements['proofreading-timing-enabled'].checked = false;
+  h.elements['proofreading-timing-enabled'].fire('change');
+  assert.equal(h.win.WpsProofreadingTiming.start({ kind: 1 }), null);
+});
+
+test('concurrency round-trips valid values and normalizes missing or invalid values', () => {
+  const h = harness();
+  assert.equal(h.win.WpsSettingsStore.defaultSettings().concurrency, 2);
+  for (const concurrency of [1, 2, 3, 4]) {
+    h.win.WpsSettingsStore.updateSettings({ concurrency });
+    assert.equal(h.win.WpsSettingsStore.loadSettings().concurrency, concurrency);
+    assert.equal(h.win.WpsSettingsStore.saveSettings({ concurrency }), true);
+    assert.equal(h.win.WpsSettingsStore.loadSettings().concurrency, concurrency);
+  }
+  for (const concurrency of [0, 5, -1, 1.5, '3', null]) {
+    h.win.WpsSettingsStore.updateSettings({ concurrency });
+    assert.equal(h.win.WpsSettingsStore.loadSettings().concurrency, 2);
+  }
+  const legacy = harness({ seed: { provider: 'opencode', deep: true } });
+  assert.equal(legacy.win.WpsSettingsStore.loadSettings().concurrency, 2);
+  assert.equal(legacy.win.WpsSettingsStore.loadSettings().rulesOnly, false);
+});
+
+test('log copying falls back to selection and an actionable message on older clipboard hosts', async () => {
+  const h = harness();
+  let selected = 0;
+  const field = h.elements['proofreading-timing-log'];
+  field.focus = () => {};
+  field.select = () => { selected++; };
+  h.elements['proofreading-diagnostics-toggle'].fire('click');
+  h.win.document.execCommand = command => { assert.equal(command, 'copy'); return true; };
+  h.elements['copy-proofreading-timing'].fire('click'); await new Promise(setImmediate);
+  assert.equal(selected, 1); assert.match(h.elements['proofreading-timing-status'].textContent, /已复制/);
+  h.win.document.execCommand = () => false;
+  h.elements['copy-proofreading-timing'].fire('click'); await new Promise(setImmediate);
+  assert.match(h.elements['proofreading-timing-status'].textContent, /手动复制/);
+});
 
 function nativeResponse(state, version = '') {
   return { ok: true, async json() { return { state, found: state !== 'missing', version, managed: state === 'ready' }; } };
@@ -280,7 +356,9 @@ test('cached catalogs never assert a live connection on reload or mismatch; non-
   assert.doesNotMatch(h.elements['connection-status'].className, /success/);
   assert.doesNotMatch(h.elements['connection-status'].textContent, /旧连接/);
   await h.win.refreshProviderModels();
-  h.win.WpsSettingsStore.updateSettings({ deep: true, autoAdvance: false });
+  h.win.WpsSettingsStore.updateSettings({ deep: true, autoAdvance: false, concurrency: 3, timingLogs: true });
+  h.tick();
+  assert.equal(h.win.getModelConnectionState().detected, true);
   h.tick();
   assert.equal(h.win.getModelConnectionState().detected, true);
   h.win.WpsSettingsStore.savePassword('programmatic-test', 'opencode');
@@ -360,7 +438,7 @@ test('document session swaps preserve shared provider, model, password, settings
   h.tick();
   h.change('model-provider', 'openai');
   h.change('model-api-key', 'document-switch-session-secret');
-  h.win.WpsSettingsStore.updateSettings({ deep: true, autoAdvance: false });
+  h.win.WpsSettingsStore.updateSettings({ deep: true, autoAdvance: false, concurrency: 4, timingLogs: true });
   await h.win.refreshProviderModels();
   const settings = JSON.stringify(h.win.WpsSettingsStore.loadSettings());
   const connection = JSON.stringify(h.win.getModelConnectionState());
@@ -374,6 +452,6 @@ test('document session swaps preserve shared provider, model, password, settings
     assert.equal(JSON.stringify(h.win.getModelConnectionState()), connection);
     assert.equal(h.elements['connection-status'].textContent, connectionText);
     assert.equal(h.win.WpsSettingsStore.loadPassword('openai'), key);
-  }
+}
   assert.equal(JSON.stringify([...h.storage.values()]).includes('/private/A.docx'), false);
 });

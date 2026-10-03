@@ -12,6 +12,46 @@ function response(status, payload) {
   };
 }
 
+test('request timings include session creation, message, cleanup and overlapping permission polls', async () => {
+  const timing = {}, calls = [];
+  const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const result = await client.request({ model: 'provider/model', password: 'private-secret', timing },
+    'private-document-body', async (url, init) => {
+      calls.push([url, init.method]);
+      if (url.endsWith('/session')) { await delay(12); return response(201, protectedSession('timed-session')); }
+      if (url.endsWith('/message')) { await delay(1150); return response(200, { parts: [{ type: 'text', text: '{"issues":[]}' }] }); }
+      if (url.endsWith('/permission')) { await delay(12); return response(200, []); }
+      if (init.method === 'DELETE') await delay(12);
+      return response(204, null);
+    });
+  assert.equal(result, '{"issues":[]}');
+  for (const field of ['createSessionMs', 'messageMs', 'cleanupMs', 'pollMs']) assert.ok(timing[field] >= 5, field);
+  assert.equal(timing.pollCount, 1);
+  assert.ok(Object.values(timing).every(value => typeof value === 'number'));
+  assert.doesNotMatch(JSON.stringify(timing), /private|timed-session/);
+  assert.equal(calls.filter(([url]) => url.endsWith('/permission')).length, 1);
+  assert.equal(calls.some(([url, method]) => url.includes('/permission/') && method === 'POST'), false);
+});
+
+test('timed failed and cancelled OpenCode requests still clean up and HTTP 429 is recognizable', async () => {
+  for (const cancelled of [false, true]) {
+    const timing = {}, calls = [], controller = new AbortController();
+    await assert.rejects(client.request({ model: 'provider/model', timing, signal: controller.signal },
+      'private-document-body', async (url, init) => {
+        calls.push(init.method + ' ' + url);
+        if (url.endsWith('/session')) return response(201, protectedSession('timed-failure'));
+        if (url.endsWith('/message')) {
+          if (cancelled) controller.abort();
+          return response(429, { secret: 'private-error' });
+        }
+        return response(204, null);
+      }), error => error.code === (cancelled ? 'ABORTED' : 'MODEL_RATE_LIMITED'));
+    assert.ok(calls.some(call => call.includes('/abort')));
+    assert.ok(calls.some(call => call.startsWith('DELETE ')));
+    for (const key of ['createSessionMs', 'messageMs', 'cleanupMs']) assert.ok(timing[key] >= 0);
+  }
+});
+
 function protectedSession(id) {
   return { id, permission: [{ permission: '*', pattern: '*', action: 'ask' }] };
 }

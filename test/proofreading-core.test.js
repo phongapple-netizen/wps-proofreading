@@ -2,8 +2,13 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const core = require("../js/proofreading-core.js");
 
+test("direct model HTTP 429 exposes the same recoverable code as OpenCode", async () => {
+    await assert.rejects(core.requestModel({ provider: "ollama", endpoint: "http://127.0.0.1:11434", model: "m" },
+        "private-body", async () => ({ ok: false, status: 429 })), { code: "MODEL_RATE_LIMITED" });
+});
+
 test("scheduler bounds concurrency and invalid values safely fall back to serial", async () => {
-    for (const concurrency of [undefined, 0, 1, 2, 4, "2"]) {
+    for (const concurrency of [undefined, 0, 1, 2, 3, 4, 5, "2"]) {
         let active = 0, peak = 0;
         const completed = [];
         await core.scheduleBatches([0, 1, 2, 3], concurrency, async (_item, index) => {
@@ -11,7 +16,7 @@ test("scheduler bounds concurrency and invalid values safely fall back to serial
             await new Promise(resolve => setImmediate(resolve));
             completed.push(index); active--;
         });
-        assert.equal(peak, concurrency === 2 ? 2 : 1);
+        assert.equal(peak, Number.isInteger(concurrency) && concurrency >= 1 && concurrency <= 4 ? concurrency : 1);
         assert.deepEqual(completed, [0, 1, 2, 3]);
     }
 });

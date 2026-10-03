@@ -7,6 +7,7 @@ const vm = require("node:vm");
 const projectRoot = path.resolve(__dirname, "..");
 const coreSource = fs.readFileSync(path.join(projectRoot, "js/proofreading-core.js"), "utf8");
 const storeSource = fs.readFileSync(path.join(projectRoot, "js/settings-store.js"), "utf8");
+const timingSource = fs.readFileSync(path.join(projectRoot, "js/proofreading-timing.js"), "utf8");
 const rulesSource = fs.readFileSync(path.join(projectRoot, "js/rules-center.js"), "utf8");
 const integrationSource = fs.readFileSync(path.join(projectRoot, "js/proofreading-integration.js"), "utf8");
 const basicRules = JSON.parse(fs.readFileSync(path.join(projectRoot, "rules/chinese-writing-basic.json"), "utf8")).rules;
@@ -19,6 +20,7 @@ const PASSWORD_KEY = "wps_text_proofreading_runtime_password_v1";
 const DEFAULT_SETTINGS = {
     provider: "ollama",
     deep: false,
+    concurrency: 1, // Existing progressive fixtures explicitly exercise serial behavior.
     profiles: {
         ollama: { endpoint: "http://127.0.0.1:11434", model: "qwen3:8b" },
         opencode: { endpoint: "http://127.0.0.1:4096", model: "opencode/mimo-v2.6-flash-free" },
@@ -260,6 +262,7 @@ function createHarness(options = {}) {
     const context = vm.createContext({ window: windowObject, URL, setTimeout, clearTimeout });
     vm.runInContext(coreSource, context, { filename: "proofreading-core.js" });
     vm.runInContext(storeSource, context, { filename: "settings-store.js" });
+    vm.runInContext(timingSource, context, { filename: "proofreading-timing.js" });
     vm.runInContext(rulesSource, context, { filename: "rules-center.js" });
     (options.rules || []).forEach((rule) => {
         windowObject.WpsRulesCenter.saveRule(rule);
@@ -371,7 +374,7 @@ test("development benchmark measures independent and queued mock backends", {
             const harness = createHarness({ runPerf: true, issues: [],
                 selectedText: Array.from({ length: 24 }, (_, i) => "第" + i + "段错字。" + "甲".repeat(394)).join("\n") });
             harness.window.performance = require("node:perf_hooks").performance;
-            harness.window.WpsProofreadingConcurrency = concurrency;
+            harness.window.WpsSettingsStore.updateSettings({ concurrency });
             let queue = Promise.resolve();
             harness.window.WpsProofreadingCore.requestModel = (_options, prompt) => {
                 const work = () => new Promise(resolve => setTimeout(() => resolve(JSON.stringify({ issues: [{
@@ -2504,6 +2507,273 @@ async function until(check) {
     assert.fail("expected asynchronous proofreading state was not reached");
 }
 
+function parallelFixture(concurrency = 2, timingLogs = true, batchCount = 4) {
+    const names = "甲乙丙丁戊己庚辛壬癸子丑".slice(0, batchCount);
+    const selectedText = Array.from(names, name => name.repeat(1600) + "错字" + name + "。").join("\n");
+    const harness = createHarness({ selectedText, suffix: "远处正文。" });
+    harness.window.AbortController = AbortController;
+    harness.window.WpsSettingsStore.updateSettings({ concurrency, timingLogs });
+    const calls = [];
+    harness.window.WpsProofreadingCore.requestModel = (options, prompt) => {
+        const name = prompt.match(/错字([甲乙丙丁戊己庚辛壬癸子丑])/)[1];
+        const index = names.indexOf(name);
+        return new Promise((resolve, reject) => calls.push({ index, signal: options.signal, reject,
+            resolve: () => resolve(JSON.stringify({ issues: [{ category: "typo", paragraphIndex: index + 1,
+                original: "错字" + name, suggestion: "正字" + name, reason: "测试",
+                confidence: 0.99, needsReview: false }] })) }));
+    };
+    return { harness, calls };
+}
+
+test("parallel batches publish out of order but finish with serial issue order and IDs", async () => {
+    const parallel = parallelFixture();
+    const pending = parallel.harness.window.runProofreading();
+    await until(() => parallel.calls.length === 2);
+    parallel.calls[1].resolve();
+    await until(() => parallel.calls.length === 3);
+    assert.equal(parallel.harness.renderedIssues[0].original, "错字乙");
+    parallel.calls[2].resolve();
+    await until(() => parallel.calls.length === 4);
+    parallel.calls[3].resolve(); parallel.calls[0].resolve();
+    assert.equal((await pending).accepted, true);
+    const serial = parallelFixture(1);
+    const serialRun = serial.harness.window.runProofreading();
+    for (let index = 0; index < 4; index++) {
+        await until(() => serial.calls.length === index + 1); serial.calls[index].resolve();
+    }
+    await serialRun;
+    const summary = h => Array.from(h.renderedIssues, issue => [issue.id, issue.start, issue.original, issue.suggestion]);
+    assert.deepEqual(summary(parallel.harness), summary(serial.harness));
+    const progress = parallel.harness.progress.filter(entry => /正文校对.*已处理/.test(entry.label));
+    assert.deepEqual(progress.map(entry => entry.percent), [25, 50, 75, 100]);
+});
+
+test("parallel cancellation aborts all active requests, keeps completed results and drops late responses", async () => {
+    const { harness, calls } = parallelFixture();
+    const pending = harness.window.runProofreading();
+    await until(() => calls.length === 2); calls[0].resolve();
+    await until(() => calls.length === 3);
+    const ids = Array.from(harness.renderedIssues, issue => issue.id);
+    harness.window.cancelProofreading();
+    assert.equal((await pending).reason, "cancelled");
+    assert.ok(calls.every(call => call.signal.aborted));
+    const status = harness.status.text;
+    calls[1].resolve(); calls[2].resolve(); await new Promise(setImmediate);
+    assert.equal(calls.length, 3); assert.equal(harness.status.text, status);
+    assert.deepEqual(Array.from(harness.renderedIssues, issue => issue.id), ids);
+});
+
+test("restarting parallel work isolates old responses and freezes concurrency for each run", async () => {
+    const { harness, calls } = parallelFixture();
+    const oldRun = harness.window.runProofreading();
+    await until(() => calls.length === 2);
+    const newRun = harness.window.runProofreading(true);
+    await until(() => calls.length === 4);
+    assert.equal((await oldRun).reason, "cancelled");
+    harness.window.WpsSettingsStore.updateSettings({ concurrency: 1 });
+    calls[0].resolve(); calls[1].resolve(); await new Promise(setImmediate);
+    assert.equal(harness.renderedIssues.length, 0);
+    calls[2].resolve(); await until(() => calls.length === 5);
+    calls[3].resolve(); await until(() => calls.length === 6);
+    assert.equal(calls[4].signal.aborted, false); assert.equal(calls[5].signal.aborted, false);
+    calls[4].resolve(); calls[5].resolve();
+    assert.equal((await newRun).accepted, true);
+    assert.deepEqual(Array.from(harness.renderedIssues, issue => issue.original), ["错字甲", "错字乙", "错字丙", "错字丁"]);
+    assert.equal(harness.window.WpsSettingsStore.loadSettings().concurrency, 1);
+});
+
+test("parallel cancellation without AbortController cannot revive results or launch queued work", async () => {
+    const { harness, calls } = parallelFixture();
+    delete harness.window.AbortController;
+    const pending = harness.window.runProofreading();
+    await until(() => calls.length === 2);
+    harness.window.cancelProofreading();
+    assert.equal(harness.busy, false);
+    calls.forEach(call => call.resolve());
+    assert.equal((await pending).reason, "cancelled");
+    assert.equal(calls.length, 2); assert.equal(harness.renderedIssues.length, 0);
+});
+
+test("parallel failure aborts siblings and retains completed results as an error", async () => {
+    const { harness, calls } = parallelFixture();
+    const pending = harness.window.runProofreading();
+    await until(() => calls.length === 2); calls[0].resolve();
+    await until(() => calls.length === 3);
+    calls[1].reject(new Error("模拟模型失败"));
+    assert.equal((await pending).reason, "error");
+    assert.equal(calls[2].signal.aborted, true);
+    assert.equal(harness.renderedIssues.length, 1);
+    assert.match(harness.status.text, /校对中断/);
+    calls[2].resolve(); await new Promise(setImmediate);
+    assert.equal(calls.length, 3); assert.equal(harness.renderedIssues.length, 1);
+});
+
+test("equal-length distant edits discard every parallel result and stop dispatch", async () => {
+    const { harness, calls } = parallelFixture();
+    const pending = harness.window.runProofreading();
+    await until(() => calls.length === 2); calls[0].resolve();
+    await until(() => calls.length === 3);
+    harness.changeDocument(harness.readDocument().replace("错字丁", "错词丁"));
+    calls[1].resolve();
+    assert.equal((await pending).reason, "error");
+    assert.equal(harness.renderedIssues.length, 0);
+    assert.equal(harness.window.getWpsProofreadingState().snapshot, null);
+    calls[2].resolve(); await new Promise(setImmediate);
+    assert.equal(harness.renderedIssues.length, 0); assert.equal(calls.length, 3);
+});
+
+test("429 retry waits for siblings, preserves settings and records both attempts with one batch total", async () => {
+    const { harness, calls } = parallelFixture();
+    const pending = harness.window.runProofreading();
+    await until(() => calls.length === 2);
+    calls[0].reject(Object.assign(new Error("limited"), { code: "MODEL_RATE_LIMITED" }));
+    await new Promise(setImmediate); assert.equal(calls.length, 2);
+    calls[1].resolve(); await until(() => calls.length === 3);
+    assert.equal(calls[2].index, 0); assert.equal(calls[2].signal.aborted, false);
+    calls[2].resolve(); await until(() => calls.length === 4);
+    calls[3].resolve(); await until(() => calls.length === 5);
+    calls[4].resolve(); assert.equal((await pending).accepted, true);
+    assert.equal(harness.window.WpsSettingsStore.loadSettings().concurrency, 2);
+    const logs = harness.window.WpsProofreadingTiming.entries();
+    const attempts = logs.filter(entry => entry.kind === 1 && entry.batch === 1);
+    assert.deepEqual(Array.from(attempts, entry => [entry.attempt, entry.outcome, entry.concurrency]),
+        [[1, 3, 2], [2, 0, 1]]);
+    const batches = logs.filter(entry => entry.kind === 2 && entry.batch === 1);
+    assert.equal(batches.length, 1); assert.equal(batches[0].attempt, 2);
+    assert.ok(batches[0].batchMs >= attempts[0].requestMs + attempts[1].requestMs - 1);
+});
+
+test("parallel mode retains consistency warning behavior and logs are off unless enabled", async () => {
+    const { harness } = parallelFixture(2, false);
+    const core = harness.window.WpsProofreadingCore;
+    core.buildGlobalConsistencyCandidates = () => [{ id: 1 }, { id: 2 }];
+    core.batchGlobalConsistencyCandidates = candidates => candidates.map(candidate => [candidate]);
+    core.buildConsistencyPrompt = () => "模拟一致性复核";
+    let checks = 0, signal;
+    core.requestModel = async (options, prompt) => {
+        signal = options.signal;
+        if (prompt === "模拟一致性复核") { checks++; throw new Error("复核失败"); }
+        return '{"issues":[]}';
+    };
+    const result = await harness.window.runProofreading();
+    assert.equal(result.accepted, true); assert.equal(result.consistencyCompleted, false);
+    assert.equal(checks, 2); assert.equal(signal.aborted, true);
+    assert.equal(harness.status.tone, "warning");
+    assert.equal(harness.window.WpsProofreadingTiming.entries().length, 0);
+});
+
+test("simulated delayed model compares concurrency one through four with identical findings", async t => {
+    async function measure(concurrency) {
+        const { harness } = parallelFixture(concurrency, true, 12);
+        let active = 0, peak = 0;
+        harness.window.WpsProofreadingCore.requestModel = async (options, prompt) => {
+            active++; peak = Math.max(peak, active);
+            await new Promise(resolve => setTimeout(resolve, 70)); active--;
+            const name = prompt.match(/错字([甲乙丙丁戊己庚辛壬癸子丑])/)[1];
+            return JSON.stringify({ issues: [{ category: "typo", paragraphIndex: "甲乙丙丁戊己庚辛壬癸子丑".indexOf(name) + 1,
+                original: "错字" + name, suggestion: "正字" + name, confidence: 0.99 }] });
+        };
+        const started = performance.now();
+        assert.equal((await harness.window.runProofreading()).accepted, true);
+        return { ms: performance.now() - started, peak,
+            issues: Array.from(harness.renderedIssues, issue => [issue.id, issue.start, issue.original, issue.suggestion]) };
+    }
+    const serial = await measure(1), measurements = [serial];
+    assert.equal(serial.peak, 1);
+    for (const concurrency of [2, 3, 4]) {
+        const parallel = await measure(concurrency);
+        measurements.push(parallel);
+        assert.equal(parallel.peak, concurrency);
+        assert.deepEqual(parallel.issues, serial.issues);
+        assert.ok(parallel.ms < serial.ms * 0.85,
+            `simulation: concurrency=${concurrency}, serial=${serial.ms}, parallel=${parallel.ms}`);
+    }
+    t.diagnostic("Simulated model only: " + measurements.map((value, index) =>
+        `concurrency=${index + 1} ${value.ms.toFixed(1)}ms`).join("; "));
+});
+
+for (const concurrency of [3, 4]) {
+    test(`concurrency ${concurrency} returns serial issue order with out-of-order responses`, async () => {
+        const { harness, calls } = parallelFixture(concurrency, true, 6);
+        const pending = harness.window.runProofreading();
+        await until(() => calls.length === concurrency);
+        harness.window.WpsSettingsStore.updateSettings({ concurrency: 1 });
+        calls[concurrency - 1].resolve();
+        await until(() => calls.length === concurrency + 1);
+        assert.equal(harness.renderedIssues[0].original, "错字" + "甲乙丙丁戊己"[concurrency - 1]);
+        for (let index = 0; index < 6; index++) {
+            await until(() => calls.length > index); calls[index].resolve();
+        }
+        assert.equal((await pending).accepted, true);
+        assert.deepEqual(Array.from(harness.renderedIssues, issue => issue.original),
+            Array.from("甲乙丙丁戊己", name => "错字" + name));
+        assert.equal(harness.window.WpsSettingsStore.loadSettings().concurrency, 1);
+    });
+
+    test(`concurrency ${concurrency} cancels all active requests and stops queued batches`, async () => {
+        const { harness, calls } = parallelFixture(concurrency, true, 6);
+        const pending = harness.window.runProofreading();
+        await until(() => calls.length === concurrency); calls[0].resolve();
+        await until(() => calls.length === concurrency + 1);
+        const ids = Array.from(harness.renderedIssues, issue => issue.id);
+        harness.window.cancelProofreading();
+        assert.equal((await pending).reason, "cancelled");
+        assert.ok(calls.every(call => call.signal.aborted));
+        calls.slice(1).forEach(call => call.resolve()); await new Promise(setImmediate);
+        assert.equal(calls.length, concurrency + 1);
+        assert.deepEqual(Array.from(harness.renderedIssues, issue => issue.id), ids);
+    });
+
+    test(`concurrency ${concurrency} preserves completed results and aborts siblings on failure`, async () => {
+        const { harness, calls } = parallelFixture(concurrency, true, 6);
+        const pending = harness.window.runProofreading();
+        await until(() => calls.length === concurrency); calls[0].resolve();
+        await until(() => calls.length === concurrency + 1);
+        calls[1].reject(new Error("模拟模型失败"));
+        assert.equal((await pending).reason, "error");
+        assert.ok(calls.slice(2).every(call => call.signal.aborted));
+        calls.slice(2).forEach(call => call.resolve()); await new Promise(setImmediate);
+        assert.equal(calls.length, concurrency + 1); assert.equal(harness.renderedIssues.length, 1);
+    });
+
+    test(`concurrency ${concurrency} discards every result after an equal-length snapshot change`, async () => {
+        const { harness, calls } = parallelFixture(concurrency, true, 6);
+        const pending = harness.window.runProofreading();
+        await until(() => calls.length === concurrency); calls[0].resolve();
+        await until(() => calls.length === concurrency + 1);
+        harness.changeDocument(harness.readDocument().replace("错字己", "错词己"));
+        calls[1].resolve(); assert.equal((await pending).reason, "error");
+        calls.slice(2).forEach(call => call.resolve()); await new Promise(setImmediate);
+        assert.equal(calls.length, concurrency + 1); assert.equal(harness.renderedIssues.length, 0);
+        assert.equal(harness.window.getWpsProofreadingState().snapshot, null);
+    });
+
+    test(`concurrency ${concurrency} drains siblings and retries 429 serially without changing settings`, async () => {
+        const { harness, calls } = parallelFixture(concurrency, true, 6);
+        const pending = harness.window.runProofreading();
+        await until(() => calls.length === concurrency);
+        calls[0].reject(Object.assign(new Error("limited"), { code: "MODEL_RATE_LIMITED" }));
+        await new Promise(setImmediate); assert.equal(calls.length, concurrency);
+        for (let index = 1; index < concurrency - 1; index++) {
+            calls[index].resolve(); await new Promise(setImmediate);
+            assert.equal(calls.length, concurrency);
+        }
+        calls[concurrency - 1].resolve(); await until(() => calls.length === concurrency + 1);
+        assert.equal(calls[concurrency].index, 0);
+        for (let index = concurrency; index < 7; index++) {
+            await until(() => calls.length === index + 1); calls[index].resolve();
+        }
+        assert.equal((await pending).accepted, true);
+        assert.equal(harness.window.WpsSettingsStore.loadSettings().concurrency, concurrency);
+        const logs = harness.window.WpsProofreadingTiming.entries().filter(entry => entry.kind === 1);
+        assert.deepEqual(Array.from(logs.filter(entry => entry.batch === 1), entry =>
+            [entry.attempt, entry.outcome, entry.concurrency]), [[1, 3, concurrency], [2, 0, 1]]);
+        const tail = logs.filter(entry => entry.batch > concurrency);
+        assert.equal(tail.length, 6 - concurrency);
+        assert.ok(tail.every(entry => entry.concurrency === 1));
+    });
+}
+
 function progressiveFixture(extra = {}) {
     const gates = [];
     const selectedText = [
@@ -2530,7 +2800,7 @@ function concurrentFixture(concurrency = 2) {
     const harness = createHarness({ selectedText: [800, 1800, 1800, 1800].map((size, i) =>
         "错字" + "甲乙丙丁"[i].repeat(size - 2)).join("\n"), issues: [] });
     harness.window.AbortController = AbortController;
-    harness.window.WpsProofreadingConcurrency = concurrency;
+    harness.window.WpsSettingsStore.updateSettings({ concurrency });
     const pending = [];
     harness.window.WpsProofreadingCore.requestModel = (options, prompt) => new Promise((resolve, reject) => {
         const paragraphIndex = JSON.parse(prompt.split("待校对段落：\n\n")[1])[0].paragraphIndex;
@@ -2977,6 +3247,158 @@ test("long text with no conflicting variants skips the second model pass", async
     assert.equal(harness.requests.length, result.batches);
     assert.equal(harness.requests.some((request) =>
         JSON.stringify(request.body).includes("第二遍跨段落一致性复核")), false);
+});
+
+function reviewPoolFixture(concurrency, abortAvailable = true, limitBody = false) {
+    const names = "甲乙丙丁戊己";
+    const harness = createHarness({ selectedText: Array.from(names,
+        name => "旧称" + name + "有错字" + name + "。").join("\n"), issues: [] });
+    if (abortAvailable) harness.window.AbortController = AbortController;
+    harness.window.WpsSettingsStore.updateSettings({ concurrency, timingLogs: true });
+    const core = harness.window.WpsProofreadingCore;
+    core.buildGlobalConsistencyCandidates = () => Array.from(names, (_, index) => ({ id: index + 1 }));
+    core.batchGlobalConsistencyCandidates = candidates => candidates.map(candidate => [candidate]);
+    core.buildConsistencyPrompt = batch => "复核:" + batch[0].id;
+    core.filterConsistencyIssuesToCandidates = issues => issues;
+    const calls = [];
+    let active = 0, peak = 0, bodyRequests = 0;
+    core.requestModel = (options, prompt) => {
+        if (!prompt.startsWith("复核:")) {
+            bodyRequests++;
+            if (limitBody && bodyRequests === 1) return Promise.reject(
+                Object.assign(new Error("limited body"), { code: "MODEL_RATE_LIMITED" }));
+            return Promise.resolve(JSON.stringify({ issues: [{ category: "typo", paragraphIndex: 1,
+                original: "错字甲", suggestion: "正字甲", confidence: 0.99, needsReview: false }] }));
+        }
+        const index = Number(prompt.slice(3)) - 1;
+        active++; peak = Math.max(peak, active);
+        return new Promise((resolve, reject) => {
+            const call = { index, signal: options.signal, settled: false };
+            call.resolve = () => {
+                if (call.settled) return;
+                call.settled = true; active--;
+                resolve(JSON.stringify({ issues: [{ category: "consistency", paragraphIndex: index + 1,
+                    original: "旧称" + names[index], suggestion: "新称" + names[index],
+                    confidence: 0.99, needsReview: true }] }));
+            };
+            call.reject = error => { if (!call.settled) { call.settled = true; active--; reject(error); } };
+            calls.push(call);
+        });
+    };
+    return { harness, calls, peak: () => peak };
+}
+
+async function finishReviewPool(calls) {
+    while (calls.filter(call => call.settled).length < 6) {
+        await until(() => calls.some(call => !call.settled));
+        calls.filter(call => !call.settled).at(-1).resolve();
+        await new Promise(setImmediate);
+    }
+}
+
+test("consistency pools use each saved concurrency and keep serial issue order after out-of-order returns", async () => {
+    let serial;
+    for (const concurrency of [1, 2, 3, 4]) {
+        const fixture = reviewPoolFixture(concurrency);
+        const operation = fixture.harness.window.runProofreading();
+        await until(() => fixture.calls.length === concurrency);
+        assert.equal(fixture.harness.renderedIssues.length, 1, "first-pass issue remains available");
+        await finishReviewPool(fixture.calls);
+        const result = await operation;
+        assert.equal(result.consistencyCompleted, true);
+        assert.equal(fixture.peak(), concurrency);
+        const summary = Array.from(fixture.harness.renderedIssues,
+            issue => [issue.id, issue.start, issue.original, issue.suggestion]);
+        if (concurrency === 1) serial = summary; else assert.deepEqual(summary, serial);
+        const progress = fixture.harness.progress.filter(entry => /全文一致性复核 ·/.test(entry.label));
+        assert.ok(progress.every((entry, index) => !index || entry.percent >= progress[index - 1].percent));
+        const logs = fixture.harness.window.WpsProofreadingTiming.entries().filter(entry => entry.kind === 1 && entry.stage === 2);
+        assert.equal(logs.length, 6);
+        assert.ok(logs.every(entry => entry.outcome === 0 && entry.concurrency === concurrency));
+    }
+});
+
+test("review failure stops queued work, keeps body results and ignores late siblings with or without abort", async () => {
+    for (const abortAvailable of [false, true]) {
+        const { harness, calls } = reviewPoolFixture(3, abortAvailable);
+        const operation = harness.window.runProofreading();
+        await until(() => calls.length === 3);
+        calls[0].reject(new Error("review transport failure"));
+        const result = await operation;
+        assert.equal(result.accepted, true);
+        assert.equal(result.consistencyCompleted, false);
+        assert.match(result.consistencyWarning, /review transport failure/);
+        assert.equal(harness.renderedIssues.length, 1);
+        if (abortAvailable) assert.ok(calls.every(call => call.signal.aborted));
+        const snapshot = harness.window.getWpsProofreadingState().snapshot;
+        const status = harness.status.text;
+        calls.forEach(call => call.resolve());
+        await new Promise(setImmediate);
+        assert.equal(calls.length, 3);
+        assert.equal(harness.renderedIssues.length, 1);
+        assert.equal(harness.window.getWpsProofreadingState().snapshot, snapshot);
+        assert.equal(harness.status.text, status);
+    }
+});
+
+test("cancelling concurrent review aborts every sibling and preserves completed body findings", async () => {
+    const { harness, calls } = reviewPoolFixture(4);
+    const operation = harness.window.runProofreading();
+    await until(() => calls.length === 4);
+    assert.equal(harness.window.cancelProofreading(), true);
+    assert.equal((await operation).reason, "cancelled");
+    assert.ok(calls.every(call => call.signal.aborted));
+    calls.forEach(call => call.resolve());
+    await new Promise(setImmediate);
+    assert.equal(calls.length, 4);
+    assert.equal(harness.renderedIssues.length, 1);
+});
+
+test("concurrent review snapshot mismatch discards body and review findings and stops queued work", async () => {
+    const { harness, calls } = reviewPoolFixture(4);
+    const operation = harness.window.runProofreading();
+    await until(() => calls.length === 4);
+    harness.changeDocument(harness.readDocument().replace("错字甲", "改字甲"));
+    calls[0].resolve();
+    assert.equal((await operation).reason, "error");
+    assert.ok(calls.every(call => call.signal.aborted));
+    calls.forEach(call => call.resolve());
+    await new Promise(setImmediate);
+    assert.equal(calls.length, 4);
+    assert.equal(harness.renderedIssues.length, 0);
+    assert.equal(harness.window.getWpsProofreadingState().snapshot, null);
+});
+
+test("review 429 drains siblings then retries once serially without altering saved concurrency", async () => {
+    const { harness, calls } = reviewPoolFixture(3);
+    const operation = harness.window.runProofreading();
+    await until(() => calls.length === 3);
+    calls[0].reject(Object.assign(new Error("limited review"), { code: "MODEL_RATE_LIMITED" }));
+    await new Promise(setImmediate);
+    assert.equal(calls.length, 3);
+    calls[1].resolve(); await new Promise(setImmediate);
+    assert.equal(calls.length, 3);
+    calls[2].resolve(); await until(() => calls.length === 4);
+    assert.equal(calls[3].index, 0);
+    for (let index = 3; index < 7; index++) {
+        await until(() => calls.length === index + 1); calls[index].resolve();
+    }
+    assert.equal((await operation).consistencyCompleted, true);
+    assert.equal(harness.window.WpsSettingsStore.loadSettings().concurrency, 3);
+    const attempts = harness.window.WpsProofreadingTiming.entries().filter(entry => entry.kind === 1 && entry.stage === 2 && entry.batch === 1);
+    assert.deepEqual(Array.from(attempts, entry => [entry.attempt, entry.outcome, entry.concurrency]), [[1, 3, 3], [2, 0, 1]]);
+});
+
+test("body rate-limit downgrade is retained by the later consistency pool", async () => {
+    const fixture = reviewPoolFixture(4, true, true);
+    const operation = fixture.harness.window.runProofreading();
+    await until(() => fixture.calls.length === 1);
+    await finishReviewPool(fixture.calls);
+    assert.equal((await operation).consistencyCompleted, true);
+    assert.equal(fixture.peak(), 1);
+    assert.equal(fixture.harness.window.WpsSettingsStore.loadSettings().concurrency, 4);
+    const logs = fixture.harness.window.WpsProofreadingTiming.entries().filter(entry => entry.kind === 1 && entry.stage === 2);
+    assert.ok(logs.every(entry => entry.concurrency === 1));
 });
 
 test("many global candidates are reviewed in batches without losing distant groups", async () => {

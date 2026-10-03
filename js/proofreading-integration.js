@@ -47,10 +47,36 @@
         finally { target[field] += actionClock() - started; }
     }
 
-    async function runRequest(perf, target, options, prompt) {
+    async function runRequest(perf, target, options, prompt, fields) {
         var started = perf ? actionClock() : 0;
-        try { return await requestProofreadingModel(options, prompt); }
+        try { return await timedProofreadingRequest(options, prompt, fields); }
         finally { if (perf) target.requestMs += actionClock() - started; }
+    }
+
+    function requestOutcome(error) {
+        if (!error) return 0;
+        if (error.name === "AbortError" || error.code === "ABORTED") return 2;
+        return error.code === "MODEL_RATE_LIMITED" ? 3 : 1;
+    }
+
+    async function timedProofreadingRequest(options, prompt, fields) {
+        var timing = root.WpsProofreadingTiming;
+        var token = options.timingLogs && timing ? timing.start(Object.assign({ kind: 1 }, fields)) : null;
+        var metrics = token ? {} : null;
+        var started = token ? timing.clock() : 0;
+        var outcome = 0;
+        try {
+            return await requestProofreadingModel(Object.assign({}, options, { timing: metrics }), prompt);
+        } catch (error) {
+            outcome = requestOutcome(error);
+            throw error;
+        } finally {
+            if (token) {
+                if (options.provider !== "opencode") metrics.messageMs = timing.clock() - started;
+                metrics.outcome = outcome;
+                timing.finish(token, metrics);
+            }
+        }
     }
 
     function finishRunPerf(perf) {
@@ -1090,12 +1116,15 @@
     async function requestProofreadingModel(options, prompt) {
         if (options.provider === "opencode") {
             if (!root.WpsOpenCodeClient) throw new Error("OpenCode 客户端模块没有加载。");
-            await ensureOpenCodeConnection(options);
+            var connectionStarted = options.timing ? actionClock() : 0;
+            try { await ensureOpenCodeConnection(options); }
+            finally { if (options.timing) options.timing.connectionMs = actionClock() - connectionStarted; }
             return root.WpsOpenCodeClient.request({
                 endpoint: options.endpoint,
                 model: options.model,
                 password: options.apiKey,
-                signal: options.signal
+                signal: options.signal,
+                timing: options.timing
             }, prompt, root.fetch);
         }
         return root.WpsProofreadingCore.requestModel(options, prompt);
@@ -1467,6 +1496,8 @@
         var snapshot = null;
         var collected = [];
         var discarded = false;
+        var timing = root.WpsProofreadingTiming;
+        var runTiming = null, batchTimings = [], runOutcome = 1;
         try {
             if (root.WpsRulesReady && typeof root.WpsRulesReady.then === "function") {
                 await root.WpsRulesReady;
@@ -1481,6 +1512,10 @@
             var rulesOnly = currentSettings().rulesOnly === true;
             var options = rulesOnly ? {} : validateModelOptions(modelOptions());
             options.signal = runController ? runController.signal : undefined;
+            var runSettings = currentSettings();
+            options.timingLogs = runSettings.timingLogs === true;
+            var concurrency = runSettings.concurrency;
+            if (timing) timing.setEnabled(options.timingLogs);
             var providerLabel = rulesOnly ? "本地规则" : providerDisplayName(options.provider);
             var scopeLabel = snapshot.mode === "full" ? "全文" : "选区";
             if (snapshot.mode === "full") {
@@ -1520,6 +1555,8 @@
             runCounter += 1;
             run.runId = runCounter;
             run.started = true;
+            if (options.timingLogs && timing) runTiming = timing.start({ kind: 3, run: run.runId,
+                characters: snapshot.selectedText.length, concurrency: concurrency });
             var deep = !rulesOnly && isDeepMode();
             if (typeof root.beginProofreadingRun === "function") {
                 root.beginProofreadingRun();
@@ -1567,6 +1604,7 @@
                     : "校对完成 · 仅规则 · 未发现规则命中";
                 reportProgress(100, rulesResult);
                 setStatus(rulesResult + "。", "success");
+                runOutcome = 0;
                 return { accepted: true, issues: currentIssues.length, batches: 0,
                     rulesOnly: true, consistencyAttempted: false, consistencyCompleted: false,
                     consistencyWarning: "" };
@@ -1595,67 +1633,82 @@
             var consistencyWarning = "";
 
             var bodyResults = new Array(batches.length);
-            // Developer experiment entry. Only an explicit numeric 2 opts in.
-            var concurrency = root.WpsProofreadingConcurrency === 2 ? 2 : 1;
-            await root.WpsProofreadingCore.scheduleBatches(batches, concurrency, async function (batch, index) {
-                var batchPerf = { batchIndex: index, characters: batchCharacterCount(batches[index]),
-                    requestMs: 0, parseAndMapMs: 0, snapshotValidationMs: 0, publishRenderMs: 0 };
-                if (perf) perf.report.batches.push(batchPerf);
-                ensureRunActive(run);
-                if (runController && runController.signal && runController.signal.aborted) {
-                    var abortError = new Error("已取消校对。");
-                    abortError.name = "AbortError";
-                    throw abortError;
+            await root.WpsProofreadingCore.scheduleBatches(batches, concurrency, async function (batch, index, attempt, limit) {
+                var fields = { run: run.runId, stage: 1, batch: index + 1, attempt: attempt,
+                    characters: batchCharacterCount(batch), concurrency: limit };
+                if (options.timingLogs && timing && !batchTimings[index]) {
+                    batchTimings[index] = timing.start(Object.assign({ kind: 2 }, fields));
                 }
-                var currentAiReviewContext = batchAiReviewContext(
-                    batches[index], aiReviewCandidates, snapshot.start);
-                var prompt = root.WpsProofreadingCore.buildPrompt(batches[index], {
-                    deep: deep,
-                    ruleContext: batchRuleContext(batches[index], localRuleIssues, snapshot.start),
-                    aiReviewContext: currentAiReviewContext
-                });
-                var response = await runRequest(perf, batchPerf, options, prompt);
-                ensureRunActive(run);
-                if (!runStage(perf, batchPerf, "snapshotValidationMs", function () {
-                    return documentSnapshotMatches(run.document, snapshot);
-                })) {
-                    currentSnapshot = null;
-                    currentIssues = [];
-                    discarded = true;
-                    viewIssues();
-                    throw new Error("校对期间" + scopeLabel + "内容已变化，结果已丢弃。请重新校对。");
-                }
-                var mappedFirstPass = runStage(perf, batchPerf, "parseAndMapMs", function () {
-                    return root.WpsProofreadingCore.mapIssuesToRanges(batches[index],
-                        root.WpsProofreadingCore.parseIssues(response), snapshot.start);
-                });
-                bodyResults[index] = annotateAiReviewIssues(mappedFirstPass, aiReviewCandidates);
-                runStage(perf, batchPerf, "publishRenderMs", function () {
-                    // Completion order never changes overlap arbitration or stable IDs.
-                    collected = localRuleIssues.slice();
-                    bodyResults.forEach(function (results) { if (results) collected = collected.concat(results); });
-                    currentIssues = mergeRunIssues(run, collected);
-                    currentSnapshot = snapshot;
-                    viewIssues();
-                    if (perf && !perf.firstResult) {
-                        perf.firstResult = true;
-                        perf.report.firstResultMs = actionClock() - perf.started;
+                var batchOutcome = 0;
+                try {
+                    var batchPerf = { batchIndex: index, characters: batchCharacterCount(batches[index]),
+                        requestMs: 0, parseAndMapMs: 0, snapshotValidationMs: 0, publishRenderMs: 0 };
+                    if (perf) perf.report.batches.push(batchPerf);
+                    ensureRunActive(run);
+                    if (runController && runController.signal && runController.signal.aborted) {
+                        var abortError = new Error("已取消校对。");
+                        abortError.name = "AbortError";
+                        throw abortError;
                     }
-                });
-                completedFirstPassCharacters += batchCharacterCount(batches[index]);
-                var firstPassPercent = totalFirstPassCharacters > 0
-                    ? Math.round((completedFirstPassCharacters / totalFirstPassCharacters) *
-                        firstPassProgressCeiling)
-                    : firstPassProgressCeiling;
-                var batchLabel = "正文校对";
-                if (batches.length > 1) {
-                    batchLabel += " · 第 " + (index + 1) + "/" + batches.length + " 批";
+                    var currentAiReviewContext = batchAiReviewContext(
+                        batches[index], aiReviewCandidates, snapshot.start);
+                    var prompt = root.WpsProofreadingCore.buildPrompt(batches[index], {
+                        deep: deep,
+                        ruleContext: batchRuleContext(batches[index], localRuleIssues, snapshot.start),
+                        aiReviewContext: currentAiReviewContext
+                    });
+                    var response = await runRequest(perf, batchPerf, options, prompt, fields);
+                    ensureRunActive(run);
+                    if (!runStage(perf, batchPerf, "snapshotValidationMs", function () {
+                        return documentSnapshotMatches(run.document, snapshot);
+                    })) {
+                        currentSnapshot = null;
+                        currentIssues = [];
+                        discarded = true;
+                        viewIssues();
+                        throw new Error("校对期间" + scopeLabel + "内容已变化，结果已丢弃。请重新校对。");
+                    }
+                    var mappedFirstPass = runStage(perf, batchPerf, "parseAndMapMs", function () {
+                        return root.WpsProofreadingCore.mapIssuesToRanges(batches[index],
+                            root.WpsProofreadingCore.parseIssues(response), snapshot.start);
+                    });
+                    bodyResults[index] = annotateAiReviewIssues(mappedFirstPass, aiReviewCandidates);
+                    runStage(perf, batchPerf, "publishRenderMs", function () {
+                        // Completion order never changes overlap arbitration or stable IDs.
+                        collected = localRuleIssues.slice();
+                        bodyResults.forEach(function (results) { if (results) collected = collected.concat(results); });
+                        currentIssues = mergeRunIssues(run, collected);
+                        currentSnapshot = snapshot;
+                        viewIssues();
+                        if (perf && !perf.firstResult) {
+                            perf.firstResult = true;
+                            perf.report.firstResultMs = actionClock() - perf.started;
+                        }
+                    });
+                    completedFirstPassCharacters += batchCharacterCount(batches[index]);
+                    var firstPassPercent = totalFirstPassCharacters > 0
+                        ? Math.round((completedFirstPassCharacters / totalFirstPassCharacters) *
+                            firstPassProgressCeiling)
+                        : firstPassProgressCeiling;
+                    var batchLabel = "正文校对";
+                    if (batches.length > 1) {
+                        batchLabel += " · 第 " + (index + 1) + "/" + batches.length + " 批";
+                    }
+                    batchLabel += " · 已处理 " + completedFirstPassCharacters +
+                        "/" + totalFirstPassCharacters + " 字";
+                    setStatus("AI 校对 " + firstPassPercent + "% · " + resultCountLabel(), "working");
+                    reportProgress(firstPassPercent, "AI 校对 " + firstPassPercent + "% · " +
+                        resultCountLabel() + " · " + batchLabel);
+                } catch (batchError) {
+                    batchOutcome = requestOutcome(batchError);
+                    if (batchOutcome === 3) concurrency = 1;
+                    throw batchError;
+                } finally {
+                    if (timing && !(batchOutcome === 3 && attempt === 1)) {
+                        timing.finish(batchTimings[index], { outcome: batchOutcome, attempt: attempt, concurrency: limit });
+                        batchTimings[index] = null;
+                    }
                 }
-                batchLabel += " · 已处理 " + completedFirstPassCharacters +
-                    "/" + totalFirstPassCharacters + " 字";
-                setStatus("AI 校对 " + firstPassPercent + "% · " + resultCountLabel(), "working");
-                reportProgress(firstPassPercent, "AI 校对 " + firstPassPercent + "% · " +
-                    resultCountLabel() + " · " + batchLabel);
             }, options.signal, function (error) {
                 if (!error || error.name !== "AbortError") run.failed = true;
                 if (runController) runController.abort();
@@ -1673,43 +1726,96 @@
                 }
                 setStatus("正在进行全文一致性复核 · " + resultCountLabel(), "working");
                 reportProgress(firstPassProgressCeiling, "全文一致性复核中 · " + resultCountLabel());
-                try {
-                    for (var candidateBatchIndex = 0; candidateBatchIndex < consistencyBatches.length; candidateBatchIndex += 1) {
-                        ensureRunActive(run);
-                        var consistencyBatch = consistencyBatches[candidateBatchIndex];
-                        var consistencyPerf = { batchIndex: candidateBatchIndex,
-                            requestMs: 0, parseAndMapMs: 0, snapshotValidationMs: 0 };
-                        if (perf) perf.report.consistencyBatches.push(consistencyPerf);
-                        var consistencyPrompt = root.WpsProofreadingCore.buildConsistencyPrompt(consistencyBatch);
-                        var consistencyResponse = await runRequest(perf, consistencyPerf, options, consistencyPrompt);
-                        ensureRunActive(run);
-                        if (!runStage(perf, consistencyPerf, "snapshotValidationMs", function () {
-                            return documentSnapshotMatches(run.document, snapshot);
-                        })) {
-                            currentSnapshot = null;
-                            currentIssues = [];
-                            discarded = true;
-                            viewIssues();
-                            throw new Error("一致性复核期间" + scopeLabel + "内容已变化，结果已丢弃。请重新校对。");
-                        }
-                        var consistencyMapped = runStage(perf, consistencyPerf, "parseAndMapMs", function () {
-                            var consistencyParsed = root.WpsProofreadingCore.filterConsistencyIssuesToCandidates(
-                                root.WpsProofreadingCore.parseConsistencyIssues(consistencyResponse), consistencyBatch);
-                            return root.WpsProofreadingCore.mapIssuesToRanges(
-                                paragraphs, consistencyParsed, snapshot.start).map(function (issue) {
-                                    return Object.assign({ origin: "ai" }, issue);
-                                });
-                        });
-                        collected = collected.concat(consistencyMapped);
-                        currentIssues = mergeRunIssues(run, collected);
-                        currentSnapshot = snapshot;
-                        viewIssues();
-                        setStatus("正在进行全文一致性复核 · " + resultCountLabel(), "working");
-                        reportProgress(firstPassProgressCeiling + Math.round(
-                            ((candidateBatchIndex + 1) / consistencyBatches.length) * (100 - firstPassProgressCeiling)),
-                            "全文一致性复核 · " + resultCountLabel() + " · 第 " +
-                            (candidateBatchIndex + 1) + "/" + consistencyBatches.length + " 批候选组");
+                var consistencyController = makeAbortController();
+                var consistencyStopped = false;
+                var consistencyTimings = [], consistencyResults = [];
+                var firstPassCollected = collected.slice();
+                var completedConsistencyCharacters = 0;
+                var stopConsistencyTransport = function () {
+                    if (consistencyController) consistencyController.abort();
+                };
+                var consistencyOptions = Object.assign({}, options, {
+                    signal: consistencyController ? consistencyController.signal : options.signal
+                });
+                var ensureConsistencyActive = function () {
+                    ensureRunActive(run);
+                    if (consistencyStopped) {
+                        var error = new Error("已停止一致性复核。");
+                        error.name = "AbortError";
+                        throw error;
                     }
+                };
+                if (options.signal && options.signal.addEventListener) {
+                    options.signal.addEventListener("abort", stopConsistencyTransport, { once: true });
+                    if (options.signal.aborted) stopConsistencyTransport();
+                }
+                try {
+                    var consistencyPrompts = consistencyBatches.map(function (batch) {
+                        return root.WpsProofreadingCore.buildConsistencyPrompt(batch);
+                    });
+                    var totalConsistencyCharacters = consistencyPrompts.reduce(function (sum, prompt) {
+                        return sum + prompt.length;
+                    }, 0);
+                    await root.WpsProofreadingCore.scheduleBatches(consistencyBatches, concurrency,
+                        async function (consistencyBatch, candidateBatchIndex, attempt, limit) {
+                        ensureConsistencyActive();
+                        var consistencyPrompt = consistencyPrompts[candidateBatchIndex];
+                        var fields = { run: run.runId, stage: 2, batch: candidateBatchIndex + 1,
+                            attempt: attempt, characters: consistencyPrompt.length, concurrency: limit };
+                        if (options.timingLogs && timing && !consistencyTimings[candidateBatchIndex]) {
+                            consistencyTimings[candidateBatchIndex] = timing.start(Object.assign({ kind: 2 }, fields));
+                        }
+                        var consistencyOutcome = 0;
+                        try {
+                            var consistencyPerf = { batchIndex: candidateBatchIndex,
+                                requestMs: 0, parseAndMapMs: 0, snapshotValidationMs: 0 };
+                            if (perf) perf.report.consistencyBatches.push(consistencyPerf);
+                            var consistencyResponse = await runRequest(perf, consistencyPerf, consistencyOptions, consistencyPrompt, fields);
+                            ensureConsistencyActive();
+                            if (!runStage(perf, consistencyPerf, "snapshotValidationMs", function () {
+                                return documentSnapshotMatches(run.document, snapshot);
+                            })) {
+                                currentSnapshot = null;
+                                currentIssues = [];
+                                discarded = true;
+                                viewIssues();
+                                throw new Error("一致性复核期间" + scopeLabel + "内容已变化，结果已丢弃。请重新校对。");
+                            }
+                            var consistencyMapped = runStage(perf, consistencyPerf, "parseAndMapMs", function () {
+                                var consistencyParsed = root.WpsProofreadingCore.filterConsistencyIssuesToCandidates(
+                                    root.WpsProofreadingCore.parseConsistencyIssues(consistencyResponse), consistencyBatch);
+                                return root.WpsProofreadingCore.mapIssuesToRanges(
+                                    paragraphs, consistencyParsed, snapshot.start).map(function (issue) {
+                                        return Object.assign({ origin: "ai" }, issue);
+                                    });
+                            });
+                            consistencyResults[candidateBatchIndex] = consistencyMapped;
+                            collected = firstPassCollected.slice();
+                            consistencyResults.forEach(function (results) { if (results) collected = collected.concat(results); });
+                            currentIssues = mergeRunIssues(run, collected);
+                            currentSnapshot = snapshot;
+                            viewIssues();
+                            setStatus("正在进行全文一致性复核 · " + resultCountLabel(), "working");
+                            completedConsistencyCharacters += consistencyPrompt.length;
+                            reportProgress(firstPassProgressCeiling + Math.round(
+                                (completedConsistencyCharacters / totalConsistencyCharacters) * (100 - firstPassProgressCeiling)),
+                                "全文一致性复核 · " + resultCountLabel() + " · 第 " +
+                                (candidateBatchIndex + 1) + "/" + consistencyBatches.length + " 批候选组");
+                        } catch (consistencyBatchError) {
+                            consistencyOutcome = requestOutcome(consistencyBatchError);
+                            if (consistencyOutcome === 3) concurrency = 1;
+                            throw consistencyBatchError;
+                        } finally {
+                            if (timing && !(consistencyOutcome === 3 && attempt === 1)) {
+                                timing.finish(consistencyTimings[candidateBatchIndex], {
+                                    outcome: consistencyOutcome, attempt: attempt, concurrency: limit });
+                                consistencyTimings[candidateBatchIndex] = null;
+                            }
+                        }
+                    }, consistencyOptions.signal, function () {
+                        consistencyStopped = true;
+                        stopConsistencyTransport();
+                    });
                     consistencyCompleted = true;
                     reportProgress(100, "全文一致性复核完成");
                 } catch (consistencyError) {
@@ -1723,6 +1829,12 @@
                         ? consistencyError.message
                         : "一致性复核未完成。";
                     reportProgress(100, "正文校对完成 · 一致性复核未完成");
+                } finally {
+                    consistencyStopped = true;
+                    if (options.signal && options.signal.removeEventListener) {
+                        options.signal.removeEventListener("abort", stopConsistencyTransport);
+                    }
+                    if (timing) consistencyTimings.forEach(function (token) { timing.finish(token, { outcome: 2 }); });
                 }
             }
 
@@ -1752,6 +1864,7 @@
                     (consistencyWarning ? " " + consistencyWarning : "")
                 : "校对完成 · 未发现明显问题" + consistencyText + "。" +
                     (consistencyWarning ? " " + consistencyWarning : ""), finalTone);
+            runOutcome = 0;
             return {
                 accepted: true,
                 issues: currentIssues.length,
@@ -1762,6 +1875,7 @@
             };
         } catch (error) {
             syncDocumentSession();
+            runOutcome = requestOutcome(error);
             if (!isDocumentRunCurrent(run)) {
                 return { accepted: false, reason: "cancelled" };
             }
@@ -1793,6 +1907,10 @@
                 perf.report.consistencyMs = actionClock() - consistencyStarted;
             }
             finishRunPerf(perf);
+            if (timing) {
+                batchTimings.forEach(function (token) { timing.finish(token, { outcome: runOutcome }); });
+                timing.finish(runTiming, { outcome: runOutcome });
+            }
             syncDocumentSession();
             if (isDocumentRunCurrent(run)) {
                 run.waiting = false;
