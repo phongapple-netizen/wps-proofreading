@@ -137,6 +137,8 @@
         return {
             provider: normalizeProvider(parsed.provider) || "opencode",
             deep: parsed.deep === true,
+            concurrency: parsed.concurrency === 1 ? 1 : 2,
+            timingLogs: parsed.timingLogs === true,
             autoAdvance: parsed.autoAdvance !== false,
             profiles: {
                 ollama: safeProfile(parsed.profiles && parsed.profiles.ollama, PROVIDER_DEFAULTS.ollama),
@@ -150,6 +152,8 @@
         return {
             provider: "opencode",
             deep: false,
+            concurrency: 2,
+            timingLogs: false,
             autoAdvance: true,
             profiles: {
                 ollama: Object.assign({}, PROVIDER_DEFAULTS.ollama),
@@ -165,6 +169,8 @@
         return writeJson(SETTINGS_KEY, {
             provider: provider,
             deep: value.deep === true,
+            concurrency: value.concurrency === 1 ? 1 : 2,
+            timingLogs: value.timingLogs === true,
             autoAdvance: value.autoAdvance !== false,
             profiles: {
                 ollama: safeProfile(value.profiles && value.profiles.ollama, PROVIDER_DEFAULTS.ollama),
@@ -179,6 +185,9 @@
         var next = {
             provider: patch && patch.provider != null ? patch.provider : current.provider,
             deep: patch && patch.deep != null ? patch.deep === true : current.deep,
+            concurrency: patch && patch.concurrency != null
+                ? (patch.concurrency === 1 ? 1 : 2) : current.concurrency,
+            timingLogs: patch && patch.timingLogs != null ? patch.timingLogs === true : current.timingLogs,
             autoAdvance: patch && patch.autoAdvance != null
                 ? patch.autoAdvance !== false : current.autoAdvance,
             profiles: Object.assign({}, current.profiles)

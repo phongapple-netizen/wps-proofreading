@@ -2,6 +2,11 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const core = require("../js/proofreading-core.js");
 
+test("direct model HTTP 429 exposes the same recoverable code as OpenCode", async () => {
+    await assert.rejects(core.requestModel({ provider: "ollama", endpoint: "http://127.0.0.1:11434", model: "m" },
+        "private-body", async () => ({ ok: false, status: 429 })), { code: "MODEL_RATE_LIMITED" });
+});
+
 test("paragraph splitting preserves WPS offsets across CRLF and blank paragraphs", () => {
     const text = "前段。\r\n\r后段。";
     assert.deepEqual(core.splitIntoParagraphs(text), [

@@ -1257,10 +1257,79 @@
         }
         if (deepField) deepField.checked = settings.deep === true;
         if (autoAdvanceField) autoAdvanceField.checked = settings.autoAdvance !== false;
+        var concurrencyField = byId("proofreading-concurrency");
+        var timingField = byId("proofreading-timing-enabled");
+        if (concurrencyField) concurrencyField.value = String(settings.concurrency === 1 ? 1 : 2);
+        if (timingField) timingField.checked = settings.timingLogs === true;
+        if (root.WpsProofreadingTiming) root.WpsProofreadingTiming.setEnabled(settings.timingLogs === true);
         syncModelSuggestions(settings);
     }
 
+    function refreshProofreadingTiming() {
+        var content = byId("proofreading-diagnostics-content");
+        if (content && content.hidden) return;
+        var field = byId("proofreading-timing-log");
+        var timing = root.WpsProofreadingTiming;
+        if (field) field.value = JSON.stringify(timing ? timing.entries() : [], null, 2);
+    }
+    root.refreshProofreadingTiming = refreshProofreadingTiming;
+
+    function bindProofreadingTiming() {
+        var api = store();
+        var concurrency = byId("proofreading-concurrency");
+        var enabled = byId("proofreading-timing-enabled");
+        var toggle = byId("proofreading-diagnostics-toggle");
+        var refresh = byId("refresh-proofreading-timing");
+        var copy = byId("copy-proofreading-timing");
+        var clear = byId("clear-proofreading-timing");
+        function status(message) {
+            var element = byId("proofreading-timing-status");
+            if (element) element.textContent = message;
+        }
+        if (concurrency) concurrency.addEventListener("change", function () {
+            if (api) api.updateSettings({ concurrency: Number(concurrency.value) });
+            syncFormFromStore();
+        });
+        if (enabled) enabled.addEventListener("change", function () {
+            if (api) api.updateSettings({ timingLogs: enabled.checked === true });
+            syncFormFromStore();
+            status(enabled.checked ? "已开启，开始校对后记录耗时。" : "已关闭记录。");
+        });
+        if (toggle) toggle.addEventListener("click", function () {
+            var content = byId("proofreading-diagnostics-content");
+            if (!content) return;
+            content.hidden = !content.hidden;
+            toggle.setAttribute("aria-expanded", content.hidden ? "false" : "true");
+            refreshProofreadingTiming();
+        });
+        if (refresh) refresh.addEventListener("click", refreshProofreadingTiming);
+        if (clear) clear.addEventListener("click", function () {
+            if (root.WpsProofreadingTiming) root.WpsProofreadingTiming.clear();
+            refreshProofreadingTiming(); status("记录已清空。");
+        });
+        if (copy) copy.addEventListener("click", async function () {
+            refreshProofreadingTiming();
+            var field = byId("proofreading-timing-log");
+            if (!field) return;
+            try {
+                if (root.navigator && root.navigator.clipboard && root.navigator.clipboard.writeText) {
+                    await root.navigator.clipboard.writeText(field.value);
+                } else {
+                    field.focus(); field.select();
+                    if (!root.document.execCommand || !root.document.execCommand("copy")) throw new Error("copy");
+                }
+                status("耗时记录已复制。");
+            } catch (error) {
+                field.focus();
+                if (typeof field.select === "function") field.select();
+                status("请选中记录并手动复制。");
+            }
+        });
+        refreshProofreadingTiming();
+    }
+
     function bindSettingsForm() {
+        bindProofreadingTiming();
         var providerField = byId("model-provider");
         var endpointField = byId("model-endpoint");
         var modelField = byId("model-name");

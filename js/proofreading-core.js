@@ -1188,7 +1188,9 @@
 
         if (!response || !response.ok) {
             var status = response && response.status ? "（HTTP " + response.status + "）" : "";
-            throw new Error("模型服务请求失败" + status + "。请检查接口地址、模型名和服务状态。");
+            var responseError = new Error("模型服务请求失败" + status + "。请检查接口地址、模型名和服务状态。");
+            if (Number(response && response.status) === 429) responseError.code = "MODEL_RATE_LIMITED";
+            throw responseError;
         }
         var payload;
         try {
@@ -1220,7 +1222,65 @@
         return value;
     }
 
+    function scheduleBatches(items, concurrency, worker, signal, onFailure) {
+        var limit = concurrency === 2 ? 2 : 1;
+        return new Promise(function (resolve, reject) {
+            var next = 0, active = 0, completed = 0, stopped = false;
+            var results = new Array(items.length), attempts = [], retries = [];
+            function finish(error) {
+                if (stopped) return;
+                stopped = true;
+                if (signal && signal.removeEventListener) signal.removeEventListener("abort", cancel);
+                if (error) {
+                    // Preserve the worker error even if a cancellation hook fails.
+                    try { if (typeof onFailure === "function") onFailure(error); }
+                    catch (callbackError) { /* The original failure remains authoritative. */ }
+                    reject(error);
+                } else resolve(results);
+            }
+            function cancel() {
+                var error = new Error("已取消校对。");
+                error.name = "AbortError";
+                finish(error);
+            }
+            function pump() {
+                if (stopped) return;
+                if (completed === items.length) return finish();
+                // Drain existing requests before a rate-limited batch is retried.
+                if (retries.length && active) return;
+                while (!stopped && active < limit && (retries.length || next < items.length)) {
+                    var index = retries.length ? retries.shift() : next++;
+                    active++;
+                    launch(index);
+                }
+            }
+            function launch(index) {
+                attempts[index] = (attempts[index] || 0) + 1;
+                Promise.resolve().then(function () {
+                    if (!stopped) return worker(items[index], index, attempts[index], limit);
+                }).then(function (value) {
+                    if (stopped) return;
+                    active--; completed++; results[index] = value;
+                    pump();
+                }, function (error) {
+                    if (stopped) return;
+                    active--;
+                    if (error && error.code === "MODEL_RATE_LIMITED" && attempts[index] === 1) {
+                        limit = 1;
+                        retries.push(index);
+                        retries.sort(function (left, right) { return left - right; });
+                        pump();
+                    } else finish(error);
+                });
+            }
+            if (signal && signal.aborted) return cancel();
+            if (signal && signal.addEventListener) signal.addEventListener("abort", cancel, { once: true });
+            pump();
+        });
+    }
+
     root.WpsProofreadingCore = {
+        scheduleBatches: scheduleBatches,
         maxSelectionCharacters: MAX_SELECTION_CHARACTERS,
         maxDocumentCharacters: MAX_DOCUMENT_CHARACTERS,
         defaultBatchCharacters: DEFAULT_BATCH_CHARACTERS,

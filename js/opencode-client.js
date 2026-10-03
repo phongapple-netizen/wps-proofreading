@@ -14,6 +14,11 @@
         return String(value == null ? "" : value);
     }
 
+    function timingClock() {
+        return root.performance && typeof root.performance.now === "function"
+            ? root.performance.now() : Date.now();
+    }
+
     function createError(message, code) {
         var error = new Error(message);
         if (code) error.code = code;
@@ -162,6 +167,9 @@
 
     async function responseJson(response, operation, signal, timeoutMs) {
         if (!responseIsOk(response)) {
+            if (Number(response && response.status) === 429) {
+                throw createError("OpenCode 模型请求受限（HTTP 429），请稍后重试。", "MODEL_RATE_LIMITED");
+            }
             if (Number(response && response.status) === 401) {
                 throw createError("OpenCode 服务密码缺失或不正确。请在插件设置中填写 OpenCode 服务密码。", "HTTP_ERROR");
             }
@@ -423,6 +431,9 @@
         var promise = new Promise(function (resolve, reject) {
             async function poll() {
                 if (stopped) return;
+                var timing = options.timing;
+                var started = timing ? timingClock() : 0;
+                if (timing) timing.pollCount = (timing.pollCount || 0) + 1;
                 try {
                     var response = await safeFetch(fetcher, urlFor(endpoint, "/permission"),
                         requestInit(options, "GET", undefined, false), signal,
@@ -438,6 +449,8 @@
                     timer = setTimeout(poll, PERMISSION_POLL_MS);
                 } catch (error) {
                     if (!stopped) reject(error);
+                } finally {
+                    if (timing) timing.pollMs = (timing.pollMs || 0) + timingClock() - started;
                 }
             }
             timer = setTimeout(poll, PERMISSION_POLL_MS);
@@ -527,6 +540,13 @@
 
         var sessionId = "";
         var completed = false;
+        var timing = options.timing;
+        var stage = "createSessionMs";
+        var stageStarted = timing ? timingClock() : 0;
+        if (timing) {
+            timing.createSessionMs = 0; timing.messageMs = 0; timing.cleanupMs = 0;
+            timing.pollCount = 0; timing.pollMs = 0;
+        }
         try {
             // Keep OpenCode's standard tool definitions for model compatibility.
             // Every action requires approval; this client never grants approval.
@@ -559,6 +579,11 @@
                     : PROOFREADING_SYSTEM_PROMPT,
                 parts: [{ type: "text", text: promptText }]
             };
+            if (timing) {
+                timing.createSessionMs = timingClock() - stageStarted;
+                stage = "messageMs";
+                stageStarted = timingClock();
+            }
             var messagePayload = await requestMessage(fetcher, options, endpoint, sessionId, body, signal);
             var modelError = messageError(messagePayload);
             if (modelError) throw modelError;
@@ -573,7 +598,10 @@
             if (error && error.code) throw error;
             throw createError("OpenCode 校对请求失败，请检查服务状态和模型设置。", "REQUEST_ERROR");
         } finally {
+            if (timing) timing[stage] = timingClock() - stageStarted;
+            var cleanupStarted = timing ? timingClock() : 0;
             await cleanupSession(fetcher, options, endpoint, sessionId, !completed);
+            if (timing) timing.cleanupMs = timingClock() - cleanupStarted;
         }
     }
 

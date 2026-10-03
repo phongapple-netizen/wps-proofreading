@@ -953,15 +953,44 @@
     async function requestProofreadingModel(options, prompt) {
         if (options.provider === "opencode") {
             if (!root.WpsOpenCodeClient) throw new Error("OpenCode 客户端模块没有加载。");
-            await ensureOpenCodeConnection(options);
+            var connectionStarted = options.timing ? actionClock() : 0;
+            try { await ensureOpenCodeConnection(options); }
+            finally { if (options.timing) options.timing.connectionMs = actionClock() - connectionStarted; }
             return root.WpsOpenCodeClient.request({
                 endpoint: options.endpoint,
                 model: options.model,
                 password: options.apiKey,
-                signal: options.signal
+                signal: options.signal,
+                timing: options.timing
             }, prompt, root.fetch);
         }
         return root.WpsProofreadingCore.requestModel(options, prompt);
+    }
+
+    function requestOutcome(error) {
+        if (!error) return 0;
+        if (error.name === "AbortError" || error.code === "ABORTED") return 2;
+        return error.code === "MODEL_RATE_LIMITED" ? 3 : 1;
+    }
+
+    async function timedProofreadingRequest(options, prompt, fields) {
+        var timing = root.WpsProofreadingTiming;
+        var token = options.timingLogs && timing ? timing.start(Object.assign({ kind: 1 }, fields)) : null;
+        var metrics = token ? {} : null;
+        var started = token ? timing.clock() : 0;
+        var outcome = 0;
+        try {
+            return await requestProofreadingModel(Object.assign({}, options, { timing: metrics }), prompt);
+        } catch (error) {
+            outcome = requestOutcome(error);
+            throw error;
+        } finally {
+            if (token) {
+                if (options.provider !== "opencode") metrics.messageMs = timing.clock() - started;
+                metrics.outcome = outcome;
+                timing.finish(token, metrics);
+            }
+        }
     }
 
     async function ensureOpenCodeConnection(options) {
@@ -994,7 +1023,7 @@
 
     function ensureRunActive(run) {
         syncDocumentSession();
-        if (!isDocumentRunCurrent(run) || run.cancelled ||
+        if (!isDocumentRunCurrent(run) || run.cancelled || run.failed ||
             (run.controller && run.controller.signal.aborted) || documentKey(run.document) !== run.key) {
             var error = new Error("已取消校对。");
             error.name = "AbortError";
@@ -1315,6 +1344,8 @@
         var snapshot = null;
         var collected = [];
         var discarded = false;
+        var timing = root.WpsProofreadingTiming;
+        var runTiming = null, batchTimings = [], runOutcome = 1;
         try {
             if (root.WpsRulesReady && typeof root.WpsRulesReady.then === "function") {
                 await root.WpsRulesReady;
@@ -1328,6 +1359,10 @@
             if (!snapshot.documentKey) throw new Error("无法确认当前文档身份，请重新打开文档后重试。");
             var options = validateModelOptions(modelOptions());
             options.signal = runController ? runController.signal : undefined;
+            var runSettings = currentSettings();
+            options.timingLogs = runSettings.timingLogs === true;
+            var concurrency = runSettings.concurrency === 1 ? 1 : 2;
+            if (timing) timing.setEnabled(options.timingLogs);
             var providerLabel = providerDisplayName(options.provider);
             var scopeLabel = snapshot.mode === "full" ? "全文" : "选区";
             if (snapshot.mode === "full") {
@@ -1366,6 +1401,8 @@
             runCounter += 1;
             run.runId = runCounter;
             run.started = true;
+            if (options.timingLogs && timing) runTiming = timing.start({ kind: 3, run: run.runId,
+                characters: snapshot.selectedText.length, concurrency: concurrency });
             var deep = isDeepMode();
             if (typeof root.beginProofreadingRun === "function") {
                 root.beginProofreadingRun();
@@ -1410,52 +1447,74 @@
             var consistencyCompleted = false;
             var consistencyWarning = "";
 
-            for (var index = 0; index < batches.length; index += 1) {
-                ensureRunActive(run);
-                if (runController && runController.signal && runController.signal.aborted) {
-                    var abortError = new Error("已取消校对。");
-                    abortError.name = "AbortError";
-                    throw abortError;
+            var bodyResults = new Array(batches.length);
+            await root.WpsProofreadingCore.scheduleBatches(batches, concurrency, async function (batch, index, attempt, limit) {
+                var fields = { run: run.runId, stage: 1, batch: index + 1, attempt: attempt,
+                    characters: batchCharacterCount(batch), concurrency: limit };
+                if (options.timingLogs && timing && !batchTimings[index]) {
+                    batchTimings[index] = timing.start(Object.assign({ kind: 2 }, fields));
                 }
-                var currentAiReviewContext = batchAiReviewContext(
-                    batches[index], aiReviewCandidates, snapshot.start);
-                var prompt = root.WpsProofreadingCore.buildPrompt(batches[index], {
-                    deep: deep,
-                    ruleContext: batchRuleContext(batches[index], localRuleIssues, snapshot.start),
-                    aiReviewContext: currentAiReviewContext
-                });
-                var response = await requestProofreadingModel(options, prompt);
-                ensureRunActive(run);
-                if (!documentSnapshotMatches(run.document, snapshot)) {
-                    currentSnapshot = null;
-                    currentIssues = [];
-                    discarded = true;
+                var batchOutcome = 0;
+                try {
+                    ensureRunActive(run);
+                    if (runController && runController.signal && runController.signal.aborted) {
+                        var abortError = new Error("已取消校对。");
+                        abortError.name = "AbortError";
+                        throw abortError;
+                    }
+                    var currentAiReviewContext = batchAiReviewContext(
+                        batches[index], aiReviewCandidates, snapshot.start);
+                    var prompt = root.WpsProofreadingCore.buildPrompt(batches[index], {
+                        deep: deep,
+                        ruleContext: batchRuleContext(batches[index], localRuleIssues, snapshot.start),
+                        aiReviewContext: currentAiReviewContext
+                    });
+                    var response = await timedProofreadingRequest(options, prompt, fields);
+                    ensureRunActive(run);
+                    if (!documentSnapshotMatches(run.document, snapshot)) {
+                        currentSnapshot = null;
+                        currentIssues = [];
+                        discarded = true;
+                        viewIssues();
+                        throw new Error("校对期间" + scopeLabel + "内容已变化，结果已丢弃。请重新校对。");
+                    }
+                    var parsed = root.WpsProofreadingCore.parseIssues(response);
+                    var mappedFirstPass = root.WpsProofreadingCore.mapIssuesToRanges(
+                        batches[index], parsed, snapshot.start);
+                    bodyResults[index] = annotateAiReviewIssues(mappedFirstPass, aiReviewCandidates);
+                    collected = localRuleIssues.slice();
+                    bodyResults.forEach(function (results) { if (results) collected = collected.concat(results); });
+                    currentIssues = mergeMappedIssues(collected, run.runId);
+                    currentSnapshot = snapshot;
                     viewIssues();
-                    throw new Error("校对期间" + scopeLabel + "内容已变化，结果已丢弃。请重新校对。");
+                    completedFirstPassCharacters += batchCharacterCount(batches[index]);
+                    var firstPassPercent = totalFirstPassCharacters > 0
+                        ? Math.round((completedFirstPassCharacters / totalFirstPassCharacters) *
+                            firstPassProgressCeiling)
+                        : firstPassProgressCeiling;
+                    var batchLabel = "正文校对";
+                    if (batches.length > 1) {
+                        batchLabel += " · 第 " + (index + 1) + "/" + batches.length + " 批";
+                    }
+                    batchLabel += " · 已处理 " + completedFirstPassCharacters +
+                        "/" + totalFirstPassCharacters + " 字";
+                    setStatus("AI 校对 " + firstPassPercent + "% · " + resultCountLabel(), "working");
+                    reportProgress(firstPassPercent, "AI 校对 " + firstPassPercent + "% · " +
+                        resultCountLabel() + " · " + batchLabel);
+                    return bodyResults[index];
+                } catch (error) {
+                    batchOutcome = requestOutcome(error);
+                    throw error;
+                } finally {
+                    if (timing && !(batchOutcome === 3 && attempt === 1)) {
+                        timing.finish(batchTimings[index], { outcome: batchOutcome, attempt: attempt, concurrency: limit });
+                        batchTimings[index] = null;
+                    }
                 }
-                var parsed = root.WpsProofreadingCore.parseIssues(response);
-                var mappedFirstPass = root.WpsProofreadingCore.mapIssuesToRanges(
-                    batches[index], parsed, snapshot.start);
-                collected = collected.concat(
-                    annotateAiReviewIssues(mappedFirstPass, aiReviewCandidates));
-                currentIssues = mergeMappedIssues(collected, run.runId);
-                currentSnapshot = snapshot;
-                viewIssues();
-                completedFirstPassCharacters += batchCharacterCount(batches[index]);
-                var firstPassPercent = totalFirstPassCharacters > 0
-                    ? Math.round((completedFirstPassCharacters / totalFirstPassCharacters) *
-                        firstPassProgressCeiling)
-                    : firstPassProgressCeiling;
-                var batchLabel = "正文校对";
-                if (batches.length > 1) {
-                    batchLabel += " · 第 " + (index + 1) + "/" + batches.length + " 批";
-                }
-                batchLabel += " · 已处理 " + completedFirstPassCharacters +
-                    "/" + totalFirstPassCharacters + " 字";
-                setStatus("AI 校对 " + firstPassPercent + "% · " + resultCountLabel(), "working");
-                reportProgress(firstPassPercent, "AI 校对 " + firstPassPercent + "% · " +
-                    resultCountLabel() + " · " + batchLabel);
-            }
+            }, options.signal, function (error) {
+                if (requestOutcome(error) !== 2) run.failed = true;
+                if (runController) runController.abort();
+            });
 
             if (runConsistencyPass) {
                 if (runController && runController.signal && runController.signal.aborted) {
@@ -1470,30 +1529,42 @@
                         ensureRunActive(run);
                         var consistencyBatch = consistencyBatches[candidateBatchIndex];
                         var consistencyPrompt = root.WpsProofreadingCore.buildConsistencyPrompt(consistencyBatch);
-                        var consistencyResponse = await requestProofreadingModel(options, consistencyPrompt);
-                        ensureRunActive(run);
-                        if (!documentSnapshotMatches(run.document, snapshot)) {
-                            currentSnapshot = null;
-                            currentIssues = [];
-                            discarded = true;
+                        var consistencyFields = { run: run.runId, stage: 2, batch: candidateBatchIndex + 1,
+                            attempt: 1, characters: consistencyPrompt.length, concurrency: 1 };
+                        var consistencyTiming = options.timingLogs && timing
+                            ? timing.start(Object.assign({ kind: 2 }, consistencyFields)) : null;
+                        var consistencyOutcome = 0;
+                        try {
+                            var consistencyResponse = await timedProofreadingRequest(options, consistencyPrompt, consistencyFields);
+                            ensureRunActive(run);
+                            if (!documentSnapshotMatches(run.document, snapshot)) {
+                                currentSnapshot = null;
+                                currentIssues = [];
+                                discarded = true;
+                                viewIssues();
+                                throw new Error("一致性复核期间" + scopeLabel + "内容已变化，结果已丢弃。请重新校对。");
+                            }
+                            var consistencyParsed = root.WpsProofreadingCore.filterConsistencyIssuesToCandidates(
+                                root.WpsProofreadingCore.parseConsistencyIssues(consistencyResponse), consistencyBatch);
+                            collected = collected.concat(
+                                root.WpsProofreadingCore.mapIssuesToRanges(
+                                    paragraphs, consistencyParsed, snapshot.start).map(function (issue) {
+                                        return Object.assign({ origin: "ai" }, issue);
+                                    }));
+                            currentIssues = mergeMappedIssues(collected, run.runId);
+                            currentSnapshot = snapshot;
                             viewIssues();
-                            throw new Error("一致性复核期间" + scopeLabel + "内容已变化，结果已丢弃。请重新校对。");
+                            setStatus("正在进行全文一致性复核 · " + resultCountLabel(), "working");
+                            reportProgress(firstPassProgressCeiling + Math.round(
+                                ((candidateBatchIndex + 1) / consistencyBatches.length) * (100 - firstPassProgressCeiling)),
+                                "全文一致性复核 · " + resultCountLabel() + " · 第 " +
+                                (candidateBatchIndex + 1) + "/" + consistencyBatches.length + " 批候选组");
+                        } catch (error) {
+                            consistencyOutcome = requestOutcome(error);
+                            throw error;
+                        } finally {
+                            if (timing) timing.finish(consistencyTiming, { outcome: consistencyOutcome });
                         }
-                        var consistencyParsed = root.WpsProofreadingCore.filterConsistencyIssuesToCandidates(
-                            root.WpsProofreadingCore.parseConsistencyIssues(consistencyResponse), consistencyBatch);
-                        collected = collected.concat(
-                            root.WpsProofreadingCore.mapIssuesToRanges(
-                                paragraphs, consistencyParsed, snapshot.start).map(function (issue) {
-                                    return Object.assign({ origin: "ai" }, issue);
-                                }));
-                        currentIssues = mergeMappedIssues(collected, run.runId);
-                        currentSnapshot = snapshot;
-                        viewIssues();
-                        setStatus("正在进行全文一致性复核 · " + resultCountLabel(), "working");
-                        reportProgress(firstPassProgressCeiling + Math.round(
-                            ((candidateBatchIndex + 1) / consistencyBatches.length) * (100 - firstPassProgressCeiling)),
-                            "全文一致性复核 · " + resultCountLabel() + " · 第 " +
-                            (candidateBatchIndex + 1) + "/" + consistencyBatches.length + " 批候选组");
                     }
                     consistencyCompleted = true;
                     reportProgress(100, "全文一致性复核完成");
@@ -1536,6 +1607,7 @@
                     (consistencyWarning ? " " + consistencyWarning : "")
                 : "校对完成 · 未发现明显问题" + consistencyText + "。" +
                     (consistencyWarning ? " " + consistencyWarning : ""), finalTone);
+            runOutcome = 0;
             return {
                 accepted: true,
                 issues: currentIssues.length,
@@ -1545,11 +1617,12 @@
                 consistencyWarning: consistencyWarning
             };
         } catch (error) {
+            runOutcome = requestOutcome(error);
             syncDocumentSession();
             if (!isDocumentRunCurrent(run)) {
                 return { accepted: false, reason: "cancelled" };
             }
-            var cancelled = run.cancelled || (runController && runController.signal && runController.signal.aborted);
+            var cancelled = run.cancelled || (!run.failed && runController && runController.signal && runController.signal.aborted);
             if (run.started && snapshot && !documentSnapshotMatches(run.document, snapshot)) {
                 currentSnapshot = null;
                 currentIssues = [];
@@ -1573,6 +1646,10 @@
                 : (error && error.message ? error.message : "校对失败，请重试。"), "error");
             return { accepted: false, reason: "error" };
         } finally {
+            if (timing) {
+                batchTimings.forEach(function (token) { timing.finish(token, { outcome: runOutcome }); });
+                timing.finish(runTiming, { outcome: runOutcome });
+            }
             syncDocumentSession();
             if (isDocumentRunCurrent(run)) {
                 run.waiting = false;

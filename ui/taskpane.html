@@ -342,6 +342,30 @@
                     </div>
                     <p id="provider-help" class="field-note">选择 OpenCode 后会自动检测、启动服务并读取模型。</p>
                     <p id="model-detection-result" class="model-detection-result" role="status" aria-live="polite"></p>
+                    <label class="field-label" for="proofreading-concurrency">校对并发数</label>
+                    <select id="proofreading-concurrency" class="field-control">
+                        <option value="1">1 · 串行</option>
+                        <option value="2" selected>2 · 同时校对两批</option>
+                    </select>
+                    <p class="field-note">仅作用于首轮校对，下次运行生效。一致性复核仍逐批进行；请求受限时，本次运行自动降为串行并重试一次。</p>
+                    <div id="proofreading-diagnostics" class="opencode-start-guide">
+                        <button id="proofreading-diagnostics-toggle" class="button button-text" type="button" aria-expanded="false">高级 / 故障排查 · 校对性能</button>
+                        <div id="proofreading-diagnostics-content" hidden>
+                            <label class="settings-option" for="proofreading-timing-enabled">
+                                <input id="proofreading-timing-enabled" type="checkbox"><span>记录校对耗时</span>
+                            </label>
+                            <p class="field-note">默认关闭。开启后只在当前面板内存保留最近 500 条数值记录，不含正文、提示词或凭据；重载面板后清除。</p>
+                            <p class="field-note">kind：1 请求、2 批次、3 整次运行；stage：1 首轮、2 一致性复核；outcome：0 成功、1 失败、2 取消、3 请求受限。审批轮询与模型等待重叠，耗时不可相加。</p>
+                            <label class="field-label" for="proofreading-timing-log">耗时记录（毫秒）</label>
+                            <textarea id="proofreading-timing-log" class="field-control" rows="8" readonly></textarea>
+                            <div class="connection-row">
+                                <button id="refresh-proofreading-timing" class="button button-secondary" type="button">刷新记录</button>
+                                <button id="copy-proofreading-timing" class="button button-secondary" type="button">复制记录</button>
+                                <button id="clear-proofreading-timing" class="button button-text" type="button">清空</button>
+                            </div>
+                            <p id="proofreading-timing-status" class="field-note" role="status" aria-live="polite"></p>
+                        </div>
+                    </div>
                     <p class="field-note">服务类型和模型名保存在本机，OpenCode 与 Ollama 本机地址也可保存；API 密钥和服务密码不会保存。</p>
                     <p id="app-version" class="field-note" aria-label="插件版本">WPS 文本校改 · 版本读取中…</p>
                 </div>
@@ -350,6 +374,7 @@
 
     <script type="text/javascript" src="../js/wps-api.js"></script>
     <script type="text/javascript" src="../js/settings-store.js"></script>
+    <script type="text/javascript" src="../js/proofreading-timing.js"></script>
     <script type="text/javascript" src="../js/rules-center.js"></script>
     <script type="text/javascript" src="../js/proofreading-core.js"></script>
     <script type="text/javascript" src="../js/opencode-client.js"></script>

@@ -24,9 +24,14 @@ function harness(options = {}) {
     'model-api-key-row', 'model-endpoint-label', 'model-name-label', 'model-api-key-label',
     'provider-help', 'opencode-start-guide', 'opencode-service-state', 'opencode-service-message',
     'opencode-retry', 'opencode-install-help', 'opencode-details', 'opencode-guide-toggle',
-    'opencode-guide-content', 'refresh-models', 'model-summary', 'connection-status', 'model-detection-result']
+    'opencode-guide-content', 'refresh-models', 'model-summary', 'connection-status', 'model-detection-result',
+    'proofreading-concurrency', 'proofreading-timing-enabled', 'proofreading-diagnostics',
+    'proofreading-diagnostics-toggle', 'proofreading-diagnostics-content',
+    'proofreading-timing-log', 'copy-proofreading-timing', 'clear-proofreading-timing',
+    'refresh-proofreading-timing', 'proofreading-timing-status']
     .forEach((id) => { elements[id] = field(); });
   elements['opencode-guide-content'].hidden = true;
+  elements['proofreading-diagnostics-content'].hidden = true;
   const storage = new Map();
   const ready = [];
   const intervals = [];
@@ -43,7 +48,7 @@ function harness(options = {}) {
     win.fetch = options.nativeFetch;
   }
   const context = vm.createContext({ window: win, URL, setTimeout, clearTimeout });
-  ['settings-store.js', 'proofreading-integration.js', 'taskpane.js'].forEach((file) => {
+  ['settings-store.js', 'proofreading-timing.js', 'proofreading-integration.js', 'taskpane.js'].forEach((file) => {
     vm.runInContext(fs.readFileSync(path.join(root, 'js', file), 'utf8'), context, { filename: file });
   });
   win.document.readyState = 'complete';
@@ -51,6 +56,53 @@ function harness(options = {}) {
   return { win, elements, storage, tick: () => intervals.forEach((callback) => callback()),
     change(id, value) { elements[id].value = value; elements[id].fire('change'); } };
 }
+
+test('performance settings and numeric logs are accessible and copyable for every provider', async () => {
+  const h = harness();
+  assert.equal(h.elements['proofreading-concurrency'].value, '2');
+  assert.equal(h.elements['proofreading-timing-enabled'].checked, false);
+  assert.equal(h.elements['proofreading-diagnostics-content'].hidden, true);
+  h.elements['proofreading-diagnostics-toggle'].fire('click');
+  assert.equal(h.elements['proofreading-diagnostics-content'].hidden, false);
+  h.change('proofreading-concurrency', '1');
+  assert.equal(h.win.WpsSettingsStore.loadSettings().concurrency, 1);
+  h.elements['proofreading-timing-enabled'].checked = true;
+  h.elements['proofreading-timing-enabled'].fire('change');
+  assert.equal(h.win.WpsSettingsStore.loadSettings().timingLogs, true);
+  for (const provider of ['opencode', 'ollama', 'openai']) {
+    h.change('model-provider', provider);
+    assert.equal(h.elements['proofreading-diagnostics'].hidden, false);
+    const token = h.win.WpsProofreadingTiming.start({ kind: 1, batch: 1, characters: 30 });
+    h.win.WpsProofreadingTiming.finish(token, { messageMs: 25 });
+  }
+  const entries = JSON.parse(h.elements['proofreading-timing-log'].value);
+  assert.equal(entries.length, 3);
+  let copied;
+  h.win.navigator = { clipboard: { writeText: async value => { copied = value; } } };
+  h.elements['copy-proofreading-timing'].fire('click'); await new Promise(setImmediate);
+  assert.deepEqual(JSON.parse(copied), entries);
+  assert.match(h.elements['proofreading-timing-status'].textContent, /已复制/);
+  h.elements['clear-proofreading-timing'].fire('click');
+  assert.equal(h.elements['proofreading-timing-log'].value, '[]');
+  h.elements['proofreading-timing-enabled'].checked = false;
+  h.elements['proofreading-timing-enabled'].fire('change');
+  assert.equal(h.win.WpsProofreadingTiming.start({ kind: 1 }), null);
+});
+
+test('log copying falls back to selection and an actionable message on older clipboard hosts', async () => {
+  const h = harness();
+  let selected = 0;
+  const field = h.elements['proofreading-timing-log'];
+  field.focus = () => {};
+  field.select = () => { selected++; };
+  h.elements['proofreading-diagnostics-toggle'].fire('click');
+  h.win.document.execCommand = command => { assert.equal(command, 'copy'); return true; };
+  h.elements['copy-proofreading-timing'].fire('click'); await new Promise(setImmediate);
+  assert.equal(selected, 1); assert.match(h.elements['proofreading-timing-status'].textContent, /已复制/);
+  h.win.document.execCommand = () => false;
+  h.elements['copy-proofreading-timing'].fire('click'); await new Promise(setImmediate);
+  assert.match(h.elements['proofreading-timing-status'].textContent, /手动复制/);
+});
 
 function nativeResponse(state, version = '') {
   return { ok: true, async json() { return { state, found: state !== 'missing', version, managed: state === 'ready' }; } };
