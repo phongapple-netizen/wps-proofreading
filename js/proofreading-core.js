@@ -12,6 +12,7 @@
     var MAX_SELECTION_CHARACTERS = 20000;
     var MAX_DOCUMENT_CHARACTERS = 80000;
     var DEFAULT_BATCH_CHARACTERS = 2500;
+    var FIRST_BATCH_CHARACTERS = 1000;
     var MAX_CONSISTENCY_INDEX_CHARACTERS = 16000;
     var MAX_GLOBAL_CANDIDATES_PER_REQUEST = 16;
     var MAX_GLOBAL_CANDIDATE_CHARACTERS = 12000;
@@ -94,8 +95,9 @@
         return segments;
     }
 
-    function batchParagraphs(paragraphs, maxChars) {
+    function batchParagraphs(paragraphs, maxChars, firstBatchChars) {
         var limit = Number(maxChars) > 0 ? Number(maxChars) : DEFAULT_BATCH_CHARACTERS;
+        var firstLimit = Number(firstBatchChars) > 0 ? Math.min(Number(firstBatchChars), limit) : limit;
         var batches = [];
         var current = [];
         var size = 0;
@@ -103,7 +105,7 @@
 
         segments.forEach(function (paragraph) {
             var length = String(paragraph.text || "").length;
-            if (current.length && size + length > limit) {
+            if (current.length && size + length > (batches.length ? limit : firstLimit)) {
                 batches.push(current);
                 current = [];
                 size = 0;
@@ -122,6 +124,49 @@
             if (!key || seen[key]) return false;
             seen[key] = true;
             return true;
+        });
+    }
+
+    function scheduleBatches(items, concurrency, worker, signal, onFailure) {
+        var limit = concurrency === 2 ? 2 : 1;
+        return new Promise(function (resolve, reject) {
+            var next = 0, active = 0, completed = 0, stopped = false;
+            function finish(error) {
+                if (stopped) return;
+                stopped = true;
+                if (signal && signal.removeEventListener) signal.removeEventListener("abort", cancel);
+                if (error) reject(error); else resolve();
+            }
+            function cancel() {
+                var error = new Error("已取消校对。");
+                error.name = "AbortError";
+                finish(error);
+            }
+            function pump() {
+                if (stopped) return;
+                if (completed === items.length) return finish();
+                while (!stopped && active < limit && next < items.length) {
+                    var index = next++;
+                    active++;
+                    launch(index);
+                }
+            }
+            function launch(index) {
+                Promise.resolve().then(function () {
+                    if (stopped) return;
+                    return worker(items[index], index);
+                }).then(function () {
+                    active--; completed++;
+                    pump();
+                }, function (error) {
+                    if (stopped) return;
+                    finish(error);
+                    if (typeof onFailure === "function") onFailure(error);
+                });
+            }
+            if (signal && signal.aborted) return cancel();
+            if (signal && signal.addEventListener) signal.addEventListener("abort", cancel, { once: true });
+            pump();
         });
     }
 
@@ -1224,10 +1269,12 @@
         maxSelectionCharacters: MAX_SELECTION_CHARACTERS,
         maxDocumentCharacters: MAX_DOCUMENT_CHARACTERS,
         defaultBatchCharacters: DEFAULT_BATCH_CHARACTERS,
+        firstBatchCharacters: FIRST_BATCH_CHARACTERS,
         maxConsistencyIndexCharacters: MAX_CONSISTENCY_INDEX_CHARACTERS,
         splitIntoParagraphs: splitIntoParagraphs,
         segmentParagraphs: segmentParagraphs,
         batchParagraphs: batchParagraphs,
+        scheduleBatches: scheduleBatches,
         buildConsistencyIndex: buildConsistencyIndex,
         buildConsistencyIndexes: buildConsistencyIndexes,
         buildGlobalConsistencyCandidates: buildGlobalConsistencyCandidates,

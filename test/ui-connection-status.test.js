@@ -24,10 +24,12 @@ function harness(options = {}) {
     'model-api-key-row', 'model-endpoint-label', 'model-name-label', 'model-api-key-label',
     'provider-help', 'opencode-start-guide', 'opencode-service-state', 'opencode-service-message',
     'opencode-retry', 'opencode-install-help', 'opencode-details', 'opencode-guide-toggle',
-    'opencode-guide-content', 'refresh-models', 'model-summary', 'connection-status', 'model-detection-result']
+    'opencode-guide-content', 'refresh-models', 'model-summary', 'connection-status', 'model-detection-result',
+    'rules-only', 'deep-enhance-control', 'deep-enhance', 'proofreading-mode-hint']
     .forEach((id) => { elements[id] = field(); });
   elements['opencode-guide-content'].hidden = true;
   const storage = new Map();
+  if (options.seed) storage.set('wps_text_proofreading_model_settings_v1', JSON.stringify(options.seed));
   const ready = [];
   const intervals = [];
   const win = {
@@ -55,6 +57,50 @@ function harness(options = {}) {
 function nativeResponse(state, version = '') {
   return { ok: true, async json() { return { state, found: state !== 'missing', version, managed: state === 'ready' }; } };
 }
+
+test('rules-only setting persists, preserves models and deep mode, and updates the panel', () => {
+  const h = harness();
+  assert.equal(h.win.WpsSettingsStore.defaultSettings().rulesOnly, false);
+  h.win.WpsSettingsStore.updateSettings({ deep: true, profile: { model: 'saved/model' } });
+  h.win.syncSettingsForm();
+  h.elements['rules-only'].checked = true;
+  h.elements['rules-only'].fire('change');
+  const settings = h.win.WpsSettingsStore.loadSettings();
+  assert.equal(settings.rulesOnly, true);
+  assert.equal(settings.deep, true);
+  assert.equal(settings.profiles.opencode.model, 'saved/model');
+  assert.equal(h.elements['deep-enhance-control'].hidden, true);
+  assert.match(h.elements['proofreading-mode-hint'].textContent, /仅规则/);
+  assert.match(h.elements['connection-status'].textContent, /无需连接模型/);
+  h.win.setModelConnectionStatus('late detection failed', 'error');
+  assert.match(h.elements['connection-status'].textContent, /无需连接模型/);
+  h.elements['rules-only'].checked = false;
+  h.elements['rules-only'].fire('change');
+  assert.equal(h.win.WpsSettingsStore.loadSettings().rulesOnly, false);
+  assert.equal(h.elements['deep-enhance-control'].hidden, false);
+  assert.equal(h.elements['deep-enhance'].checked, true);
+  assert.match(h.elements['proofreading-mode-hint'].textContent, /模型/);
+  const reloaded = harness({ seed: settings });
+  assert.equal(reloaded.elements['rules-only'].checked, true);
+  assert.equal(reloaded.elements['deep-enhance-control'].hidden, true);
+});
+
+test('rules-only startup never starts or detects OpenCode', async () => {
+  const calls = [];
+  const h = harness({ seed: { provider: 'opencode', rulesOnly: true }, nativeFetch: async (url) => {
+    calls.push(url);
+    return nativeResponse('stopped');
+  } });
+  await new Promise(setImmediate);
+  h.tick();
+  assert.deepEqual(calls, []);
+  assert.match(h.elements['connection-status'].textContent, /仅规则校对已就绪/);
+  assert.match(h.elements['model-summary'].textContent, /仅用本地规则/);
+  h.win.setAppMode('rewrite');
+  assert.doesNotMatch(h.elements['connection-status'].textContent, /无需连接模型/);
+  h.win.setAppMode('proofread');
+  assert.match(h.elements['connection-status'].textContent, /无需连接模型/);
+});
 
 test('OpenCode selection starts a stopped service and then enumerates models', async () => {
   const calls = [];

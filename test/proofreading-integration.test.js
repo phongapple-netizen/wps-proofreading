@@ -50,10 +50,9 @@ function createHarness(options = {}) {
     const selectedText = options.selectedText || "本段有错字。";
     const prefix = options.prefix === undefined ? "机密前文。" : options.prefix;
     const suffix = options.suffix === undefined ? "机密后文。" : options.suffix;
-    const start = prefix.length;
     let documentText = prefix + selectedText + suffix;
     let trackRevisions = options.trackRevisions;
-    const revisionGaps = [];
+    const revisionGaps = (options.revisionGaps || []).map((gap) => Object.assign({}, gap));
     function textToCoordinate(index) {
         return index + revisionGaps.reduce((total, gap) =>
             total + (index >= gap.index ? gap.size : 0), 0);
@@ -68,6 +67,7 @@ function createHarness(options = {}) {
         }
         return low;
     }
+    const start = textToCoordinate(prefix.length);
     let selectedRange = null;
     let contentReads = 0;
     const rangeReads = [];
@@ -109,6 +109,7 @@ function createHarness(options = {}) {
                 Start: rangeStart,
                 End: rangeEnd,
                 get Text() {
+                    if (options.onRead) options.onRead(range.Start, range.End);
                     rangeReads.push([range.Start, range.End]);
                     return documentText.slice(coordinateToText(range.Start), coordinateToText(range.End));
                 },
@@ -116,6 +117,7 @@ function createHarness(options = {}) {
                     const startIndex = coordinateToText(range.Start);
                     const endIndex = coordinateToText(range.End);
                     const replacement = String(value);
+                    if (options.beforeWrite) options.beforeWrite({ start: range.Start, end: range.End, value: replacement });
                     documentText = documentText.slice(0, startIndex) + replacement + documentText.slice(endIndex);
                     if (trackRevisions === true || trackRevisions === "throws") {
                         const delta = replacement.length - (endIndex - startIndex);
@@ -125,7 +127,13 @@ function createHarness(options = {}) {
                         revisionGaps.push({ index: startIndex + replacement.length,
                             size: options.revisionPadding || 3 });
                     }
-                    if (options.onWrite) options.onWrite();
+                    if (options.onWrite) options.onWrite({
+                        start: range.Start,
+                        end: range.End,
+                        value: replacement,
+                        startIndex,
+                        endIndex
+                    });
                 },
                 Select() {
                     if (options.onSelect) options.onSelect(range.Start, range.End);
@@ -155,7 +163,7 @@ function createHarness(options = {}) {
     const selection = {
         get Range() {
             if (options.noSelection) return document.Range(0, 0);
-            return document.Range(start, start + selectedText.length);
+            return document.Range(start, textToCoordinate(prefix.length + selectedText.length));
         }
     };
     let renderedIssues = [];
@@ -205,8 +213,8 @@ function createHarness(options = {}) {
         fetch: async (url, requestOptions) => {
             const body = requestOptions && requestOptions.body ? JSON.parse(requestOptions.body) : null;
             requests.push({ url, options: requestOptions, body });
-            if (typeof options.waitForRequest === "function") await options.waitForRequest();
             const requestIndex = requests.length - 1;
+            if (typeof options.waitForRequest === "function") await options.waitForRequest();
             const responseIssues = typeof options.issuesForRequest === "function"
                 ? options.issuesForRequest({ url, options: requestOptions, body, requestIndex })
                 : modelIssues;
@@ -227,6 +235,7 @@ function createHarness(options = {}) {
         setProofreadingBusy: (value) => { busyValue = value === true; },
         setProofreadingActionBusy: (value) => { actionLocks.push(value); },
         WpsIssueActionPerf: options.perf === true,
+        WpsProofreadingPerf: options.runPerf === true,
         console: { info: (label, report) => { perfLogs.push({ label, report }); } },
         pushProofreadingRecord: (record) => { records.push(record); return true; },
         requestFullDocumentConfirmation: (details) => {
@@ -326,6 +335,61 @@ test("repeated successful model detection updates only connection status", async
     assert.equal(connection[connection.length - 1].tone, "success");
     assert.equal(connection[connection.length - 1].text, "OpenCode 已连接 · 1 个模型");
     assert.equal(harness.status.text, "校对完成，结果仍可处理");
+});
+
+test("run performance diagnostics use only fixed numeric fields and remain opt-in", async () => {
+    for (const enabled of [false, true]) {
+        const harness = createHarness({ runPerf: enabled, password: "private-run-key",
+            selectedText: "甲市综协办有错字。\n甲市综合协调办公室负责协调。" });
+        await harness.window.runProofreading();
+        const logs = harness.perfLogs.filter(log => log.label === "proofreading perf:");
+        assert.equal(logs.length, enabled ? 1 : 0);
+        if (!enabled) continue;
+        const report = logs[0].report;
+        const fields = ["snapshotCaptureMs", "localRulesMs", "firstResultMs", "firstPassMs",
+            "consistencyMs", "totalMs", "batchCount", "consistencyBatchCount", "batches", "consistencyBatches"];
+        assert.deepEqual(Object.keys(report).sort(), fields.sort());
+        function numericLeaves(value) {
+            if (typeof value === "number") return Number.isFinite(value) && value >= 0;
+            return value && typeof value === "object" && Object.values(value).every(numericLeaves);
+        }
+        assert.equal(numericLeaves(report), true);
+        assert.equal(report.batches.length, report.batchCount);
+        assert.equal(report.consistencyBatches.length, report.consistencyBatchCount);
+        for (const forbidden of [harness.selectedText, harness.prefix, "错别字", "private-run-key", "用词错误"]) {
+            assert.equal(JSON.stringify(report).includes(forbidden), false);
+        }
+    }
+});
+
+test("development benchmark measures independent and queued mock backends", {
+    skip: !process.env.WPS_PERF_REPORT
+}, async () => {
+    const reports = [];
+    for (const queued of [false, true]) {
+        for (const concurrency of (process.env.WPS_PERF_BASELINE ? [1] : [1, 2])) {
+            const harness = createHarness({ runPerf: true, issues: [],
+                selectedText: Array.from({ length: 24 }, (_, i) => "第" + i + "段错字。" + "甲".repeat(394)).join("\n") });
+            harness.window.performance = require("node:perf_hooks").performance;
+            harness.window.WpsProofreadingConcurrency = concurrency;
+            let queue = Promise.resolve();
+            harness.window.WpsProofreadingCore.requestModel = (_options, prompt) => {
+                const work = () => new Promise(resolve => setTimeout(() => resolve(JSON.stringify({ issues: [{
+                    category: "typo", paragraphIndex: JSON.parse(prompt.split("待校对段落：\n\n")[1])[0].paragraphIndex,
+                    original: "错字", suggestion: "正字", reason: "测试", confidence: 0.95, needsReview: false
+                }] })), 15 + prompt.length / 100));
+                if (!queued) return work();
+                queue = queue.then(work);
+                return queue;
+            };
+            assert.equal((await harness.window.runProofreading()).accepted, true);
+            const report = harness.perfLogs.find(log => log.label === "proofreading perf:").report;
+            reports.push({ mockBackend: queued ? "queued" : "independent", concurrency,
+                averageRequestMs: report.batches.reduce((sum, batch) => sum + batch.requestMs, 0) / report.batches.length,
+                ...report });
+        }
+    }
+    fs.writeFileSync(process.env.WPS_PERF_REPORT, JSON.stringify(reports, null, 2) + "\n");
 });
 
 test("repeated failed model detection updates only connection status", async () => {
@@ -1100,7 +1164,7 @@ test("tracked revisions handle shorter replacements and deletions without delta 
     }
 });
 
-test("tracked revisions mark ambiguous repeated context stale instead of selecting either copy", async () => {
+test("tracked revisions prove the correct repeated context from an unchanged scope", async () => {
     const repeated = "甲".repeat(50) + "错字" + "乙".repeat(50);
     const harness = createHarness({
         trackRevisions: true,
@@ -1116,13 +1180,16 @@ test("tracked revisions mark ambiguous repeated context stale instead of selecti
     await harness.window.runProofreading();
     const issues = harness.window.getWpsProofreadingState().issues;
     assert.equal(await harness.window.applyProofreadingIssue(issues[0].id), true);
-    assert.equal(harness.window.getWpsProofreadingState().issues[1].status, "stale");
-    assert.equal(harness.selectedRange, null);
-    assert.equal(await harness.window.applyProofreadingIssue(issues[1].id), false);
-    assert.equal(harness.readDocument().split("错字").length - 1, 2);
+    const next = harness.window.getWpsProofreadingState().issues[1];
+    assert.equal(next.status, "pending");
+    assert.deepEqual(harness.selectedRange, [next.start, next.end]);
+    assert.equal(await harness.window.applyProofreadingIssue(issues[1].id), true);
+    assert.equal(harness.readDocument().split("错字").length - 1, 1);
+    assert.equal(harness.readDocument().indexOf("正字", harness.prefix.length + 70) <
+        harness.readDocument().indexOf("错字"), true, "only the first repeated paragraph should change");
 });
 
-test("tracked auto advance skips stale matches and selects only a reanchored pending issue", async () => {
+test("tracked auto advance retains the proved repeated issue before a later unique issue", async () => {
     const repeated = "甲".repeat(50) + "错字" + "乙".repeat(50);
     const harness = createHarness({
         trackRevisions: true,
@@ -1143,9 +1210,140 @@ test("tracked auto advance skips stale matches and selects only a reanchored pen
     const initial = harness.window.getWpsProofreadingState().issues;
     assert.equal(await harness.window.applyProofreadingIssue(initial[0].id), true);
     const after = harness.window.getWpsProofreadingState().issues;
-    assert.equal(after[1].status, "stale");
+    assert.equal(after[1].status, "pending");
     assert.equal(after[2].status, "pending");
-    assert.deepEqual(harness.selectedRange, [after[2].start, after[2].end]);
+    assert.deepEqual(harness.selectedRange, [after[1].start, after[1].end]);
+});
+
+test("unchanged repeated paragraphs locate the chosen copy before any tracked write", async () => {
+    const repeated = "甲".repeat(50) + "错字" + "乙".repeat(50);
+    for (const noSelection of [false, true]) {
+        const harness = createHarness({
+            trackRevisions: true,
+            noSelection,
+            confirmFullDocument: true,
+            selectedText: repeated + "\n" + repeated,
+            issues: [{ category: "typo", paragraphIndex: 2, original: "错字", suggestion: "正字",
+                reason: "修正", confidence: 0.95, needsReview: false }]
+        });
+        await harness.window.runProofreading();
+        const issue = harness.window.getWpsProofreadingState().issues[0];
+        assert.equal(harness.window.locateProofreadingIssue(issue.id), true);
+        const expectedStart = harness.prefix.length + repeated.length + 1 + 50;
+        assert.deepEqual(harness.selectedRange, [expectedStart, expectedStart + 2]);
+        assert.equal(await harness.window.applyProofreadingIssue(issue.id), true);
+        assert.equal(harness.readDocument(), harness.prefix + repeated + "\n" + repeated.replace("错字", "正字") + harness.suffix);
+    }
+});
+
+test("repeated context remains stale after a far edit or the disappearance of its first copy", async () => {
+    const repeated = "甲".repeat(50) + "错字" + "乙".repeat(50);
+    for (const action of ["locate", "apply", "bulk"]) {
+        for (const edit of ["far", "remove-first"]) {
+            let writes = 0;
+            const harness = createHarness({
+                trackRevisions: true,
+                selectedText: "说明".repeat(50) + "\n" + repeated + "\n" + repeated,
+                issues: [{ category: "typo", paragraphIndex: 2, original: "错字", suggestion: "正字",
+                    reason: "修正", confidence: 0.95, needsReview: false }],
+                onWrite() { writes += 1; }
+            });
+            await harness.window.runProofreading();
+            const issue = harness.window.getWpsProofreadingState().issues[0];
+            // Enable the batch path only for this fixture; no real rule's risk is changed.
+            issue.autoFixable = true;
+            const modified = edit === "far" ? harness.readDocument().replace("说明", "改动")
+                : harness.readDocument().replace(repeated, repeated.replace("错字", "已改"));
+            harness.changeDocument(modified);
+            if (action === "locate") assert.equal(harness.window.locateProofreadingIssue(issue.id), false);
+            else if (action === "apply") assert.equal(await harness.window.applyProofreadingIssue(issue.id), false);
+            else assert.equal(harness.window.applyAllProofreadingIssues().applied, 0);
+            assert.equal(writes, 0);
+            assert.equal(harness.selectedRange, null);
+            assert.equal(harness.readDocument(), modified);
+            assert.equal(harness.window.getWpsProofreadingState().issues[0].status, "stale");
+        }
+    }
+});
+
+test("existing deletion coordinates stay inside a repeated selection with tracking on or off", async () => {
+    const repeated = "甲".repeat(50) + "错字" + "乙".repeat(50);
+    for (const trackRevisions of [true, false]) {
+        const prefix = "前文。";
+        const selectedText = repeated + "\n" + repeated;
+        const gapIndex = prefix.length + repeated.length + 1;
+        const harness = createHarness({
+            prefix, selectedText, trackRevisions,
+            suffix: "\n" + repeated,
+            revisionGaps: [{ index: gapIndex, size: 8 }, { index: prefix.length + selectedText.length, size: 6 }],
+            issues: [{ category: "typo", paragraphIndex: 2, original: "错字", suggestion: "正字",
+                reason: "修正", confidence: 0.95, needsReview: false }]
+        });
+        await harness.window.runProofreading();
+        const snapshot = harness.window.getWpsProofreadingState().snapshot;
+        assert.equal(snapshot.mode, "selection");
+        assert.equal(snapshot.selectedText, selectedText);
+        assert.equal(snapshot.nativeEnd - snapshot.end, 14);
+        const issue = harness.window.getWpsProofreadingState().issues[0];
+        assert.equal(harness.window.locateProofreadingIssue(issue.id), true);
+        const expectedStart = gapIndex + 8 + 50;
+        assert.deepEqual(harness.selectedRange, [expectedStart, expectedStart + 2]);
+        assert.equal(await harness.window.applyProofreadingIssue(issue.id), true);
+        assert.equal(await harness.window.undoProofreadingIssue(issue.id), true);
+        assert.equal(harness.readDocument(), prefix + selectedText + "\n" + repeated);
+    }
+});
+
+test("tracked selections with repeated tails preserve their complete physical scope", async () => {
+    const repeated = "甲".repeat(180) + ",乙";
+    const harness = createHarness({
+        trackRevisions: true,
+        selectedText: repeated + "\n" + repeated + "\n" + repeated,
+        suffix: "\n" + repeated,
+        issues: [],
+        rules: [basicRule("basic-ascii-comma-between-hanzi")]
+    });
+    await harness.window.runProofreading();
+    const result = harness.window.applyAllProofreadingIssues();
+    assert.equal(result.applied, 3);
+    assert.equal(result.failed, 0);
+    assert.equal(harness.readDocument(), harness.prefix +
+        [repeated.replace(",", "，"), repeated.replace(",", "，"), repeated.replace(",", "，")].join("\n") + "\n" + repeated);
+});
+
+test("mapping an empty tracked replacement uses a collapsed point for undo", async () => {
+    const repeated = "甲".repeat(50) + "错字" + "乙".repeat(50);
+    const harness = createHarness({
+        trackRevisions: true,
+        selectedText: repeated + "\n" + repeated,
+        issues: [{ category: "typo", paragraphIndex: 2, original: "错字", suggestion: "",
+            reason: "删除", confidence: 0.95, needsReview: false }]
+    });
+    await harness.window.runProofreading();
+    const issue = harness.window.getWpsProofreadingState().issues[0];
+    assert.equal(await harness.window.applyProofreadingIssue(issue.id), true);
+    assert.equal(harness.readDocument(), harness.prefix + repeated + "\n" + repeated.replace("错字", "") + harness.suffix);
+    assert.equal(await harness.window.undoProofreadingIssue(issue.id), true);
+    assert.equal(harness.readDocument(), harness.prefix + repeated + "\n" + repeated + harness.suffix);
+});
+
+test("a failed native prefix read cannot resolve repeated text or permit a write", async () => {
+    const repeated = "甲".repeat(50) + "错字" + "乙".repeat(50);
+    let rejectReads = false;
+    let writes = 0;
+    const harness = createHarness({
+        trackRevisions: true,
+        selectedText: repeated + "\n" + repeated,
+        onRead(start) { if (rejectReads && start === 0) throw new Error("prefix unavailable"); },
+        onWrite() { writes += 1; },
+        issues: [{ category: "typo", paragraphIndex: 2, original: "错字", suggestion: "正字",
+            reason: "修正", confidence: 0.95, needsReview: false }]
+    });
+    await harness.window.runProofreading();
+    rejectReads = true;
+    const issue = harness.window.getWpsProofreadingState().issues[0];
+    assert.equal(await harness.window.applyProofreadingIssue(issue.id), false);
+    assert.equal(writes, 0);
 });
 
 test("tracked revisions mark a later issue stale when its anchor changed during the write", async () => {
@@ -1170,6 +1368,31 @@ test("tracked revisions mark a later issue stale when its anchor changed during 
     assert.equal(result[0].status, "accepted");
     assert.equal(result[1].status, "stale");
     assert.equal(harness.selectedRange, null);
+});
+
+test("post-write verification cannot move a tracked correction to a new matching paragraph", async () => {
+    const target = "甲".repeat(45) + "错字" + "乙".repeat(45);
+    const placeholder = "丙".repeat(93);
+    const harness = createHarness({
+        trackRevisions: true, manualActions: true,
+        selectedText: target + "\n" + placeholder
+    });
+    await harness.window.runProofreading();
+    const issue = harness.window.getWpsProofreadingState().issues[0];
+    const applying = harness.window.applyProofreadingIssue(issue.id);
+    const modified = harness.readDocument().replace("错别字", "人工字")
+        .replace(placeholder, target.replace("错字", "错别字"));
+    harness.changeDocument(modified);
+    await harness.flushAction();
+
+    assert.equal(await applying, false);
+    assert.equal(harness.window.getWpsProofreadingState().snapshot, null);
+    assert.equal(harness.window.getWpsProofreadingState().issues[0].status, "stale");
+    assert.equal(harness.records.length, 0);
+    assert.equal(harness.selectedRange, null);
+    assert.equal(harness.readDocument(), modified);
+    assert.equal(await harness.window.undoProofreadingIssue(issue.id), false);
+    assert.equal(harness.readDocument(), modified, "undo must not modify the other paragraph");
 });
 
 test("tracked revisions respect disabled autoAdvance and unreadable API flags", async () => {
@@ -1215,7 +1438,7 @@ test("tracked bulk reports a later stale safe rule as failed", async () => {
         issues: [],
         rules: [basicRule("basic-ascii-comma-between-hanzi"), basicRule("basic-duplicate-period")],
         onWrite: () => harness.changeDocument(
-            harness.readDocument().replace("后段有多余句号", "后段内容已修改"))
+            harness.readDocument().replace("本段,", "本段；"))
     });
     await harness.window.runProofreading();
     assert.equal(harness.window.getWpsProofreadingState().issues.length, 2);
@@ -1228,32 +1451,51 @@ test("tracked bulk reports a later stale safe rule as failed", async () => {
     assert.match(harness.status.text, /已修正 1 条，请重新校对/);
     assert.equal(harness.status.tone, "warning");
     const issues = harness.window.getWpsProofreadingState().issues;
-    assert.equal(issues[0].status, "accepted");
-    assert.equal(issues[1].status, "stale");
-    assert.match(harness.readDocument(), /后段内容已修改。。/);
+    assert.equal(issues[0].status, "stale");
+    assert.equal(issues[1].status, "accepted");
+    assert.match(harness.readDocument(), /本段；有错字/);
 });
 
-test("tracked bulk counts every remaining safe rule when reanchoring stops the batch", async () => {
+test("tracked bulk stops when a post-write edit prevents proof of the written target", async () => {
     let harness;
+    let writes = 0;
     harness = createHarness({
         trackRevisions: true,
         selectedText: "本段,有错字。" + "说明".repeat(30) +
             "\n后段有多余句号。。" + "补充".repeat(30) + "\n末段也有多余句号。。",
         issues: [],
         rules: [basicRule("basic-ascii-comma-between-hanzi"), basicRule("basic-duplicate-period")],
-        onWrite: () => harness.changeDocument(
-            harness.readDocument().replace("后段有多余句号", "后段内容已修改"))
+        onWrite() {
+            writes += 1;
+            harness.changeDocument(
+                harness.readDocument().replace("后段有多余句号。。", "后段内容已修改。"));
+        }
     });
     await harness.window.runProofreading();
     assert.equal(harness.window.getWpsProofreadingState().issues.length, 3);
 
     const result = harness.window.applyAllProofreadingIssues();
-    assert.equal(result.applied, 1);
-    assert.equal(result.failed, 2);
+    assert.equal(result.applied, 0, "an unverified write must not be reported as confirmed");
+    assert.equal(result.failed, 3);
+    assert.equal(result.skipped, 0);
     assert.equal(result.stale, true);
-    assert.deepEqual(Array.from(harness.window.getWpsProofreadingState().issues,
-        (issue) => issue.status),
-        ["accepted", "stale", "stale"]);
+    assert.equal(writes, 1, "the remaining safe rules must not be written");
+    const state = harness.window.getWpsProofreadingState();
+    assert.equal(state.snapshot, null);
+    assert.deepEqual(Array.from(state.issues, (issue) => issue.status), ["stale", "stale", "stale"]);
+    assert.equal(harness.records.length, 0);
+    assert.match(harness.status.text, /已修正 0 条，请重新校对/);
+    assert.equal(harness.status.tone, "warning");
+    const expected = harness.prefix + harness.selectedText
+        .replace("后段有多余句号。。", "后段内容已修改。")
+        .replace("末段也有多余句号。。", "末段也有多余句号。") + harness.suffix;
+    assert.equal(harness.readDocument(), expected, "preserve both the actual write and the external edit");
+
+    assert.equal(harness.window.applyAllProofreadingIssues().applied, 0);
+    assert.equal(await harness.window.applyProofreadingIssue(state.issues[0].id), false);
+    assert.equal(await harness.window.undoProofreadingIssue(state.issues[2].id), false);
+    assert.equal(writes, 1, "invalidated suggestions must not reuse their old coordinates");
+    assert.equal(harness.readDocument(), expected);
 });
 
 test("tracked selection ignores identical context outside the proofreading range", async () => {
@@ -1407,6 +1649,339 @@ test("one-click fix applies only fixed low-risk punctuation rules", async () => 
     assert.equal(harness.status.text.includes("已一键修正 2 条"), true);
 });
 
+function undoRecordHarness(extra = {}) {
+    const calls = [];
+    let recording = false;
+    const harness = createHarness(Object.assign({
+        selectedText: "本段,另有错字。",
+        issues: [],
+        rules: [basicRule("basic-ascii-comma-between-hanzi"), basicRule("basic-duplicate-period")]
+    }, extra));
+    harness.window.Application.UndoRecord = {
+        StartCustomRecord(name) {
+            assert.equal(this, harness.window.Application.UndoRecord);
+            assert.equal(recording, false);
+            recording = true;
+            calls.push(["start", name]);
+        },
+        EndCustomRecord() {
+            assert.equal(this, harness.window.Application.UndoRecord);
+            assert.equal(recording, true);
+            recording = false;
+            calls.push(["end"]);
+        }
+    };
+    harness.assertUndoRecordActive = () => assert.equal(recording, true, "writes must stay inside the custom record");
+    return { harness, calls };
+}
+
+test("one-click fix groups successful safe writes in one native undo record", async () => {
+    for (const trackRevisions of [false, true]) {
+        let undoHarness;
+        const writes = [];
+        const state = undoRecordHarness({
+            selectedText: "本段,另有错字。。",
+            trackRevisions,
+            onWrite(write) {
+                undoHarness.assertUndoRecordActive();
+                writes.push(write);
+            }
+        });
+        undoHarness = state.harness;
+        const { harness, calls } = state;
+        await harness.window.runProofreading();
+
+        const result = harness.window.applyAllProofreadingIssues();
+        assert.equal(result.applied, 2, String(trackRevisions));
+        assert.equal(result.failed, 0, String(trackRevisions));
+        assert.equal(result.skipped, 0, String(trackRevisions));
+        assert.deepEqual(calls, [["start", "一键修正"], ["end"]]);
+        assert.equal(harness.readDocument(), harness.prefix + "本段，另有错字。" + harness.suffix);
+        assert.equal(harness.window.getWpsProofreadingState().issues.every((issue) => issue.status === "accepted"), true);
+        if (trackRevisions) {
+            assert.equal(writes.length, 2);
+            assert.equal(writes[0].start > writes[1].start, true,
+                "tracked batch writes must run from the end of the document backwards");
+        }
+    }
+});
+
+test("tracked one-click fix keeps skipped issues anchored by logical text offsets", async () => {
+    const harness = createHarness({
+        trackRevisions: true,
+        selectedText: "甲,乙。。",
+        issues: [],
+        rules: [basicRule("basic-ascii-comma-between-hanzi"), basicRule("basic-duplicate-period")]
+    });
+    await harness.window.runProofreading();
+    const before = harness.window.getWpsProofreadingState().issues;
+    assert.equal(before.length, 2);
+    const skipped = before[0];
+    skipped.autoFixable = false;
+
+    const result = harness.window.applyAllProofreadingIssues();
+    assert.equal(result.applied, 1);
+    assert.equal(result.skipped, 1);
+    const after = harness.window.getWpsProofreadingState().issues;
+    const anchoredSkipped = after.find((issue) => issue.id === skipped.id);
+    assert.equal(anchoredSkipped.status, "pending");
+    assert.equal(Number.isInteger(anchoredSkipped.textOffset), true);
+    assert.equal(harness.window.locateProofreadingIssue(anchoredSkipped.id), true);
+});
+
+test("one-click fix closes its native undo record after a stale partial batch", async () => {
+    let writes = 0;
+    const { harness, calls } = undoRecordHarness({
+        selectedText: "本段,另有错字。。",
+        rules: [basicRule("basic-ascii-comma-between-hanzi"), basicRule("basic-duplicate-period")],
+        onWrite() {
+            writes += 1;
+            if (writes === 1) harness.changeDocument(harness.readDocument().replace("另有错字", "后文已变"));
+        }
+    });
+    await harness.window.runProofreading();
+
+    const result = harness.window.applyAllProofreadingIssues();
+    assert.equal(result.applied, 1);
+    assert.equal(result.stale, true);
+    assert.equal(result.failed, 1);
+    assert.equal(result.skipped, 0);
+    assert.deepEqual(calls, [["start", "一键修正"], ["end"]]);
+    assert.equal(harness.readDocument(), harness.prefix + "本段，后文已变。。" + harness.suffix);
+    const issues = harness.window.getWpsProofreadingState().issues;
+    assert.equal(issues.filter((issue) => issue.status === "accepted").length, 1);
+    assert.equal(issues.filter((issue) => issue.status === "stale").length, 1);
+});
+
+test("one-click fix closes its native undo record when a write throws", async () => {
+    let writes = 0;
+    const { harness, calls } = undoRecordHarness({
+        selectedText: "本段,另有错字。。",
+        onWrite() {
+            writes += 1;
+            if (writes === 1) throw new Error("simulated host write failure");
+        }
+    });
+    await harness.window.runProofreading();
+
+    const result = harness.window.applyAllProofreadingIssues();
+    assert.equal(result.failed > 0, true);
+    assert.deepEqual(calls, [["start", "一键修正"], ["end"]]);
+});
+
+test("a stopped one-click fix reports every unattempted safe issue", async () => {
+    for (const trackRevisions of [false, true]) {
+        let writes = 0;
+        const { harness, calls } = undoRecordHarness({
+            selectedText: "甲,乙。丙,丁。戊,己。庚,辛。",
+            issues: [],
+            trackRevisions,
+            rules: [basicRule("basic-ascii-comma-between-hanzi")],
+            onWrite() {
+                writes += 1;
+                if (writes === 2) throw new Error("host did not confirm the second write");
+            }
+        });
+        await harness.window.runProofreading();
+        assert.equal(harness.window.getWpsProofreadingState().issues.length, 4);
+
+        const result = harness.window.applyAllProofreadingIssues();
+        assert.equal(result.applied, 1);
+        assert.equal(result.failed, 1);
+        assert.equal(result.unattempted, 2);
+        assert.equal(result.applied + result.failed + result.unattempted, 4);
+        assert.equal(writes, 2, "the batch must stop as soon as the host throws");
+        assert.equal(harness.window.getWpsProofreadingState().snapshot, null);
+        assert.equal(harness.window.getWpsProofreadingState().issues.every((issue) => issue.status === "stale"), true);
+        assert.equal(harness.status.text.includes("另有 2 条尚未尝试"), true);
+        assert.deepEqual(calls, [["start", "一键修正"], ["end"]]);
+    }
+});
+
+test("tracked one-click writes are unconfirmed when the host setter silently does nothing", async () => {
+    const { harness, calls } = undoRecordHarness({
+        trackRevisions: true,
+        selectedText: "甲,乙。丙,丁。", issues: [],
+        rules: [basicRule("basic-ascii-comma-between-hanzi")]
+    });
+    await harness.window.runProofreading();
+    const document = harness.window.Application.ActiveDocument;
+    const createRange = document.Range.bind(document);
+    let writes = 0;
+    document.Range = (start, end) => {
+        const range = createRange(start, end);
+        const read = Object.getOwnPropertyDescriptor(range, "Text").get;
+        Object.defineProperty(range, "Text", { configurable: true,
+            get: read, set() { writes += 1; } });
+        return range;
+    };
+    const original = harness.readDocument();
+    const result = harness.window.applyAllProofreadingIssues();
+    assert.equal(result.applied, 0);
+    assert.equal(result.failed, 2);
+    assert.equal(result.stale, true);
+    assert.equal(writes, 1);
+    assert.equal(harness.readDocument(), original);
+    assert.equal(harness.window.getWpsProofreadingState().snapshot, null);
+    assert.equal(harness.records.length, 0);
+    assert.deepEqual(calls, [["start", "一键修正"], ["end"]]);
+});
+
+test("a throwing batch setter stops safely whether it mutated the body or not", async () => {
+    for (const trackRevisions of [false, true]) {
+        for (const afterWrite of [false, true]) {
+            const fail = () => { throw new Error("write result unavailable"); };
+            const { harness, calls } = undoRecordHarness(Object.assign({
+                trackRevisions, selectedText: "甲,乙。丙,丁。", issues: [],
+                rules: [basicRule("basic-ascii-comma-between-hanzi")]
+            }, afterWrite ? { onWrite: fail } : { beforeWrite: fail }));
+            await harness.window.runProofreading();
+            const original = harness.readDocument();
+            const result = harness.window.applyAllProofreadingIssues();
+            assert.equal(result.applied, 0);
+            assert.equal(result.failed, 1);
+            assert.equal(result.unattempted, 1);
+            assert.equal(harness.readDocument() !== original, afterWrite);
+            assert.equal(harness.window.getWpsProofreadingState().snapshot, null);
+            assert.equal(harness.window.getWpsProofreadingState().issues.every((issue) => issue.status === "stale"), true);
+            assert.equal(harness.records.length, 0);
+            assert.deepEqual(calls, [["start", "一键修正"], ["end"]]);
+        }
+    }
+});
+
+test("a confirmed batch write stays accepted and counted when history recording throws", async () => {
+    for (const trackRevisions of [false, true]) {
+        const { harness, calls } = undoRecordHarness({
+            trackRevisions, selectedText: "甲,乙。丙,丁。", issues: [],
+            rules: [basicRule("basic-ascii-comma-between-hanzi")]
+        });
+        await harness.window.runProofreading();
+        harness.window.pushProofreadingRecord = () => { throw new Error("history render unavailable"); };
+        const result = harness.window.applyAllProofreadingIssues();
+        assert.equal(result.applied, 1);
+        assert.equal(result.failed, 0);
+        assert.equal(result.unattempted, 1);
+        const state = harness.window.getWpsProofreadingState();
+        assert.equal(state.issues.filter((issue) => issue.status === "accepted").length, 1);
+        assert.equal(state.issues.filter((issue) => issue.status === "pending").length, 1);
+        assert.ok(state.snapshot);
+        assert.equal(harness.readDocument().split("，").length - 1, 1);
+        assert.equal(harness.status.text.includes("正文已修改，但记录失败"), true);
+        assert.deepEqual(calls, [["start", "一键修正"], ["end"]]);
+    }
+});
+
+test("unsupported or failing UndoRecord APIs fall back to ordinary one-click writes", async () => {
+    for (const mode of ["missing", "getter", "start", "missing-end", "missing-start"]) {
+        let startCalls = 0;
+        let endCalls = 0;
+        const harness = createHarness({
+            selectedText: "本段,另有错字。",
+            issues: [],
+            rules: [basicRule("basic-ascii-comma-between-hanzi")]
+        });
+        await harness.window.runProofreading();
+        if (mode === "getter") {
+            Object.defineProperty(harness.window.Application, "UndoRecord", {
+                configurable: true,
+                get() { throw new Error("unsupported API"); }
+            });
+        } else if (mode === "start") {
+            harness.window.Application.UndoRecord = {
+                StartCustomRecord() { startCalls += 1; throw new Error("unsupported API"); },
+                EndCustomRecord() { endCalls += 1; }
+            };
+        } else if (mode === "missing-end") {
+            harness.window.Application.UndoRecord = {
+                StartCustomRecord() { startCalls += 1; }
+            };
+        } else if (mode === "missing-start") {
+            harness.window.Application.UndoRecord = {
+                EndCustomRecord() { endCalls += 1; }
+            };
+        }
+        const result = harness.window.applyAllProofreadingIssues();
+        assert.equal(startCalls, mode === "start" ? 1 : 0, mode);
+        assert.equal(endCalls, 0, mode);
+        assert.equal(result.applied, 1, mode);
+        assert.equal(harness.readDocument(), harness.prefix + "本段，另有错字。" + harness.suffix, mode);
+    }
+});
+
+test("one-click fix always closes the record when post-write rendering throws", async () => {
+    const { harness, calls } = undoRecordHarness({ selectedText: "本段,另有错字。", rules: [basicRule("basic-ascii-comma-between-hanzi")] });
+    await harness.window.runProofreading();
+    harness.window.setProofreadingIssues = () => { throw new Error("simulated render failure"); };
+
+    assert.throws(() => harness.window.applyAllProofreadingIssues(), /simulated render failure/);
+    assert.deepEqual(calls, [["start", "一键修正"], ["end"]]);
+    assert.equal(harness.readDocument(), harness.prefix + "本段，另有错字。" + harness.suffix);
+});
+
+test("single issue apply and undo do not use the batch native undo record", async () => {
+    const { harness, calls } = undoRecordHarness({ selectedText: "本段,另有错字。" });
+    await harness.window.runProofreading();
+    const issue = harness.window.getWpsProofreadingState().issues[0];
+
+    assert.equal(await harness.window.applyProofreadingIssue(issue.id), true);
+    assert.equal(await harness.window.undoProofreadingIssue(issue.id), true);
+    assert.deepEqual(calls, []);
+});
+
+test("EndCustomRecord failure preserves the one-click fix result", async () => {
+    const { harness, calls } = undoRecordHarness({ selectedText: "本段,另有错字。", rules: [basicRule("basic-ascii-comma-between-hanzi")] });
+    harness.window.Application.UndoRecord.EndCustomRecord = function () {
+        calls.push(["end"]);
+        throw new Error("undo host failure");
+    };
+    await harness.window.runProofreading();
+
+    const result = harness.window.applyAllProofreadingIssues();
+    assert.equal(result.applied, 1);
+    assert.deepEqual(calls, [["start", "一键修正"], ["end"]]);
+});
+
+test("external Ctrl+Z text changes stay authoritative for later issue actions and proofreading", async () => {
+    for (const action of ["apply", "undo", "locate", "bulk", "rerun"]) {
+        const { harness, calls } = undoRecordHarness({ selectedText: "本段,另有错字。。" });
+        await harness.window.runProofreading();
+        assert.equal(harness.window.applyAllProofreadingIssues().applied, 2);
+        const accepted = harness.window.getWpsProofreadingState().issues;
+        const revertedText = harness.prefix + "本段,另有错字。。" + harness.suffix;
+        // Represents the document after WPS handles Ctrl+Z; no host undo stack is simulated.
+        harness.changeDocument(revertedText);
+
+        if (action === "apply") assert.equal(await harness.window.applyProofreadingIssue(accepted[0].id), false);
+        if (action === "undo") {
+            assert.equal(await harness.window.undoProofreadingIssue(accepted[0].id), false);
+            assert.equal(harness.window.getWpsProofreadingState().issues[0].status, "stale");
+        }
+        if (action === "locate") assert.equal(harness.window.locateProofreadingIssue(accepted[0].id), false);
+        if (action === "bulk") assert.equal(harness.window.applyAllProofreadingIssues().applied, 0);
+        if (action === "rerun") await harness.window.runProofreading();
+
+        if (action !== "rerun") assert.equal(harness.readDocument(), revertedText, action);
+        else assert.equal(harness.window.getWpsProofreadingState().issues.some((issue) => issue.status === "pending"), true);
+        assert.deepEqual(calls, [["start", "一键修正"], ["end"]], action);
+    }
+});
+
+test("one-click fix does not open a record when no safe item exists or the initial snapshot is stale", async () => {
+    const unsafe = undoRecordHarness({ selectedText: "本段有错字。" });
+    await unsafe.harness.window.runProofreading();
+    const unsafeResult = unsafe.harness.window.applyAllProofreadingIssues();
+    assert.equal(unsafeResult.applied, 0);
+    assert.deepEqual(unsafe.calls, []);
+
+    const stale = undoRecordHarness({ selectedText: "本段,另有错字。", rules: [basicRule("basic-ascii-comma-between-hanzi")] });
+    await stale.harness.window.runProofreading();
+    stale.harness.changeDocument(stale.harness.prefix + "正文已变化。" + stale.harness.suffix);
+    const staleResult = stale.harness.window.applyAllProofreadingIssues();
+    assert.equal(staleResult.stale, true);
+    assert.deepEqual(stale.calls, []);
+});
+
 test("one-click fix skips every AI suggestion regardless of confidence", async () => {
     const harness = createHarness({
         selectedText: "本段,有错字，也有可疑表述，另有建议。",
@@ -1446,7 +2021,7 @@ test("one-click fix stops without writing when the document changed first", asyn
     assert.equal(harness.window.getWpsProofreadingState().issues.every((issue) => issue.status === "stale"), true);
 });
 
-test("issues cannot be applied or ignored while an AI batch is pending", async () => {
+test("issues can be ignored but cannot write while an AI batch is pending", async () => {
     let release;
     const waiting = new Promise((resolve) => { release = resolve; });
     const harness = createHarness({
@@ -1463,14 +2038,109 @@ test("issues cannot be applied or ignored while an AI batch is pending", async (
         const issue = harness.window.getWpsProofreadingState().issues[0];
         assert.ok(issue);
         assert.equal(await harness.window.applyProofreadingIssue(issue.id), false);
-        assert.equal(harness.window.ignoreProofreadingIssue(issue.id), false);
+        assert.equal(harness.window.ignoreProofreadingIssue(issue.id), true);
         assert.equal(harness.window.applyAllProofreadingIssues().applied, 0);
         assert.equal(harness.readDocument(), harness.prefix + harness.selectedText + harness.suffix);
     } finally {
         release();
         await running;
     }
-    assert.equal(harness.window.applyAllProofreadingIssues().applied, 1);
+    assert.equal(harness.window.getWpsProofreadingState().issues[0].status, "ignored");
+    assert.equal(harness.window.applyAllProofreadingIssues().applied, 0);
+});
+
+test("ignoring a completed first batch survives later batches and final merge", async () => {
+    const { harness, gates } = progressiveFixture();
+    const operation = harness.window.runProofreading();
+    await until(() => gates.length === 1);
+    gates[0]();
+    await until(() => gates.length === 2);
+    const id = harness.renderedIssues.find(issue => issue.original === "错字甲").id;
+    assert.equal(harness.window.locateProofreadingIssue(id), true);
+    assert.equal(harness.window.ignoreProofreadingIssue(id), true);
+    assert.equal(await harness.window.applyProofreadingIssue(id), false);
+    gates[1]();
+    assert.equal((await operation).accepted, true);
+    assert.equal(harness.renderedIssues.find(issue => issue.id === id).status, "ignored");
+});
+
+test("first-pass completion unlocks writes and detaches late consistency results", async () => {
+    for (const abortAvailable of [false, true]) {
+        const harness = createHarness({ selectedText: "甲市综协办有错字。\n甲市综合协调办公室负责协调。" });
+        if (abortAvailable) harness.window.AbortController = AbortController;
+        let release, signal;
+        harness.window.WpsProofreadingCore.requestModel = (options, prompt) => {
+            if (prompt.includes("第二遍跨段落一致性复核")) {
+                signal = options.signal;
+                return new Promise(resolve => { release = resolve; });
+            }
+            return Promise.resolve(JSON.stringify({ issues: [{ category: "typo", paragraphIndex: 1,
+                original: "错字", suggestion: "错别字", confidence: 0.95, needsReview: false }] }));
+        };
+        const operation = harness.window.runProofreading();
+        await until(() => release);
+        assert.equal(harness.busy, true);
+        assert.equal(harness.window.getWpsProofreadingState().firstPassComplete, true);
+        const id = harness.renderedIssues[0].id;
+        assert.equal(await harness.window.applyProofreadingIssue(id), true);
+        assert.equal(harness.busy, false);
+        if (signal) assert.equal(signal.aborted, true);
+        const snapshot = harness.window.getWpsProofreadingState().snapshot;
+        const status = harness.status.text;
+        release(JSON.stringify({ issues: [{ category: "consistency", paragraphIndex: 2,
+            original: "甲市综合协调办公室", suggestion: "甲市综协办", needsReview: true, confidence: 0.9 }] }));
+        assert.equal((await operation).reason, "cancelled");
+        assert.equal(harness.window.getWpsProofreadingState().snapshot, snapshot);
+        assert.equal(harness.renderedIssues.length, 1);
+        assert.equal(harness.renderedIssues[0].status, "accepted");
+        assert.equal(harness.status.text, status);
+        assert.equal(harness.statuses.some(item => /修改已停止全文一致性复核/.test(item.text)), true);
+    }
+});
+
+test("bulk correction stops consistency review before tracked and untracked writes", async () => {
+    for (const trackRevisions of [false, true]) {
+        for (const abortAvailable of [false, true]) {
+            let release, signal;
+            const harness = createHarness({
+                trackRevisions,
+                selectedText: "甲市综协办有错字,负责协调。\n甲市综合协调办公室负责协调。",
+                rules: [basicRule("basic-ascii-comma-between-hanzi")],
+                beforeWrite() {
+                    assert.equal(harness.busy, false, "review must stop before the first write");
+                    if (signal) assert.equal(signal.aborted, true);
+                }
+            });
+            if (abortAvailable) harness.window.AbortController = AbortController;
+            harness.window.WpsProofreadingCore.requestModel = (options, prompt) => {
+                if (prompt.includes("第二遍跨段落一致性复核")) {
+                    signal = options.signal;
+                    return new Promise(resolve => { release = resolve; });
+                }
+                return Promise.resolve('{"issues":[]}');
+            };
+            const operation = harness.window.runProofreading();
+            await until(() => release);
+            assert.equal(harness.busy, true);
+            assert.equal(harness.window.getWpsProofreadingState().firstPassComplete, true);
+            const id = harness.renderedIssues[0].id;
+            const result = harness.window.applyAllProofreadingIssues();
+            assert.equal(result.applied, 1);
+            assert.equal(result.failed, 0);
+            assert.equal(harness.readDocument(), harness.prefix + harness.selectedText.replace(",", "，") + harness.suffix);
+            const snapshot = harness.window.getWpsProofreadingState().snapshot;
+            const status = harness.status.text;
+            assert.ok(snapshot);
+            release('{"issues":[]}'); // Simulate a transport that ignores cancellation.
+            assert.equal((await operation).reason, "cancelled");
+            assert.equal(harness.window.getWpsProofreadingState().snapshot, snapshot);
+            assert.equal(harness.renderedIssues.length, 1);
+            assert.equal(harness.renderedIssues[0].status, "accepted");
+            assert.equal(harness.status.text, status);
+            assert.equal(await harness.window.undoProofreadingIssue(id), true);
+            assert.equal(harness.readDocument(), harness.prefix + harness.selectedText + harness.suffix);
+        }
+    }
 });
 
 test("ignoring a finding records history without touching the document", async () => {
@@ -1856,6 +2526,155 @@ function progressiveFixture(extra = {}) {
     return { harness, gates };
 }
 
+function concurrentFixture(concurrency = 2) {
+    const harness = createHarness({ selectedText: [800, 1800, 1800, 1800].map((size, i) =>
+        "错字" + "甲乙丙丁"[i].repeat(size - 2)).join("\n"), issues: [] });
+    harness.window.AbortController = AbortController;
+    harness.window.WpsProofreadingConcurrency = concurrency;
+    const pending = [];
+    harness.window.WpsProofreadingCore.requestModel = (options, prompt) => new Promise((resolve, reject) => {
+        const paragraphIndex = JSON.parse(prompt.split("待校对段落：\n\n")[1])[0].paragraphIndex;
+        pending.push({ paragraphIndex, signal: options.signal, fail: reject,
+            finish() { resolve(JSON.stringify({ issues: [{ category: "typo", paragraphIndex,
+                original: "错字", suggestion: "正字", confidence: 0.95, needsReview: false }] })); } });
+    });
+    return { harness, pending };
+}
+
+test("bounded concurrency publishes second batch first with sorted stable IDs and character progress", async () => {
+    const outcomes = [];
+    for (const concurrency of [1, 2]) {
+        const { harness, pending } = concurrentFixture(concurrency);
+        const operation = harness.window.runProofreading();
+        await until(() => pending.length === concurrency);
+        assert.equal(pending.length, concurrency);
+        if (concurrency === 2) {
+            pending[1].finish();
+            await until(() => pending.length === 3);
+            assert.equal(harness.renderedIssues.length, 1);
+            assert.equal(harness.window.getWpsProofreadingState().issues[0].start, harness.prefix.length + 801);
+            const progress = harness.progress.at(-1);
+            assert.equal(progress.percent, 29);
+            assert.match(progress.label, /已处理 1800\/6200 字/);
+            assert.equal(harness.window.ignoreProofreadingIssue(harness.renderedIssues[0].id), true);
+            pending[0].finish();
+            await until(() => pending.length === 4);
+            pending[3].finish();
+            pending[2].finish();
+        } else {
+            for (let i = 0; i < 4; i++) {
+                await until(() => pending.length === i + 1);
+                pending[i].finish();
+            }
+        }
+        assert.equal((await operation).accepted, true);
+        const issues = harness.window.getWpsProofreadingState().issues;
+        assert.equal(issues.length, 4);
+        assert.ok(issues.every((issue, i) => !i || issue.start > issues[i - 1].start));
+        const percents = harness.progress.map(entry => entry.percent);
+        assert.ok(percents.every((value, i) => !i || value >= percents[i - 1]));
+        if (concurrency === 2) assert.equal(issues[1].status, "ignored");
+        outcomes.push(Array.from(issues, issue => issue.id));
+    }
+    assert.deepEqual(outcomes[0], outcomes[1]);
+});
+
+test("cancel and restart abort every concurrent request and discard abort-ignoring late results", async () => {
+    for (const restart of [false, true]) {
+        const { harness, pending } = concurrentFixture();
+        const old = harness.window.runProofreading();
+        await until(() => pending.length === 2);
+        let newer;
+        if (restart) {
+            newer = harness.window.runProofreading(true);
+            await until(() => pending.length === 4);
+        } else assert.equal(harness.window.cancelProofreading(), true);
+        assert.ok(pending.slice(0, 2).every(request => request.signal.aborted));
+        assert.equal((await old).reason, "cancelled");
+        pending[1].finish(); pending[0].finish();
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(harness.renderedIssues.length, 0);
+        if (newer) {
+            pending[3].finish(); pending[2].finish();
+            await until(() => pending.length === 6);
+            pending[5].finish(); pending[4].finish();
+            assert.equal((await newer).accepted, true);
+            assert.equal(harness.renderedIssues.length, 4);
+        }
+    }
+});
+
+test("concurrent failure preserves completed findings, aborts siblings and discards late results", async () => {
+    const { harness, pending } = concurrentFixture();
+    const operation = harness.window.runProofreading();
+    await until(() => pending.length === 2);
+    pending[1].finish();
+    await until(() => pending.length === 3);
+    const id = harness.renderedIssues[0].id;
+    harness.window.ignoreProofreadingIssue(id);
+    pending[0].fail(new Error("模拟失败"));
+    assert.equal((await operation).reason, "error");
+    assert.equal(pending[2].signal.aborted, true);
+    assert.equal(harness.renderedIssues.length, 1);
+    assert.equal(harness.renderedIssues[0].id, id);
+    assert.equal(harness.renderedIssues[0].status, "ignored");
+    pending[2].finish();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(pending.length, 3, "failure must stop launching unsent batches");
+    assert.equal(harness.renderedIssues.length, 1);
+});
+
+test("out-of-order background results and ignored state stay isolated across document switches", async () => {
+    const { harness, pending } = concurrentFixture();
+    const monitor = installDocumentMonitor(harness);
+    const b = secondDocument(harness);
+    const operation = harness.window.runProofreading();
+    await until(() => pending.length === 2);
+    pending[1].finish();
+    await until(() => pending.length === 3);
+    const ignoredId = harness.renderedIssues[0].id;
+    assert.equal(harness.window.ignoreProofreadingIssue(ignoredId), true);
+    monitor.activate(b.document);
+    const status = harness.status.text;
+    const progressCount = harness.progress.length;
+    assert.equal(harness.window.ignoreProofreadingIssue(ignoredId), false);
+    pending[0].finish();
+    await until(() => pending.length === 4);
+    pending[3].finish(); pending[2].finish();
+    assert.equal((await operation).accepted, true);
+    assert.equal(harness.renderedIssues.length, 0);
+    assert.equal(harness.progress.length, progressCount);
+    assert.equal(b.calls.length, 0);
+    // Explicit action rejection may show a warning in B, but A publication cannot.
+    assert.notEqual(harness.status.text, status);
+    monitor.activate(b.original);
+    assert.equal(harness.renderedIssues.length, 4);
+    assert.equal(harness.renderedIssues.find(issue => issue.id === ignoredId).status, "ignored");
+});
+
+test("consistency write guard detects equal-length edits outside the issue anchors", async () => {
+    const harness = createHarness({ selectedText: "甲市综协办有错字。" + "甲".repeat(100) +
+        "\n甲市综合协调办公室负责协调。", manualActions: true });
+    harness.window.AbortController = AbortController;
+    let release;
+    harness.window.WpsProofreadingCore.requestModel = (_options, prompt) => {
+        if (prompt.includes("第二遍跨段落一致性复核")) return new Promise(resolve => { release = resolve; });
+        return Promise.resolve(JSON.stringify({ issues: [{ category: "typo", paragraphIndex: 1,
+            original: "错字", suggestion: "正字", confidence: 0.95, needsReview: false }] }));
+    };
+    const operation = harness.window.runProofreading();
+    await until(() => release);
+    const id = harness.renderedIssues[0].id;
+    harness.changeDocument(harness.readDocument().replace("负责协调", "负责处理"));
+    const edited = harness.readDocument();
+    assert.equal(await harness.window.applyProofreadingIssue(id), false);
+    assert.equal(harness.readDocument(), edited);
+    assert.equal(harness.actionTimers.length, 0);
+    release('{"issues":[]}');
+    assert.equal((await operation).reason, "cancelled");
+    assert.equal(harness.renderedIssues[0].status, "stale");
+});
+
 test("local and complete AI batches render progressively with stable IDs and one render per batch", async () => {
     const { harness, gates } = progressiveFixture();
     const run = harness.window.runProofreading();
@@ -2227,6 +3046,80 @@ test("a document edit during global consistency review discards old findings", a
 });
 
 
+test("rules-only proofreading works without model configuration and keeps correction and undo", async () => {
+    for (const provider of ["openai", "opencode", "ollama"]) {
+        const harness = createHarness({
+            selectedText: "请使用旧名称开展工作。",
+            seed: JSON.stringify({ provider, rulesOnly: true, profiles: {
+                [provider]: { endpoint: "", model: "" }
+            } }),
+            rules: [{ id: "local-name", name: "名称规则", type: "replace",
+                pattern: "旧名称", replacement: "新名称" }]
+        });
+        harness.window.WpsRulesCenter.collectAiReviewCandidates = () => { throw new Error("AI must be skipped"); };
+        const result = await harness.window.runProofreading();
+        assert.equal(result.accepted, true, harness.status.text);
+        assert.equal(result.rulesOnly, true);
+        assert.equal(result.batches, 0);
+        assert.equal(harness.requests.length, 0);
+        assert.equal(harness.busy, false);
+        assert.equal(harness.progress.at(-1).percent, 100);
+        assert.match(harness.status.text, /校对完成 · 仅规则/);
+        const issue = harness.window.getWpsProofreadingState().issues[0];
+        assert.equal(issue.original, "旧名称");
+        assert.equal(harness.window.locateProofreadingIssue(issue.id), true);
+        assert.equal(await harness.window.applyProofreadingIssue(issue.id), true);
+        assert.equal(harness.readDocument(), harness.prefix + "请使用新名称开展工作。" + harness.suffix);
+        assert.equal(await harness.window.undoProofreadingIssue(issue.id), true);
+        assert.equal(harness.readDocument(), harness.prefix + harness.selectedText + harness.suffix);
+        harness.window.WpsSettingsStore.updateSettings({ rulesOnly: false });
+        assert.equal((await harness.window.runProofreading()).accepted, false);
+        assert.equal(harness.requests.length, 0);
+    }
+});
+
+test("rules-only ignores AI review rules and can finish with no local hits", async () => {
+    const harness = createHarness({
+        selectedText: "高空作业管理不到位。",
+        seed: JSON.stringify({ rulesOnly: true }),
+        rules: [{ id: "ai-only", name: "术语核查", type: "ai_review", pattern: "高空作业",
+            replacement: "高处作业", instruction: "按语境核查专业术语。" }]
+    });
+    const result = await harness.window.runProofreading();
+    assert.equal(result.accepted, true);
+    assert.equal(result.issues, 0);
+    assert.equal(harness.requests.length, 0);
+    assert.match(harness.status.text, /未发现规则命中/);
+});
+
+test("rules-only retains full-document confirmation and rejects edits while awaiting it", async () => {
+    const harness = createHarness({ noSelection: true, deferConfirmation: true,
+        seed: JSON.stringify({ rulesOnly: true }) });
+    const run = harness.window.runProofreading();
+    await harness.confirmationRequested;
+    assert.equal(harness.confirmationDetails[0].rulesOnly, true);
+    assert.equal(harness.confirmationDetails[0].model, "");
+    harness.changeDocument("等待期间已改动。");
+    harness.resolveConfirmation(true);
+    const result = await run;
+    assert.equal(result.reason, "document-changed-before-request");
+    assert.equal(harness.requests.length, 0);
+    assert.equal(harness.busy, false);
+});
+
+test("rules-only discards local findings if the document changes during scanning", async () => {
+    const harness = createHarness({ seed: JSON.stringify({ rulesOnly: true }) });
+    harness.window.WpsRulesCenter.evaluate = () => {
+        harness.changeDocument("校对期间已改动。");
+        return [];
+    };
+    const result = await harness.window.runProofreading();
+    assert.equal(result.accepted, false);
+    assert.match(harness.status.text, /结果已丢弃/);
+    assert.equal(harness.window.getWpsProofreadingState().snapshot, null);
+    assert.equal(harness.requests.length, 0);
+});
+
 test("semantic local rules run before AI and require individual confirmation", async () => {
     const harness = createHarness({
         selectedText: "请使用旧名称开展工作。",
@@ -2573,6 +3466,76 @@ function secondDocument(harness, name = "B.docx") {
     } });
     return { original, document, calls, read: () => body };
 }
+
+test("a document switch while opening a batch undo record leaves B's suggestions intact", async () => {
+    for (const trackRevisions of [false, true]) {
+        const { harness, calls } = undoRecordHarness({
+            trackRevisions, selectedText: "甲,乙。丙,丁。", issues: [],
+            rules: [basicRule("basic-ascii-comma-between-hanzi")]
+        });
+        const monitor = installDocumentMonitor(harness);
+        const b = secondDocument(harness);
+        await harness.window.runProofreading();
+        monitor.activate(b.document);
+        await harness.window.runProofreading();
+        const bStatus = Object.assign({}, harness.status);
+        const bText = b.read();
+        monitor.activate(b.original);
+        const before = harness.readDocument();
+        const start = harness.window.Application.UndoRecord.StartCustomRecord;
+        harness.window.Application.UndoRecord.StartCustomRecord = function (name) {
+            start.call(this, name);
+            monitor.activate(b.document);
+        };
+
+        const result = harness.window.applyAllProofreadingIssues();
+        assert.equal(result.applied, 0);
+        assert.equal(result.failed, 0);
+        assert.equal(result.unattempted, 2);
+        assert.equal(result.documentChanged, true);
+        assert.equal(harness.readDocument(), before);
+        assert.equal(b.read(), bText);
+        assert.equal(harness.window.getWpsProofreadingState().issues.every((issue) => issue.status === "pending"), true);
+        assert.deepEqual(Object.assign({}, harness.status), bStatus);
+        assert.equal(harness.window.getWpsProofreadingState().actionBusy, false);
+        assert.deepEqual(calls, [["start", "一键修正"], ["end"]]);
+    }
+});
+
+test("a document switch after a confirmed batch write counts it and preserves B", async () => {
+    for (const trackRevisions of [false, true]) {
+        const { harness, calls } = undoRecordHarness({
+            trackRevisions, selectedText: "甲,乙。丙,丁。", issues: [],
+            rules: [basicRule("basic-ascii-comma-between-hanzi")]
+        });
+        const monitor = installDocumentMonitor(harness);
+        const b = secondDocument(harness);
+        await harness.window.runProofreading();
+        monitor.activate(b.document);
+        await harness.window.runProofreading();
+        const bStatus = Object.assign({}, harness.status);
+        const bText = b.read();
+        monitor.activate(b.original);
+        const record = harness.window.pushProofreadingRecord;
+        harness.window.pushProofreadingRecord = function (value) {
+            const result = record(value);
+            monitor.activate(b.document);
+            return result;
+        };
+
+        const result = harness.window.applyAllProofreadingIssues();
+        assert.equal(result.applied, 1);
+        assert.equal(result.failed, 0);
+        assert.equal(result.unattempted, 1);
+        assert.equal(result.documentChanged, true);
+        assert.equal(harness.readDocument().split("，").length - 1, 1);
+        assert.equal(b.read(), bText);
+        assert.equal(harness.window.getWpsProofreadingState().issues.every((issue) => issue.status === "pending"), true);
+        assert.deepEqual(Object.assign({}, harness.status), bStatus);
+        assert.equal(harness.window.getWpsProofreadingState().actionBusy, false);
+        assert.deepEqual(calls, [["start", "一键修正"], ["end"]]);
+    }
+});
 
 test("document sessions hide A in new B and restore two independent result sets repeatedly", async () => {
     const harness = twoIssueHarness();

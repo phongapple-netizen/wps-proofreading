@@ -21,19 +21,28 @@
                     <path d="M9.24,5.35 10.50,4.96 10.35,2.64 13.65,2.64 13.50,4.96 14.76,5.35 15.92,5.96 17.45,4.22 19.78,6.55 18.04,8.08 18.65,9.24 19.04,10.50 21.36,10.35 21.36,13.65 19.04,13.50 18.65,14.76 18.04,15.92 19.78,17.45 17.45,19.78 15.92,18.04 14.76,18.65 13.50,19.04 13.65,21.36 10.35,21.36 10.50,19.04 9.24,18.65 8.08,18.04 6.55,19.78 4.22,17.45 5.96,15.92 5.35,14.76 4.96,13.50 2.64,13.65 2.64,10.35 4.96,10.50 5.35,9.24 5.96,8.08 4.22,6.55 6.55,4.22 8.08,5.96Z"></path>
                     <circle cx="12" cy="12" r="3"></circle>
                 </svg>
+                <span id="connection-dot" class="connection-dot connection-dot-idle" aria-hidden="true"></span>
             </button>
 
         </div>
 
         <div id="proofreading-view">
-        <section class="panel run-panel">
-            <div class="run-actions">
-                <button id="run-proofreading" class="button button-primary" type="button">开始校对</button>
-                <button id="cancel-proofreading" class="button button-danger" type="button" hidden disabled>取消</button>
-            </div>
+
+
+        <section class="panel results-panel" aria-labelledby="result-heading">
+            <h2 id="result-heading" class="sr-only">校对结果</h2>
+            <div class="tab-bar result-tab-row" role="tablist">
+                <button id="tab-issues" class="tab is-active" type="button" role="tab" aria-selected="true">
+                    校对建议<span id="result-count" class="count-badge">0</span>
+                </button>
+                <button id="tab-history" class="tab" type="button" role="tab" aria-selected="false">修改记录</button>
             <label id="deep-enhance-control" class="toolbar-deep" for="deep-enhance">
-                <input id="deep-enhance" type="checkbox"><span>深度增强</span><small>更慢，检查更细</small>
+                <input id="deep-enhance" type="checkbox"><span>深度增强</span>
             </label>
+            </div>
+        <section class="panel run-panel">
+
+
             <div id="full-document-confirmation" class="full-document-confirmation" role="group"
                  aria-labelledby="full-document-confirmation-title" hidden>
                 <p id="full-document-confirmation-title" class="full-document-confirmation-title">确认校对全文</p>
@@ -45,44 +54,41 @@
             </div>
             <div id="proofreading-progress" class="progress" hidden>
                 <div class="progress-track"><div id="progress-fill" class="progress-fill"></div></div>
-                <span id="progress-label" class="progress-label"></span>
+                <div class="progress-meta"><span id="progress-label" class="progress-label"></span>
+                <button id="cancel-proofreading" class="button button-text" type="button" hidden disabled>取消</button></div>
             </div>
         </section>
-
-        <section class="panel" aria-labelledby="result-heading">
-            <h2 id="result-heading" class="sr-only">校对结果</h2>
-            <div class="tab-bar result-tab-row" role="tablist">
-                <button id="tab-issues" class="tab is-active" type="button" role="tab" aria-selected="true">
-                    校对建议 <span id="result-count" class="count-badge">0</span>
-                </button>
-                <button id="tab-history" class="tab" type="button" role="tab" aria-selected="false">修改记录</button>
+            <div class="result-summary-row">
                 <div class="result-tools"><label class="sr-only" for="issue-filter">筛选问题类型</label>
                     <select id="issue-filter" class="filter-control">
                         <option value="all">全部类型</option><option value="typo">错别字</option><option value="punctuation">标点</option>
                         <option value="grammar">语法</option><option value="redundancy">重复冗余</option><option value="wording">用词</option>
                         <option value="consistency">前后统一</option><option value="rule">规则核对</option>
                     </select></div>
-            </div>
-            <div class="result-summary-row">
                 <div id="result-summary" class="result-summary" role="status" aria-live="polite">待处理 0（其中需复核 0）· 已处理 0</div>
                 <div id="result-stale-summary" class="result-stale-summary" role="status" aria-live="polite" hidden>需重查 0</div>
                 <div id="proofreading-status" class="status status-idle status-compact" role="status" aria-live="polite">等待开始</div>
             </div>
             <div id="proofreading-toast" class="proofreading-toast" role="status" aria-live="polite" hidden></div>
-            <div id="empty-state" class="empty-state">校对结果会显示在这里。</div>
+            <div class="results-scroll">
+            <div class="empty-start">
+            <p class="empty-guidance">选中文字只校对选区，不选则校对全文</p>
+            <div id="empty-state" class="empty-state">选中文字只校对选区，不选则校对全文</div>
+            <button id="run-proofreading" class="button button-primary" type="button">开始校对</button>
+            <p id="proofreading-mode-hint" class="empty-hint">先跑本地规则，再由模型分批复核</p></div>
             <div id="proofreading-issues" class="issue-list" hidden></div>
             <div id="history-empty" class="empty-state" hidden>本次会话还没有处理记录。</div>
             <div id="proofreading-history" class="history-list" hidden></div>
+            </div>
             <div class="result-footer">
                 <div class="apply-all-wrap">
-                    <button id="apply-all" class="button button-primary" type="button" disabled>修正安全格式项（0）</button>
+                    <button id="apply-all" class="button button-secondary" type="button" title="仅处理低风险格式规则，其他建议需逐条确认" disabled>一键修正（0）</button>
                 </div>
-                <button id="rerun-proofreading" class="button button-secondary" type="button">重新校对</button>
-                <p class="apply-all-note">一键修正仅处理低风险格式规则</p>
+                <button id="rerun-proofreading" class="button button-secondary" type="button">↻ 重新校对</button>
             </div>
         </section>
 
-        <p class="footer-note">每次校对先在本地执行已启用规则，再由所选模型分批复核正文（每批约 2500 字）；规则与 AI 结果会自动去重、合并。应用前会再次核对原文，文档已变化时不会写入。</p>
+        <span class="footer-info" tabindex="0" aria-label="每次校对先在本地执行已启用规则，再由所选模型分批复核正文（每批约 2500 字）；规则与 AI 结果会自动去重、合并。应用前会再次核对原文，文档已变化时不会写入。" title="每次校对先在本地执行已启用规则，再由所选模型分批复核正文（每批约 2500 字）；规则与 AI 结果会自动去重、合并。应用前会再次核对原文，文档已变化时不会写入。">ⓘ</span>
         </div>
 
         <section id="rewrite-view" class="rewrite-view" hidden aria-labelledby="rewrite-heading">
@@ -143,6 +149,11 @@
                     <span id="model-summary" class="field-note">尚未配置模型。</span>
                 </div>
                 </div>
+                <label class="settings-option" for="rules-only">
+                    <input id="rules-only" type="checkbox" aria-describedby="rules-only-note">
+                    <span>仅用规则校对</span>
+                </label>
+                <p id="rules-only-note" class="field-note rules-only-note">开启后仅检查已启用的本地规则，无需配置大模型，也不会发送正文。AI 核查规则和改写仍需模型。</p>
                 <label class="settings-option" for="auto-advance">
                     <input id="auto-advance" type="checkbox" checked>
                     <span>修正后自动定位下一条</span>
