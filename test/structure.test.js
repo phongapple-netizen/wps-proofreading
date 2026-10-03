@@ -1603,3 +1603,44 @@ test('A locate toast is transient and switching A-B-A restores A persistent stat
   h.activate(h.b);
   assert.equal(elements['proofreading-status'].textContent, 'B 的独立持久状态');
 });
+
+test('UI selection hook follows integration navigation without locating twice', () => {
+  const h = createResultHarness();
+  h.win.setProofreadingIssues([
+    { id: 'a', original: '错', suggestion: '对', status: 'pending' },
+    { id: 'b', original: '旧', suggestion: '新', status: 'pending' }
+  ]);
+  const [a, b] = h.elements['proofreading-issues'].children;
+  h.win.setActiveProofreadingIssue('a');
+  assert.equal(a.getAttribute('aria-expanded'), 'true');
+  h.win.applyProofreadingIssue = id => {
+    h.calls.push(['apply', id]);
+    h.win.setActiveProofreadingIssue('b');
+    return true;
+  };
+  findNode(a, node => node.tag === 'button' && node.textContent === '修正').fire('click');
+  assert.deepEqual(h.calls, [['apply', 'a']]);
+  assert.equal(a.getAttribute('aria-expanded'), 'false');
+  assert.equal(b.getAttribute('aria-expanded'), 'true');
+});
+
+test('zero-result completion survives view restoration and busy resets', () => {
+  const h = createResultHarness();
+  h.win.beginProofreadingRun();
+  h.win.setProofreadingBusy(true);
+  h.win.setProofreadingStatus('校对完成 · 未发现明显问题。', 'success');
+  h.win.setProofreadingBusy(false);
+  const saved = h.win.captureProofreadingView();
+  assert.equal(saved.runFinished, true);
+  assert.equal(h.elements['proofreading-view'].getAttribute('data-finished-empty'), 'true');
+  assert.match(h.elements['empty-state'].textContent, /未发现明显问题/);
+  h.win.restoreProofreadingView({ issues: [] });
+  h.win.setProofreadingBusy(false);
+  assert.equal(h.win.captureProofreadingView().runFinished, false);
+  h.win.restoreProofreadingView(saved);
+  h.win.setProofreadingStatus('校对完成 · 未发现明显问题。', 'success');
+  h.win.setProofreadingBusy(false);
+  assert.equal(h.win.captureProofreadingView().runFinished, true);
+  h.win.beginProofreadingRun();
+  assert.equal(h.win.captureProofreadingView().runFinished, false);
+});

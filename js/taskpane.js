@@ -4,8 +4,10 @@
     var state = {
         status: { text: "等待开始", tone: "idle" },
         issues: [],
+        activeIssueId: "",
         filter: "all",
         busy: false,
+        runFinished: false,
         actionBusy: false,
         firstPassComplete: false,
         rewriteBusy: false,
@@ -60,16 +62,33 @@
             return nextStatus;
         }
         state.status = nextStatus;
+        if (/^校对完成|^校对已取消|^校对中断/.test(nextStatus.text) ||
+            (state.busy && nextStatus.tone === "error")) state.runFinished = true;
         var element = byId("proofreading-status");
         if (element) {
             element.textContent = state.status.text;
             element.className = "status status-" + state.status.tone +
                 (state.status.tone === "success" || state.status.tone === "idle" ? " status-compact" : "");
         }
+        updatePanelLayout();
+        if (state.runFinished && !state.issues.length) {
+            var empty = byId("empty-state");
+            if (empty) empty.textContent = state.status.text;
+        }
         return state.status;
     }
 
     function setModelConnectionStatus(message, tone) {
+        var settings = loadStoredSettings();
+        if (settings && settings.rulesOnly === true && state.appMode !== "rewrite") {
+            message = "仅规则校对已就绪 · 无需连接模型";
+            tone = "success";
+        }
+        var dot = byId("connection-dot");
+        if (dot) {
+            dot.className = "connection-dot connection-dot-" + String(tone || "idle");
+            dot.title = String(message || "尚未连接");
+        }
         var element = byId("connection-status");
         if (element) {
             element.textContent = String(message || "");
@@ -113,9 +132,8 @@
         if (runButton) runButton.disabled = state.busy || state.actionBusy;
         if (applyAllButton) {
             applyAllButton.disabled = issueWriteLocked() || state.actionBusy || !autoFixableCount();
-            applyAllButton.title = issueWriteLocked() ? "校对完成后可修改正文" :
-                pendingCount() > autoFixableCount()
-                    ? "仅自动修正内置低风险标点格式规则" : "";
+            applyAllButton.title = issueWriteLocked() ? "校对完成后可修改正文；仅处理低风险格式规则" :
+                "仅处理低风险格式规则，其他建议需逐条确认";
         }
         if (rerunButton) rerunButton.disabled = state.actionBusy;
         renderedIssueActionButtons.forEach(function (button) {
@@ -205,7 +223,9 @@
         var target = String(value.providerLabel || "所选模型服务");
         if (value.model) target += "（" + String(value.model) + "）";
         message.textContent = "当前未选择文字，将校对全文，共 " +
-            (Number(value.characterCount) || 0) + " 个字符。\n待校对文本将发送给 " + target + "。";
+            (Number(value.characterCount) || 0) + " 个字符。\n" + (value.rulesOnly === true
+                ? "仅在本机检查已启用的规则，不发送正文。"
+                : "待校对文本将发送给 " + target + "。");
         return new Promise(function (resolve) {
             pendingFullDocumentConfirmation = {
                 resolve: resolve,
@@ -234,9 +254,16 @@
         }
         bar.hidden = false;
         if (fill) fill.style.width = value + "%";
-        if (labelEl) labelEl.textContent = label
-            ? label + (/\d+%/.test(label) || value === 0 ? "" : " · " + value + "%")
-            : value + "%";
+        if (labelEl) {
+            var fullLabel = String(label || "");
+            var batch = fullLabel.match(/第\s*\d+\/\d+\s*批/);
+            var stage = fullLabel.match(/正文校对|全文一致性复核|一致性复核|深度增强|本地规则/);
+            labelEl.title = fullLabel;
+            labelEl.setAttribute("aria-label", fullLabel || value + "%");
+            labelEl.textContent = batch
+                ? (stage ? stage[0] + " · " : "") + batch[0] + " · " + value + "%"
+                : (fullLabel ? fullLabel + (/\d+%/.test(fullLabel) || value === 0 ? "" : " · " + value + "%") : value + "%");
+        }
     }
 
     function getProofreadingStatus() {
@@ -382,7 +409,8 @@
         var processed = processedCount();
         var stale = staleCount();
         var autoFixable = autoFixableCount();
-        if (count) count.textContent = String(pending);
+        if (count) { count.textContent = String(pending); count.hidden = pending === 0; }
+        updatePanelLayout();
         var summary = byId("result-summary");
         if (summary) {
             summary.textContent = "";
@@ -392,19 +420,16 @@
                 part.textContent = text;
                 summary.appendChild(part);
             }
-            summaryPart("待处理 " + pending, "summary-pending");
-            summaryPart(" · ", "summary-separator");
-            summaryPart("需复核 " + review, "summary-review");
-            summaryPart(" · ", "summary-separator");
-            summaryPart("已处理 " + processed, "summary-processed");
-            if (stale) {
-                summaryPart(" · ", "summary-separator");
-                summaryPart("需重查 " + stale, "summary-stale");
-            }
-            var dot = root.document.createElement("span");
-            dot.className = "summary-dot";
-            dot.setAttribute("aria-hidden", "true");
-            summary.insertBefore(dot, summary.children[0] || null);
+            var parts = [[pending, "待处理", "summary-pending"],
+                [review, "需复核", "summary-review"], [processed, "已处理", "summary-processed"],
+                [stale, "需重查", "summary-stale"]];
+            var added = false;
+            parts.forEach(function (part) {
+                if (!part[0]) return;
+                if (added) summaryPart(" · ", "summary-separator");
+                summaryPart(part[1] + " " + part[0], part[2]);
+                added = true;
+            });
         }
         var staleSummary = byId("result-stale-summary");
         if (staleSummary) {
@@ -521,10 +546,12 @@
         if (filter) filter.disabled = !showIssues;
         if (showIssues) renderIssues();
         else renderHistory();
+        updatePanelLayout();
     }
 
     function clearIssues() {
         state.issues = [];
+        state.activeIssueId = "";
         issueCardCache = Object.create(null);
         processedIssuesDetails = null;
         processedIssuesSummary = null;
@@ -544,6 +571,7 @@
     }
 
     function beginProofreadingRun() {
+        state.runFinished = false;
         state.firstPassComplete = false;
         state.emptyMessage = "校对结果会显示在这里。";
         state.filter = "all";
@@ -566,6 +594,7 @@
         return {
             issues: state.issues.slice(), history: state.history.slice(),
             historyIds: Object.assign({}, state.historyIds), filter: state.filter,
+            activeIssueId: state.activeIssueId, runFinished: state.runFinished,
             tab: state.tab, emptyMessage: state.emptyMessage,
             scrollTop: list ? list.scrollTop : 0, expanded: expanded,
             processedOpen: !!(processed && processed.open)
@@ -575,6 +604,8 @@
     function restoreProofreadingView(view) {
         var saved = view || {};
         state.issues = saved.issues || [];
+        state.activeIssueId = saved.activeIssueId || "";
+        state.runFinished = saved.runFinished === true;
         issueCardCache = Object.create(null);
         processedIssuesDetails = null;
         processedIssuesSummary = null;
@@ -620,6 +651,11 @@
         }
         try {
             var result = callback(issueId);
+            if (name === "ignoreProofreadingIssue") {
+                if (result && typeof result.then === "function") {
+                    result = result.then(function (value) { return advanceAfterIgnore(issueId, value); });
+                } else { advanceAfterIgnore(issueId, result); }
+            }
             if (result && typeof result.then === "function") {
                 return result.catch(function () {
                     setProofreadingStatus(fallbackMessage, "error");
@@ -847,6 +883,62 @@
         }
     }
 
+    function updatePanelLayout() {
+        var hasResults = state.issues.length > 0;
+        // A finished run with no issues shows its result instead of the first-run guidance.
+        var finishedEmpty = !hasResults && !state.busy && state.runFinished;
+        var view = byId("proofreading-view");
+        if (view) {
+            view.setAttribute("data-has-results", hasResults ? "true" : "false");
+            view.setAttribute("data-busy", state.busy ? "true" : "false");
+            view.setAttribute("data-finished-empty", finishedEmpty ? "true" : "false");
+        }
+        var start = byId("run-proofreading");
+        if (start) {
+            start.hidden = hasResults || state.busy || state.tab !== "issues";
+            start.textContent = finishedEmpty ? "重新校对" : "开始校对";
+        }
+        var rerun = byId("rerun-proofreading");
+        if (rerun) rerun.hidden = !hasResults || state.busy;
+    }
+
+    // Only expands the card; the document cursor is moved by the integration layer.
+    function setActiveIssue(id) {
+        state.activeIssueId = String(id || "");
+        Object.keys(issueCardCache).forEach(function (key) {
+            var card = issueCardCache[key].card;
+            card.setAttribute("aria-expanded", key === state.activeIssueId ? "true" : "false");
+            var analysis = card.querySelector && card.querySelector(".issue-analysis");
+            if (analysis) analysis.open = key === state.activeIssueId;
+        });
+        return state.activeIssueId;
+    }
+
+    function selectIssue(issue) {
+        if (state.actionBusy) return;
+        setActiveIssue(issue.id);
+        // Processed cards have no live range; locating them only produces a "stale" warning.
+        if (issue.status === "pending") callAction("locateProofreadingIssue", issue.id, "当前操作未能完成。");
+    }
+
+    // Apply already auto-advances inside the integration; ignore does not, so follow up here.
+    function advanceAfterIgnore(id, result) {
+        if (result === false || (result && result.ok === false)) return result;
+        var settings = loadStoredSettings();
+        if (!settings || settings.autoAdvance === false) return result;
+        var shown = visibleIssues();
+        var index = -1;
+        shown.forEach(function (issue, i) { if (issue.id === id) index = i; });
+        var next = null;
+        for (var step = 1; step <= shown.length; step += 1) {
+            var candidate = shown[(index + step) % shown.length];
+            if (candidate && candidate.id !== id && candidate.status === "pending") { next = candidate; break; }
+        }
+        if (next) selectIssue(next);
+        else setActiveIssue("");
+        return result;
+    }
+
     function createIssueCard(issue, expanded) {
         var pending = issue.status === "pending";
         var reviewOnly = isReviewOnlyIssue(issue);
@@ -854,10 +946,20 @@
         var card = root.document.createElement("article");
         card.setAttribute("data-issue-id", issue.id);
         card.className = "issue-card" + ((issue.needsReview || reviewOnly) ? " is-review" : "") + (pending && !state.busy ? " is-locatable" : "");
-        if (pending) {
+        card.setAttribute("tabindex", "0");
+        card.setAttribute("aria-label", issue.ruleName || issue.categoryLabel);
+        card.setAttribute("aria-expanded", state.activeIssueId === issue.id ? "true" : "false");
+        card.addEventListener("keydown", function (event) {
+            if (event.target && event.target !== card) return;
+            if (event.key === "Enter" || event.key === " ") {
+                if (event.preventDefault) event.preventDefault();
+                selectIssue(issue);
+            }
+        });
+        if (pending || isProcessedIssue(issue)) {
             card.addEventListener("click", function () {
                 if (state.actionBusy) return;
-                callAction("locateProofreadingIssue", issue.id, "当前操作未能完成。");
+                selectIssue(issue);
             });
         }
 
@@ -881,7 +983,7 @@
         } else if (issue.origin === "ai-review") {
             var reviewBadge = root.document.createElement("span");
             reviewBadge.className = "badge-source";
-            reviewBadge.textContent = "AI核查";
+            reviewBadge.textContent = "AI";
             if (issue.ruleSource) reviewBadge.title = "来源：" + issue.ruleSource;
             badges.appendChild(reviewBadge);
         } else if (issue.origin === "rule") {
@@ -890,8 +992,13 @@
             ruleBadge.textContent = "本地规则";
             if (issue.ruleSource) ruleBadge.title = "来源：" + issue.ruleSource;
             badges.appendChild(ruleBadge);
+        } else if (issue.origin === "ai") {
+            var aiBadge = root.document.createElement("span");
+            aiBadge.className = "badge-source";
+            aiBadge.textContent = "AI";
+            badges.appendChild(aiBadge);
         }
-        if (issue.needsReview) {
+        if (issue.needsReview || reviewOnly) {
             var deepBadge = root.document.createElement("span");
             deepBadge.className = "badge-deep";
             deepBadge.textContent = "需复核";
@@ -945,15 +1052,38 @@
                     diff.appendChild(deleteLabel);
                 }
             }
+            if (!reviewOnly && issue.original !== issue.suggestion) {
+                diff.hidden = !Array.prototype.some.call(diff.children, function (part) {
+                    return part.className === "diff-common" && part.textContent.length > 0;
+                });
+            }
             mainRow.appendChild(diff);
         }
+        var preview = root.document.createElement("p");
+        preview.className = "issue-preview";
+        if (reviewOnly || issue.original === issue.suggestion) {
+            preview.textContent = issue.original || issue.suggestion;
+        } else {
+            var oldPreview = root.document.createElement("span");
+            oldPreview.className = "preview-old";
+            oldPreview.textContent = issue.original;
+            var arrow = root.document.createElement("span");
+            arrow.className = "preview-arrow";
+            arrow.textContent = " → ";
+            var newPreview = root.document.createElement("span");
+            newPreview.className = "preview-new";
+            newPreview.textContent = deleteIssue ? "（删除）" : issue.suggestion;
+            preview.appendChild(oldPreview); preview.appendChild(arrow); preview.appendChild(newPreview);
+        }
+        if (/^[，。；：、！？,.!?:;]+$/.test(issue.original + issue.suggestion)) preview.className += " is-punctuation";
+        mainRow.appendChild(preview);
         mainRow.appendChild(actions);
         card.appendChild(mainRow);
 
         if (issue.reason) {
             var analysis = root.document.createElement("details");
             analysis.className = "issue-analysis";
-            analysis.open = expanded[issue.id] === true;
+            analysis.open = expanded[issue.id] === true || state.activeIssueId === issue.id;
             analysis.addEventListener("click", function (event) {
                 if (event && typeof event.stopPropagation === "function") event.stopPropagation();
             });
@@ -967,7 +1097,7 @@
         }
 
         var stateText = issue.status === "pending"
-            ? (!issue.needsReview && reviewOnly ? "需复核" : "")
+                ? ""
             : issue.status === "stale" ? "需重查" : issue.status === "accepted" ? "已修正" :
                 issue.status === "ignored" ? "已忽略" : issue.status;
         if (stateText) {
@@ -981,7 +1111,8 @@
             savedLine.className = "issue-state rule-saved-feedback";
             savedLine.textContent = "已保存为固定替换规则，下次校对时生效。";
             card.appendChild(savedLine);
-        }        return card;
+        }        card.appendChild(actions);
+        return card;
 
     }
 
@@ -1035,7 +1166,7 @@
             if (emptyState) {
                 emptyState.textContent = state.issues.length
                     ? "当前筛选类型没有问题。"
-                    : state.emptyMessage;
+                    : state.runFinished ? state.status.text : state.emptyMessage;
                 emptyState.hidden = false;
             }
             return state.issues.slice();
@@ -1080,6 +1211,7 @@
             var reviewCard = isReviewOnlyIssue(issue);
             card.className = "issue-card" + ((issue.needsReview || reviewCard) ? " is-review" : "") +
                 (pendingCard ? " is-locatable" : "");
+            card.setAttribute("aria-expanded", state.activeIssueId === issue.id ? "true" : "false");
             (isProcessedIssue(issue) ? processedCards : pendingCards).push(card);
         });
 
@@ -1162,7 +1294,12 @@
         var deepControl = byId("deep-enhance-control");
         if (proofreadingView) proofreadingView.hidden = rewriteMode;
         if (rewriteView) rewriteView.hidden = !rewriteMode;
-        if (deepControl) deepControl.hidden = rewriteMode;
+        var settings = loadStoredSettings();
+        if (deepControl) deepControl.hidden = rewriteMode || !!(settings && settings.rulesOnly === true);
+        if (typeof root.getModelConnectionState === "function") {
+            var connection = root.getModelConnectionState();
+            setModelConnectionStatus(connection.text, connection.tone);
+        }
         if (proofreadingTab) {
             proofreadingTab.classList.toggle("is-active", !rewriteMode);
             proofreadingTab.setAttribute("aria-selected", rewriteMode ? "false" : "true");
@@ -1217,6 +1354,7 @@
     root.getAppMode = function () { return state.appMode; };
     root.getProofreadingStatus = root.getProofreadingStatus || getProofreadingStatus;
     root.setProofreadingIssues = root.setProofreadingIssues || renderIssues;
+    root.setActiveProofreadingIssue = setActiveIssue;
     root.markProofreadingIssueRuleSaved = function (issueId) {
         var issue = state.issues.find(function (candidate) { return candidate.id === String(issueId); });
         if (!issue) return false;
@@ -1366,6 +1504,9 @@
         var keyField = byId("model-api-key");
         var deepField = byId("deep-enhance");
         var autoAdvanceField = byId("auto-advance");
+        var rulesOnlyField = byId("rules-only");
+        var deepControl = byId("deep-enhance-control");
+        var modeHint = byId("proofreading-mode-hint");
 
         if (providerField && providerField.value !== provider) providerField.value = provider;
         applyProviderUi(provider);
@@ -1382,6 +1523,11 @@
         }
         if (deepField) deepField.checked = settings.deep === true;
         if (autoAdvanceField) autoAdvanceField.checked = settings.autoAdvance !== false;
+        if (rulesOnlyField) rulesOnlyField.checked = settings.rulesOnly === true;
+        if (deepControl) deepControl.hidden = state.appMode === "rewrite" || settings.rulesOnly === true;
+        if (modeHint) modeHint.textContent = settings.rulesOnly === true
+            ? "仅规则校对 · 只检查已启用的本地规则"
+            : "先跑本地规则，再由模型分批复核";
         syncModelSuggestions(settings);
     }
 
@@ -1393,6 +1539,7 @@
         var keyField = byId("model-api-key");
         var deepField = byId("deep-enhance");
         var autoAdvanceField = byId("auto-advance");
+        var rulesOnlyField = byId("rules-only");
         var refreshButton = byId("refresh-models");
         var manualToggle = byId("model-input-toggle");
         var opencodeRetry = byId("opencode-retry");
@@ -1406,7 +1553,8 @@
                 api.updateSettings({ provider: providerField.value });
                 invalidateModelConnection();
                 syncFormFromStore();
-                if (providerField.value === "opencode" && typeof root.refreshProviderModels === "function") {
+                if (providerField.value === "opencode" && loadStoredSettings().rulesOnly !== true &&
+                    typeof root.refreshProviderModels === "function") {
                     root.refreshProviderModels();
                 }
             });
@@ -1463,6 +1611,14 @@
             autoAdvanceField.addEventListener("change", function () {
                 if (!api) return;
                 api.updateSettings({ autoAdvance: autoAdvanceField.checked === true });
+            });
+        }
+        if (rulesOnlyField) {
+            rulesOnlyField.addEventListener("change", function () {
+                if (!api) return;
+                api.updateSettings({ rulesOnly: rulesOnlyField.checked === true });
+                if (typeof root.syncProofreadingSettings === "function") root.syncProofreadingSettings();
+                syncFormFromStore();
             });
         }
         if (refreshButton) {

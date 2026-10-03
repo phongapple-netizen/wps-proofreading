@@ -338,14 +338,17 @@
 
         if (selectedText.trim()) {
             selectedText = root.WpsProofreadingCore.validateSelection(selectedText);
-            if (!Number.isFinite(start) || !Number.isFinite(end) || end - start !== selectedText.length) {
+            if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 ||
+                end < start || end - start < selectedText.length) {
                 throw new Error("WPS 选区位置与文本长度不一致，请重新选择后重试。");
             }
             return {
                 mode: "selection",
                 documentKey: documentKey(document),
                 start: start,
-                end: end,
+                end: start + selectedText.length,
+                nativeEnd: end,
+                revisionCoordinates: end - start !== selectedText.length,
                 selectedText: selectedText,
                 prefixText: prefixText
             };
@@ -374,6 +377,8 @@
             documentKey: documentKey(document),
             start: start,
             end: end,
+            nativeEnd: Number(content.End),
+            revisionCoordinates: Number(content.End) - start !== fullText.length,
             selectedText: fullText,
             prefixText: prefixText
         };
@@ -395,7 +400,8 @@
                     text(document.Range(0, snapshot.start).Text) === snapshot.prefixText;
             }
             return text(document.Range(0, snapshot.start).Text) === snapshot.prefixText &&
-                text(document.Range(snapshot.start, snapshot.end).Text) === snapshot.selectedText;
+                text(document.Range(snapshot.start, Number.isInteger(snapshot.nativeEnd)
+                    ? snapshot.nativeEnd : snapshot.end).Text) === snapshot.selectedText;
         } catch (error) {
             return false;
         }
@@ -405,7 +411,7 @@
         try {
             var document = activeDocument(app());
             if (!document || documentKey(document) !== snapshot.documentKey) return false;
-            var bounds = revisionSearchBounds(document);
+            var bounds = revisionSearchBounds(document, snapshot);
             return !!bounds && text(document.Range(0, snapshot.start).Text) === snapshot.prefixText &&
                 text(document.Range(snapshot.start, bounds.end).Text) === snapshot.selectedText;
         } catch (error) { return false; }
@@ -421,21 +427,42 @@
         return true;
     }
 
-    function revisionSearchBounds(document, selectedText, allowMissingTail) {
+    function revisionSearchBounds(document, snapshotOverride, allowMissingTail) {
         var content = document.Content;
         var start = Number(content && content.Start);
         var end = Number(content && content.End);
         if (!Number.isInteger(start) || !Number.isInteger(end) || end < start) return null;
-        if (!currentSnapshot || currentSnapshot.mode !== "selection") return { start: start, end: end };
-        var scopeStart = Math.max(start, currentSnapshot.start - ANCHOR_CHARACTERS);
-        var selected = selectedText === undefined ? currentSnapshot.selectedText : selectedText;
+        var snapshot = snapshotOverride || currentSnapshot;
+        if (!snapshot || snapshot.mode !== "selection") return { start: start, end: end };
+        var scopeStart = Math.max(start, snapshot.start - ANCHOR_CHARACTERS);
+        // Native coordinates include deleted revisions. Keep the captured scope's
+        // physical boundary instead of choosing the first matching tail in it.
+        if (Number.isInteger(snapshot.nativeEnd)) {
+            return snapshot.start >= start && snapshot.nativeEnd <= end && snapshot.nativeEnd >= snapshot.start
+                ? { start: scopeStart, end: snapshot.nativeEnd } : null;
+        }
+        var selected = snapshot.selectedText;
         if (!selected) return null;
         // Find the first occurrence of the selection's tail after its original start.
         // Later copies outside the selection must not make an issue ambiguous.
         var tail = selected.slice(-Math.min(160, selected.length));
-        var tailRange = firstRevisionTextRange(document, tail, currentSnapshot.start, end);
+        var tailRange = firstRevisionTextRange(document, tail, snapshot.start, end);
         return tailRange ? { start: scopeStart, end: tailRange.end }
             : allowMissingTail ? { start: scopeStart, end: end } : null;
+    }
+
+    function configureRevisionFind(finder) {
+        if (typeof finder.ClearFormatting === "function") finder.ClearFormatting();
+        finder.MatchCase = true;
+        finder.MatchWildcards = false;
+        finder.Wrap = 0;
+        // WPS can inherit the user's last Find options. Optional properties are
+        // unavailable in some older hosts, so reset each supported one separately.
+        var options = { Forward: true, MatchWholeWord: false, Format: false,
+            MatchSoundsLike: false, MatchAllWordForms: false };
+        Object.keys(options).forEach(function (name) {
+            try { finder[name] = options[name]; } catch (error) { /* Optional host property. */ }
+        });
     }
 
     function firstRevisionTextRange(document, needle, start, end) {
@@ -444,10 +471,7 @@
             var range = document.Range(start, end);
             var finder = range && range.Find;
             if (finder && typeof finder.Execute === "function") {
-                if (typeof finder.ClearFormatting === "function") finder.ClearFormatting();
-                finder.MatchCase = true;
-                finder.MatchWildcards = false;
-                finder.Wrap = 0;
+                configureRevisionFind(finder);
                 var result = finder.Execute(needle);
                 if (!(result === true || result === 1 || result === -1 || finder.Found === true)) return null;
                 return text(range.Text) === needle ? { start: Number(range.Start), end: Number(range.End) } : null;
@@ -478,10 +502,7 @@
                     if (found) return null;
                     break;
                 }
-                if (typeof finder.ClearFormatting === "function") finder.ClearFormatting();
-                finder.MatchCase = true;
-                finder.MatchWildcards = false;
-                finder.Wrap = 0;
+                configureRevisionFind(finder);
                 var result = finder.Execute(needle);
                 if (!(result === true || result === 1 || result === -1 || finder.Found === true)) {
                     return found;
@@ -512,15 +533,77 @@
         }
     }
 
-    function findAnchoredRevisionRange(document, expected, before, after, selectedText, hint, allowMissingTail) {
-        var bounds = revisionSearchBounds(document, selectedText, allowMissingTail);
+    function revisionScopeProof(document, snapshot) {
+        if (!snapshot || !document || documentKey(document) !== snapshot.documentKey) return null;
+        var content = document.Content;
+        var contentStart = Number(content.Start);
+        var contentEnd = Number(content.End);
+        var end = snapshot.mode === "full" ? contentEnd : snapshot.nativeEnd;
+        if (!Number.isInteger(contentStart) || !Number.isInteger(contentEnd) ||
+            !Number.isInteger(end) || snapshot.start < contentStart || end < snapshot.start ||
+            end > contentEnd || (snapshot.mode === "full" && snapshot.start !== contentStart)) return null;
+        if (text(document.Range(0, snapshot.start).Text) !== snapshot.prefixText ||
+            text(document.Range(snapshot.start, end).Text) !== snapshot.selectedText) return null;
+        return { start: snapshot.start, end: end, snapshot: snapshot };
+    }
+
+    function revisionCoordinateAtOffset(document, scope, offset, rightEdge) {
+        if (!Number.isInteger(offset) || offset < 0 || offset > scope.snapshot.selectedText.length) return null;
+        var low = scope.start;
+        var high = scope.end;
+        while (low < high) {
+            var middle = rightEdge ? Math.ceil((low + high) / 2) : Math.floor((low + high) / 2);
+            var length = text(document.Range(scope.start, middle).Text).length;
+            if (rightEdge ? length <= offset : length < offset) low = rightEdge ? middle : middle + 1;
+            else high = rightEdge ? middle - 1 : middle;
+        }
+        // Equal prefix lengths alone are insufficient: confirm the actual prefix.
+        return text(document.Range(scope.start, low).Text) === scope.snapshot.selectedText.slice(0, offset)
+            ? low : null;
+    }
+
+    function provenRevisionRange(document, expected, before, after, snapshot, relativeStart) {
+        if (!Number.isInteger(relativeStart) || relativeStart < 0 ||
+            snapshot.selectedText.slice(relativeStart, relativeStart + expected.length) !== expected) return null;
+        try {
+            var scope = revisionScopeProof(document, snapshot);
+            if (!scope) return null;
+            var start = revisionCoordinateAtOffset(document, scope, relativeStart, true);
+            var end = expected ? revisionCoordinateAtOffset(document, scope, relativeStart + expected.length, false) : start;
+            if (start === null || end === null || end < start ||
+                text(document.Range(start, end).Text) !== expected) return null;
+            var prefix = text(document.Range(0, start).Text);
+            var suffix = text(document.Range(end, scope.end).Text);
+            var trustedPrefix = snapshot.prefixText + snapshot.selectedText.slice(0, relativeStart);
+            var trustedSuffix = snapshot.selectedText.slice(relativeStart + expected.length);
+            if (prefix !== trustedPrefix || suffix !== trustedSuffix ||
+                (before && prefix.slice(-before.length) !== before) || suffix.slice(0, after.length) !== after ||
+                !revisionScopeProof(document, snapshot)) return null;
+            return { start: start, end: end };
+        } catch (error) { return null; }
+    }
+
+    function findAnchoredRevisionRange(document, expected, before, after, snapshotOverride, hint, allowMissingTail, relativeStart) {
+        var snapshot = snapshotOverride || currentSnapshot;
+        var bounds = revisionSearchBounds(document, snapshot, allowMissingTail);
         var query = before + expected + after;
         if (!bounds || !query) return null;
+        var trustedText = snapshot.prefixText.slice(-ANCHOR_CHARACTERS) + snapshot.selectedText;
+        var first = trustedText.indexOf(query);
+        if (first >= 0 && trustedText.indexOf(query, first + 1) >= 0) {
+            // A copy disappearing from the live document must not turn a formerly
+            // ambiguous target into the one remaining (but wrong) occurrence.
+            return provenRevisionRange(document, expected, before, after, snapshot, relativeStart);
+        }
         var context = uniqueRevisionTextRange(document, query, bounds.start, bounds.end, hint);
-        if (!context) return null;
+        // Repeated text and host Find limitations are resolved only from a fully
+        // verified scope and its logical offset, never from the nearest copy.
+        if (!context) return provenRevisionRange(document, expected, before, after, snapshot, relativeStart);
         var beforeRange = before
             ? firstRevisionTextRange(document, before, context.start, context.end) : null;
-        if (before && (!beforeRange || beforeRange.start !== context.start)) return null;
+        if (before && (!beforeRange || beforeRange.start !== context.start)) {
+            return provenRevisionRange(document, expected, before, after, snapshot, relativeStart);
+        }
         var innerStart = beforeRange ? beforeRange.end : context.start;
         var inner;
         if (expected) {
@@ -531,11 +614,15 @@
         } else if (before) {
             inner = { start: innerStart, end: innerStart };
         }
-        if (!inner || inner.start < context.start || inner.end > context.end) return null;
+        if (!inner || inner.start < context.start || inner.end > context.end) {
+            return provenRevisionRange(document, expected, before, after, snapshot, relativeStart);
+        }
         try {
             if (text(document.Range(context.start, inner.start).Text) !== before ||
                 text(document.Range(inner.start, inner.end).Text) !== expected ||
-                text(document.Range(inner.end, context.end).Text) !== after) return null;
+                text(document.Range(inner.end, context.end).Text) !== after) {
+                return provenRevisionRange(document, expected, before, after, snapshot, relativeStart);
+            }
             return inner;
         } catch (error) {
             return null;
@@ -591,9 +678,9 @@
             documentKey(document) !== currentSnapshot.documentKey) return null;
         var context = contextOverride || issueContext(issue, expected);
         if (!context) return null;
-        if (isTrackRevisionsEnabled(document) || Number.isInteger(issue.textOffset)) {
+        if (isTrackRevisionsEnabled(document) || currentSnapshot.revisionCoordinates || Number.isInteger(issue.textOffset)) {
             var anchored = findAnchoredRevisionRange(document, expected, context.before, context.after,
-                undefined, issue.start);
+                undefined, issue.start, false, context.relativeStart);
             return anchored ? document.Range(anchored.start, anchored.end) : null;
         }
         var contextRange = document.Range(context.start, context.end);
@@ -603,7 +690,7 @@
             ? contextRange : document.Range(issue.start, issue.end);
     }
 
-    function updateSnapshotAfterReplacement(start, end, replacement, relativeStart, expectedLength) {
+    function updateSnapshotAfterReplacement(start, end, replacement, relativeStart, expectedLength, nativeEnd) {
         if (!Number.isInteger(relativeStart)) relativeStart = start - currentSnapshot.start;
         var relativeEnd = relativeStart + (Number.isInteger(expectedLength)
             ? expectedLength : end - start);
@@ -611,7 +698,10 @@
             selectedText: currentSnapshot.selectedText.slice(0, relativeStart) +
                 replacement + currentSnapshot.selectedText.slice(relativeEnd),
             end: currentSnapshot.end + replacement.length - (Number.isInteger(expectedLength)
-                ? expectedLength : end - start)
+                ? expectedLength : end - start),
+            nativeEnd: Number.isInteger(nativeEnd) ? nativeEnd
+                : currentSnapshot.nativeEnd + replacement.length - (Number.isInteger(expectedLength)
+                    ? expectedLength : end - start)
         });
     }
 
@@ -750,6 +840,7 @@
     }
 
     function modelSummaryText() {
+        if (currentSettings().rulesOnly === true) return "当前校对：仅用本地规则 · 改写仍需模型";
         var options = modelOptions();
         var labels = { ollama: "Ollama", opencode: "OpenCode", openai: "兼容接口" };
         var parts = [labels[options.provider] || options.provider];
@@ -827,7 +918,7 @@
         syncDocumentSession();
         bindDocumentEvents();
         syncFromStore();
-        if (modelOptions().provider === "opencode" && canManageOpenCode()) {
+        if (currentSettings().rulesOnly !== true && modelOptions().provider === "opencode" && canManageOpenCode()) {
             // The native service is already running when this page is served.
             refreshProviderModels();
         }
@@ -1387,9 +1478,10 @@
             }
             snapshot = runStage(perf, perf && perf.report, "snapshotCaptureMs", captureSnapshot);
             if (!snapshot.documentKey) throw new Error("无法确认当前文档身份，请重新打开文档后重试。");
-            var options = validateModelOptions(modelOptions());
+            var rulesOnly = currentSettings().rulesOnly === true;
+            var options = rulesOnly ? {} : validateModelOptions(modelOptions());
             options.signal = runController ? runController.signal : undefined;
-            var providerLabel = providerDisplayName(options.provider);
+            var providerLabel = rulesOnly ? "本地规则" : providerDisplayName(options.provider);
             var scopeLabel = snapshot.mode === "full" ? "全文" : "选区";
             if (snapshot.mode === "full") {
                 if (typeof root.requestFullDocumentConfirmation !== "function") {
@@ -1401,6 +1493,7 @@
                 setStatus("当前未选择文字，等待确认校对全文…", "warning");
                 var confirmed = await root.requestFullDocumentConfirmation({
                     characterCount: snapshot.selectedText.length,
+                    rulesOnly: rulesOnly,
                     providerLabel: providerLabel,
                     model: options.model || ""
                 });
@@ -1427,23 +1520,27 @@
             runCounter += 1;
             run.runId = runCounter;
             run.started = true;
-            var deep = isDeepMode();
+            var deep = !rulesOnly && isDeepMode();
             if (typeof root.beginProofreadingRun === "function") {
                 root.beginProofreadingRun();
             } else {
                 viewIssues();
                 if (typeof root.clearProofreadingIssues === "function") root.clearProofreadingIssues();
             }
-            setStatus("正在通过 " + providerLabel + " 校对" + scopeLabel +
-                "（按段落分批发送，只发送待校对的文字）…", "working");
+            setStatus(rulesOnly ? "正在使用本地规则校对" + scopeLabel + "…"
+                : "正在通过 " + providerLabel + " 校对" + scopeLabel +
+                    "（按段落分批发送，只发送待校对的文字）…", "working");
             reportProgress(0, "已读取" + scopeLabel);
 
             var localStarted = perf ? actionClock() : 0;
+            if (rulesOnly && (!root.WpsRulesCenter || typeof root.WpsRulesCenter.evaluate !== "function")) {
+                throw new Error("本地规则模块尚未加载，请重新打开插件后重试。");
+            }
             var localRuleIssues = root.WpsRulesCenter &&
                 typeof root.WpsRulesCenter.evaluate === "function"
                 ? root.WpsRulesCenter.evaluate(snapshot.selectedText, snapshot.start)
                 : [];
-            var aiReviewCandidates = root.WpsRulesCenter &&
+            var aiReviewCandidates = !rulesOnly && root.WpsRulesCenter &&
                 typeof root.WpsRulesCenter.collectAiReviewCandidates === "function"
                 ? root.WpsRulesCenter.collectAiReviewCandidates(snapshot.selectedText, snapshot.start)
                 : [];
@@ -1455,6 +1552,25 @@
             setStatus("规则扫描完成 · 本地检查完成 · " + resultCountLabel() +
                 (aiReviewCandidates.length ? " · AI核查点 " + aiReviewCandidates.length + " 处" : ""), "working");
             reportProgress(0, "本地检查完成 · " + resultCountLabel());
+
+            if (rulesOnly) {
+                ensureRunActive(run);
+                if (!documentSnapshotMatches(run.document, snapshot)) {
+                    currentSnapshot = null;
+                    currentIssues = [];
+                    discarded = true;
+                    viewIssues();
+                    throw new Error("校对期间" + scopeLabel + "内容已变化，结果已丢弃。请重新校对。");
+                }
+                var rulesResult = currentIssues.length
+                    ? "校对完成 · 仅规则 · 共发现 " + currentIssues.length + " 项"
+                    : "校对完成 · 仅规则 · 未发现规则命中";
+                reportProgress(100, rulesResult);
+                setStatus(rulesResult + "。", "success");
+                return { accepted: true, issues: currentIssues.length, batches: 0,
+                    rulesOnly: true, consistencyAttempted: false, consistencyCompleted: false,
+                    consistencyWarning: "" };
+            }
 
             var paragraphs = root.WpsProofreadingCore.splitIntoParagraphs(snapshot.selectedText);
             if (!paragraphs.length) {
@@ -1754,6 +1870,8 @@
             });
             if (!range || typeof range.Select !== "function") throw new Error("range-unavailable");
             range.Select();
+            // Keep the expanded card in sync with the document cursor (click and auto-advance).
+            if (typeof root.setActiveProofreadingIssue === "function") root.setActiveProofreadingIssue(issue.id);
             return true;
         } catch (error) {
             issue.status = "stale";
@@ -1815,6 +1933,7 @@
                 var operationDocument = activeDocument(app());
                 change.trackRevisionsAtWrite = isTrackRevisionsEnabled(operationDocument);
                 change.revisionMode = change.trackRevisionsAtWrite ||
+                    currentSnapshot.revisionCoordinates ||
                     Number.isInteger(issue.textOffset) || currentIssues.some(function (candidate) {
                         return Number.isInteger(candidate.textOffset);
                     });
@@ -1849,9 +1968,21 @@
         change.end = Number(range.End);
         if (!Number.isInteger(change.start) || !Number.isInteger(change.end) ||
             change.end < change.start) return false;
+        if (change.revisionMode) {
+            change.prefixAtWrite = text(activeDocument(app()).Range(0, change.start).Text);
+        }
         change.attempted = true;
+        var operationDocument = activeDocument(app());
+        var nativeEndBefore = change.revisionMode ? Number(operationDocument.Content.End) : null;
         actionStage(perf, "write", function () { range.Text = change.replacement; });
         change.written = true;
+        if (change.revisionMode) {
+            var nativeEndAfter = Number(operationDocument.Content.End);
+            if (!Number.isInteger(nativeEndBefore) || !Number.isInteger(nativeEndAfter)) {
+                throw new Error("revision-boundary-unavailable");
+            }
+            change.revisedNativeEnd = currentSnapshot.nativeEnd + nativeEndAfter - nativeEndBefore;
+        }
         // No live WPS Range is carried into the next event-loop turn.
         return true;
     }
@@ -1885,7 +2016,7 @@
             }
             var revisedSnapshot = actionStage(perf, "snapshotUpdate", function () {
                 return updateSnapshotAfterReplacement(change.start, change.end,
-                    change.replacement, change.snapshotOffset, change.expected.length);
+                    change.replacement, change.snapshotOffset, change.expected.length, change.revisedNativeEnd);
             });
             var revisedIssues = actionStage(perf, "stateShift", function () {
                 return currentIssues.map(function (issue) {
@@ -1913,7 +2044,7 @@
                         try {
                             location = findAnchoredRevisionRange(
                                 document, expected, anchors.before, anchors.after,
-                                revisedSnapshot.selectedText, issue.start);
+                                revisedSnapshot, issue.start, false, relative);
                         } catch (error) { /* A failed WPS lookup leaves this issue stale. */ }
                     }
                     if (!location) {
@@ -1948,6 +2079,7 @@
     }
 
     function invalidateWrittenAction(change) {
+        if (change.documentKey && activeDocumentKey !== change.documentKey) return;
         currentSnapshot = null;
         currentIssues = currentIssues.map(function (issue) {
             if (change.postWriteVerified === true && change.written &&
@@ -1968,14 +2100,27 @@
                     documentKey(document) !== change.documentKey) return false;
                 if (isTrackRevisionsEnabled(document) !== change.trackRevisionsAtWrite) return false;
                 if (change.revisionMode) {
-                    var revisedText = updateSnapshotAfterReplacement(change.start, change.end,
-                        change.replacement, change.snapshotOffset, change.expected.length).selectedText;
+                    var revisedSnapshot = updateSnapshotAfterReplacement(change.start, change.end,
+                        change.replacement, change.snapshotOffset, change.expected.length, change.revisedNativeEnd);
                     var revised = findAnchoredRevisionRange(
                         document, change.replacement, change.before, change.after,
-                        revisedText, change.start, true);
-                    if (!revised || findAnchoredRevisionRange(
+                        revisedSnapshot, change.start, true, change.snapshotOffset);
+                    if (!revised) return false;
+                    var proved = provenRevisionRange(document, change.replacement,
+                        change.before, change.after, revisedSnapshot, change.snapshotOffset);
+                    // Another unchanged paragraph can still contain the old
+                    // context. A proved logical target distinguishes that copy
+                    // from native undo or an unconfirmed write at this target.
+                    if (!proved && findAnchoredRevisionRange(
                         document, change.expected, change.before, change.after,
-                        revisedText, change.start, true)) return false;
+                        revisedSnapshot, change.start, true, change.snapshotOffset)) return false;
+                    if (proved) revised = proved;
+                    // A unique paragraph elsewhere cannot confirm this write.
+                    // A local match must retain its actual native start, or its
+                    // complete logical prefix if revision positions moved.
+                    if (!proved && revised.start !== change.start &&
+                        (typeof change.prefixAtWrite !== "string" ||
+                            text(document.Range(0, revised.start).Text) !== change.prefixAtWrite)) return false;
                     change.verifiedStart = revised.start;
                     change.verifiedEnd = revised.end;
                     return true;
@@ -1999,19 +2144,26 @@
 
     function applyOneIssue(issue, deferRender) {
         var change = { issue: issue, expected: issue.original, replacement: issue.suggestion, action: "applied" };
-        if (!writeIssueReplacement(change)) {
+        var committed = false;
+        try {
+            if (!writeIssueReplacement(change)) {
+                if (!deferRender) viewIssues();
+                return { ok: false, reason: "changed" };
+            }
+            if (change.revisionMode && !verifyWrittenChange(change)) {
+                invalidateWrittenAction(change);
+                if (!deferRender) viewIssues();
+                return { ok: false, reason: "changed" };
+            }
+            completeIssueReplacement(change);
+            committed = true;
+            recordAction("applied", issue);
             if (!deferRender) viewIssues();
-            return { ok: false, reason: "changed" };
+            return { ok: true };
+        } catch (error) {
+            if (change.attempted && !committed) invalidateWrittenAction(change);
+            return { ok: false, reason: "error", committed: committed };
         }
-        if (change.revisionMode && !verifyWrittenChange(change)) {
-            invalidateWrittenAction(change);
-            if (!deferRender) viewIssues();
-            return { ok: false, reason: "changed" };
-        }
-        completeIssueReplacement(change);
-        recordAction("applied", issue);
-        if (!deferRender) viewIssues();
-        return { ok: true };
     }
 
     function locateNextPendingIssue(afterId, perf) {
@@ -2171,7 +2323,7 @@
             if (!context) return null;
             var anchored = findAnchoredRevisionRange(
                 document, issue.original, context.before, context.after,
-                undefined, issue.start);
+                undefined, issue.start, false, context.relativeStart);
             if (!anchored) return null;
             plan.push({
                 id: issue.id,
@@ -2196,7 +2348,7 @@
         var expectedLength = entry.expected.length;
         var delta = entry.replacement.length - expectedLength;
         var revisedSnapshot = updateSnapshotAfterReplacement(
-            entry.start, entry.end, entry.replacement, entry.relativeStart, expectedLength);
+            entry.start, entry.end, entry.replacement, entry.relativeStart, expectedLength, entry.revisedNativeEnd);
         currentIssues = currentIssues.map(function (candidate) {
             var updated = Object.assign({}, candidate);
             var relative = Number.isInteger(candidate.textOffset)
@@ -2227,6 +2379,8 @@
     function applyTrackedBatchEntry(entry, document) {
         var issue = findPendingIssue(entry.id);
         if (!issue || !isAutoFixableIssue(issue)) return { ok: false, reason: "changed" };
+        var change = null;
+        var committed = false;
         try {
             if (!document || documentKey(document) !== currentSnapshot.documentKey ||
                 !isTrackRevisionsEnabled(document)) return { ok: false, reason: "changed" };
@@ -2238,16 +2392,40 @@
                 issue.status = "stale";
                 return { ok: false, reason: "changed" };
             }
+            var context = issueContext(issue, entry.expected);
+            if (!context) return { ok: false, reason: "changed" };
+            var checked = checkedIssueRange(issue, entry.expected, null, document, context);
+            if (!checked || Number(checked.Start) !== entry.start || Number(checked.End) !== entry.end) {
+                return { ok: false, reason: "changed" };
+            }
+            var nativeEndBefore = Number(document.Content.End);
+            change = { issue: issue, expected: entry.expected, replacement: entry.replacement,
+                action: "applied", documentKey: currentSnapshot.documentKey,
+                before: context.before, after: context.after, start: entry.start, end: entry.end,
+                snapshotOffset: entry.relativeStart, trackRevisionsAtWrite: true,
+                revisionMode: true, prefixAtWrite: text(document.Range(0, entry.start).Text), attempted: true };
             range.Text = entry.replacement;
-            // This batch path is synchronous: there is no event-loop yield between
-            // the pre-write verification and the assignment. WPS may keep the old
-            // text as a deletion Revision, so do not require it to disappear from
-            // Range.Find before continuing.
+            change.written = true;
+            var nativeEndAfter = Number(document.Content.End);
+            if (!Number.isInteger(nativeEndBefore) || !Number.isInteger(nativeEndAfter)) {
+                throw new Error("revision-boundary-unavailable");
+            }
+            entry.revisedNativeEnd = currentSnapshot.nativeEnd + nativeEndAfter - nativeEndBefore;
+            change.revisedNativeEnd = entry.revisedNativeEnd;
+            // Verify active text synchronously before publishing success.
+            // Deleted revisions may still occupy physical coordinates.
+            if (!verifyWrittenChange(change)) {
+                invalidateWrittenAction(change);
+                return { ok: false, reason: "changed" };
+            }
+            change.postWriteVerified = true;
             completeTrackedBatchReplacement(entry, issue);
+            committed = true;
             recordAction("applied", issue);
             return { ok: true };
         } catch (error) {
-            return { ok: false, reason: "error" };
+            if (change && change.attempted && !committed) invalidateWrittenAction(change);
+            return { ok: false, reason: "error", committed: committed };
         }
     }
 
@@ -2293,7 +2471,7 @@
         }
         var document = activeDocument(app());
         var trackRevisions = isTrackRevisionsEnabled(document);
-        var uncertainCoordinates = trackRevisions || currentIssues.some(function (issue) {
+        var uncertainCoordinates = trackRevisions || currentSnapshot.revisionCoordinates || currentIssues.some(function (issue) {
             return Number.isInteger(issue.textOffset);
         });
         if (!(uncertainCoordinates ? revisionSnapshotMatches(currentSnapshot)
@@ -2310,10 +2488,16 @@
         var applied = 0;
         var failed = 0;
         var endUndoRecord = null;
+        var batchDocumentKey = activeDocumentKey;
+        setIssueActionBusy(true);
         try {
             endUndoRecord = beginBatchUndoRecord();
             var batchOrder = trackedPlan || pendingIds;
             for (var index = 0; index < batchOrder.length; index += 1) {
+                if (activeDocumentKey !== batchDocumentKey) {
+                    return { applied: applied, failed: 0, skipped: skipped,
+                        unattempted: pendingIds.length - index, documentChanged: true };
+                }
                 var issue = trackedPlan
                     ? findPendingIssue(batchOrder[index].id)
                     : findPendingIssue(batchOrder[index]);
@@ -2331,14 +2515,25 @@
                 } catch (error) {
                     result = { ok: false, reason: "error" };
                 }
+                if (activeDocumentKey !== batchDocumentKey) {
+                    var confirmed = result.ok || result.committed;
+                    return { applied: applied + (confirmed ? 1 : 0),
+                        failed: confirmed ? 0 : 1, skipped: skipped,
+                        unattempted: pendingIds.length - index - 1, documentChanged: true };
+                }
                 if (result.ok) {
                     applied += 1;
                 } else {
-                    failed += 1;
+                    if (result.committed) applied += 1;
+                    else failed += 1;
                     if (result.reason === "error") {
+                        var unattempted = pendingIds.length - index - 1;
                         viewIssues();
-                        setStatus("WPS 未能写入剩余建议，已停止批量修正；已修正 " + applied + " 条。", "error");
-                        return { applied: applied, failed: failed, skipped: skipped };
+                        setStatus((result.committed ? "正文已修改，但记录失败" : "WPS 未能确认本条写入") +
+                            "，已停止批量修正；已修正 " + applied + " 条" +
+                            (failed ? "，写入未确认 " + failed + " 条" : "") +
+                            (unattempted ? "，另有 " + unattempted + " 条尚未尝试" : "") + "。", "error");
+                        return { applied: applied, failed: failed, skipped: skipped, unattempted: unattempted };
                     }
                     failed = pendingIds.length - applied;
                     markAllPendingStale("原文已变化，剩余建议未写入。已修正 " + applied + " 条，请重新校对。");
@@ -2357,6 +2552,7 @@
             return { applied: applied, failed: failed, skipped: skipped };
         } finally {
             if (endUndoRecord) endUndoRecord();
+            setIssueActionBusy(false);
         }
     }
 
@@ -2366,6 +2562,7 @@
     root.ensureOpenCodeConnection = ensureOpenCodeConnection;
     root.getModelConnectionState = modelConnectionState;
     root.invalidateModelConnection = invalidateModelConnection;
+    root.syncProofreadingSettings = syncFromStore;
     root.locateProofreadingIssue = locateProofreadingIssue;
     root.ignoreProofreadingIssue = ignoreProofreadingIssue;
     root.applyProofreadingIssue = applyProofreadingIssue;
