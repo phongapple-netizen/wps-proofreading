@@ -143,6 +143,7 @@
             deep: parsed.deep === true,
             concurrency: normalizeConcurrency(parsed.concurrency),
             timingLogs: parsed.timingLogs === true,
+            rulesOnly: parsed.rulesOnly === true,
             autoAdvance: parsed.autoAdvance !== false,
             profiles: {
                 ollama: safeProfile(parsed.profiles && parsed.profiles.ollama, PROVIDER_DEFAULTS.ollama),
@@ -158,6 +159,7 @@
             deep: false,
             concurrency: 2,
             timingLogs: false,
+            rulesOnly: false,
             autoAdvance: true,
             profiles: {
                 ollama: Object.assign({}, PROVIDER_DEFAULTS.ollama),
@@ -175,6 +177,7 @@
             deep: value.deep === true,
             concurrency: normalizeConcurrency(value.concurrency),
             timingLogs: value.timingLogs === true,
+            rulesOnly: value.rulesOnly === true,
             autoAdvance: value.autoAdvance !== false,
             profiles: {
                 ollama: safeProfile(value.profiles && value.profiles.ollama, PROVIDER_DEFAULTS.ollama),
@@ -192,6 +195,7 @@
             concurrency: patch && patch.concurrency != null
                 ? normalizeConcurrency(patch.concurrency) : current.concurrency,
             timingLogs: patch && patch.timingLogs != null ? patch.timingLogs === true : current.timingLogs,
+            rulesOnly: patch && patch.rulesOnly != null ? patch.rulesOnly === true : current.rulesOnly,
             autoAdvance: patch && patch.autoAdvance != null
                 ? patch.autoAdvance !== false : current.autoAdvance,
             profiles: Object.assign({}, current.profiles)

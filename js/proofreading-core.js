@@ -12,6 +12,7 @@
     var MAX_SELECTION_CHARACTERS = 20000;
     var MAX_DOCUMENT_CHARACTERS = 80000;
     var DEFAULT_BATCH_CHARACTERS = 2500;
+    var FIRST_BATCH_CHARACTERS = 1000;
     var MAX_CONSISTENCY_INDEX_CHARACTERS = 16000;
     var MAX_GLOBAL_CANDIDATES_PER_REQUEST = 16;
     var MAX_GLOBAL_CANDIDATE_CHARACTERS = 12000;
@@ -94,8 +95,9 @@
         return segments;
     }
 
-    function batchParagraphs(paragraphs, maxChars) {
+    function batchParagraphs(paragraphs, maxChars, firstBatchChars) {
         var limit = Number(maxChars) > 0 ? Number(maxChars) : DEFAULT_BATCH_CHARACTERS;
+        var firstLimit = Number(firstBatchChars) > 0 ? Math.min(Number(firstBatchChars), limit) : limit;
         var batches = [];
         var current = [];
         var size = 0;
@@ -103,7 +105,7 @@
 
         segments.forEach(function (paragraph) {
             var length = String(paragraph.text || "").length;
-            if (current.length && size + length > limit) {
+            if (current.length && size + length > (batches.length ? limit : firstLimit)) {
                 batches.push(current);
                 current = [];
                 size = 0;
@@ -1280,14 +1282,15 @@
     }
 
     root.WpsProofreadingCore = {
-        scheduleBatches: scheduleBatches,
         maxSelectionCharacters: MAX_SELECTION_CHARACTERS,
         maxDocumentCharacters: MAX_DOCUMENT_CHARACTERS,
         defaultBatchCharacters: DEFAULT_BATCH_CHARACTERS,
+        firstBatchCharacters: FIRST_BATCH_CHARACTERS,
         maxConsistencyIndexCharacters: MAX_CONSISTENCY_INDEX_CHARACTERS,
         splitIntoParagraphs: splitIntoParagraphs,
         segmentParagraphs: segmentParagraphs,
         batchParagraphs: batchParagraphs,
+        scheduleBatches: scheduleBatches,
         buildConsistencyIndex: buildConsistencyIndex,
         buildConsistencyIndexes: buildConsistencyIndexes,
         buildGlobalConsistencyCandidates: buildGlobalConsistencyCandidates,

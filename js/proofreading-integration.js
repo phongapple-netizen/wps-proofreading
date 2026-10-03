@@ -29,6 +29,74 @@
             ? root.performance.now() : Date.now();
     }
 
+    function startRunPerf() {
+        var hostname = root.location && root.location.hostname;
+        if (root.WpsProofreadingPerf === false || (root.WpsProofreadingPerf !== true &&
+            hostname !== "localhost" && hostname !== "127.0.0.1" && hostname !== "[::1]")) return null;
+        return { started: actionClock(), report: {
+            snapshotCaptureMs: 0, localRulesMs: 0, firstResultMs: 0,
+            firstPassMs: 0, consistencyMs: 0, totalMs: 0,
+            batchCount: 0, consistencyBatchCount: 0, batches: [], consistencyBatches: []
+        }, firstResult: false };
+    }
+
+    function runStage(perf, target, field, callback) {
+        if (!perf) return callback();
+        var started = actionClock();
+        try { return callback(); }
+        finally { target[field] += actionClock() - started; }
+    }
+
+    async function runRequest(perf, target, options, prompt, fields) {
+        var started = perf ? actionClock() : 0;
+        try { return await timedProofreadingRequest(options, prompt, fields); }
+        finally { if (perf) target.requestMs += actionClock() - started; }
+    }
+
+    function requestOutcome(error) {
+        if (!error) return 0;
+        if (error.name === "AbortError" || error.code === "ABORTED") return 2;
+        return error.code === "MODEL_RATE_LIMITED" ? 3 : 1;
+    }
+
+    async function timedProofreadingRequest(options, prompt, fields) {
+        var timing = root.WpsProofreadingTiming;
+        var token = options.timingLogs && timing ? timing.start(Object.assign({ kind: 1 }, fields)) : null;
+        var metrics = token ? {} : null;
+        var started = token ? timing.clock() : 0;
+        var outcome = 0;
+        try {
+            return await requestProofreadingModel(Object.assign({}, options, { timing: metrics }), prompt);
+        } catch (error) {
+            outcome = requestOutcome(error);
+            throw error;
+        } finally {
+            if (token) {
+                if (options.provider !== "opencode") metrics.messageMs = timing.clock() - started;
+                metrics.outcome = outcome;
+                timing.finish(token, metrics);
+            }
+        }
+    }
+
+    function finishRunPerf(perf) {
+        if (!perf) return;
+        perf.report.totalMs = actionClock() - perf.started;
+        // Only this fixed numeric schema leaves memory. No text, identity or errors.
+        function rounded(value) {
+            if (Array.isArray(value)) return value.map(rounded);
+            if (typeof value === "number") return Math.round(value * 100) / 100;
+            var result = {};
+            Object.keys(value).forEach(function (key) { result[key] = rounded(value[key]); });
+            return result;
+        }
+        try {
+            if (root.console && typeof root.console.info === "function") {
+                root.console.info("proofreading perf:", rounded(perf.report));
+            }
+        } catch (error) { /* Diagnostics cannot alter the run. */ }
+    }
+
     function startActionPerf(action) {
         var hostname = root.location && root.location.hostname;
         if (root.WpsIssueActionPerf === false) return null;
@@ -106,6 +174,10 @@
 
     function setBusy(value) {
         busy = value === true;
+        if (typeof root.setProofreadingFirstPassComplete === "function") {
+            var run = documentRuns[activeDocumentKey];
+            root.setProofreadingFirstPassComplete(!!(run && run.firstPassComplete));
+        }
         if (typeof root.setProofreadingBusy === "function") {
             root.setProofreadingBusy(busy);
             return;
@@ -292,14 +364,17 @@
 
         if (selectedText.trim()) {
             selectedText = root.WpsProofreadingCore.validateSelection(selectedText);
-            if (!Number.isFinite(start) || !Number.isFinite(end) || end - start !== selectedText.length) {
+            if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 ||
+                end < start || end - start < selectedText.length) {
                 throw new Error("WPS 选区位置与文本长度不一致，请重新选择后重试。");
             }
             return {
                 mode: "selection",
                 documentKey: documentKey(document),
                 start: start,
-                end: end,
+                end: start + selectedText.length,
+                nativeEnd: end,
+                revisionCoordinates: end - start !== selectedText.length,
                 selectedText: selectedText,
                 prefixText: prefixText
             };
@@ -328,6 +403,8 @@
             documentKey: documentKey(document),
             start: start,
             end: end,
+            nativeEnd: Number(content.End),
+            revisionCoordinates: Number(content.End) - start !== fullText.length,
             selectedText: fullText,
             prefixText: prefixText
         };
@@ -349,7 +426,8 @@
                     text(document.Range(0, snapshot.start).Text) === snapshot.prefixText;
             }
             return text(document.Range(0, snapshot.start).Text) === snapshot.prefixText &&
-                text(document.Range(snapshot.start, snapshot.end).Text) === snapshot.selectedText;
+                text(document.Range(snapshot.start, Number.isInteger(snapshot.nativeEnd)
+                    ? snapshot.nativeEnd : snapshot.end).Text) === snapshot.selectedText;
         } catch (error) {
             return false;
         }
@@ -359,7 +437,7 @@
         try {
             var document = activeDocument(app());
             if (!document || documentKey(document) !== snapshot.documentKey) return false;
-            var bounds = revisionSearchBounds(document);
+            var bounds = revisionSearchBounds(document, snapshot);
             return !!bounds && text(document.Range(0, snapshot.start).Text) === snapshot.prefixText &&
                 text(document.Range(snapshot.start, bounds.end).Text) === snapshot.selectedText;
         } catch (error) { return false; }
@@ -375,21 +453,42 @@
         return true;
     }
 
-    function revisionSearchBounds(document, selectedText, allowMissingTail) {
+    function revisionSearchBounds(document, snapshotOverride, allowMissingTail) {
         var content = document.Content;
         var start = Number(content && content.Start);
         var end = Number(content && content.End);
         if (!Number.isInteger(start) || !Number.isInteger(end) || end < start) return null;
-        if (!currentSnapshot || currentSnapshot.mode !== "selection") return { start: start, end: end };
-        var scopeStart = Math.max(start, currentSnapshot.start - ANCHOR_CHARACTERS);
-        var selected = selectedText === undefined ? currentSnapshot.selectedText : selectedText;
+        var snapshot = snapshotOverride || currentSnapshot;
+        if (!snapshot || snapshot.mode !== "selection") return { start: start, end: end };
+        var scopeStart = Math.max(start, snapshot.start - ANCHOR_CHARACTERS);
+        // Native coordinates include deleted revisions. Keep the captured scope's
+        // physical boundary instead of choosing the first matching tail in it.
+        if (Number.isInteger(snapshot.nativeEnd)) {
+            return snapshot.start >= start && snapshot.nativeEnd <= end && snapshot.nativeEnd >= snapshot.start
+                ? { start: scopeStart, end: snapshot.nativeEnd } : null;
+        }
+        var selected = snapshot.selectedText;
         if (!selected) return null;
         // Find the first occurrence of the selection's tail after its original start.
         // Later copies outside the selection must not make an issue ambiguous.
         var tail = selected.slice(-Math.min(160, selected.length));
-        var tailRange = firstRevisionTextRange(document, tail, currentSnapshot.start, end);
+        var tailRange = firstRevisionTextRange(document, tail, snapshot.start, end);
         return tailRange ? { start: scopeStart, end: tailRange.end }
             : allowMissingTail ? { start: scopeStart, end: end } : null;
+    }
+
+    function configureRevisionFind(finder) {
+        if (typeof finder.ClearFormatting === "function") finder.ClearFormatting();
+        finder.MatchCase = true;
+        finder.MatchWildcards = false;
+        finder.Wrap = 0;
+        // WPS can inherit the user's last Find options. Optional properties are
+        // unavailable in some older hosts, so reset each supported one separately.
+        var options = { Forward: true, MatchWholeWord: false, Format: false,
+            MatchSoundsLike: false, MatchAllWordForms: false };
+        Object.keys(options).forEach(function (name) {
+            try { finder[name] = options[name]; } catch (error) { /* Optional host property. */ }
+        });
     }
 
     function firstRevisionTextRange(document, needle, start, end) {
@@ -398,10 +497,7 @@
             var range = document.Range(start, end);
             var finder = range && range.Find;
             if (finder && typeof finder.Execute === "function") {
-                if (typeof finder.ClearFormatting === "function") finder.ClearFormatting();
-                finder.MatchCase = true;
-                finder.MatchWildcards = false;
-                finder.Wrap = 0;
+                configureRevisionFind(finder);
                 var result = finder.Execute(needle);
                 if (!(result === true || result === 1 || result === -1 || finder.Found === true)) return null;
                 return text(range.Text) === needle ? { start: Number(range.Start), end: Number(range.End) } : null;
@@ -432,10 +528,7 @@
                     if (found) return null;
                     break;
                 }
-                if (typeof finder.ClearFormatting === "function") finder.ClearFormatting();
-                finder.MatchCase = true;
-                finder.MatchWildcards = false;
-                finder.Wrap = 0;
+                configureRevisionFind(finder);
                 var result = finder.Execute(needle);
                 if (!(result === true || result === 1 || result === -1 || finder.Found === true)) {
                     return found;
@@ -466,15 +559,77 @@
         }
     }
 
-    function findAnchoredRevisionRange(document, expected, before, after, selectedText, hint, allowMissingTail) {
-        var bounds = revisionSearchBounds(document, selectedText, allowMissingTail);
+    function revisionScopeProof(document, snapshot) {
+        if (!snapshot || !document || documentKey(document) !== snapshot.documentKey) return null;
+        var content = document.Content;
+        var contentStart = Number(content.Start);
+        var contentEnd = Number(content.End);
+        var end = snapshot.mode === "full" ? contentEnd : snapshot.nativeEnd;
+        if (!Number.isInteger(contentStart) || !Number.isInteger(contentEnd) ||
+            !Number.isInteger(end) || snapshot.start < contentStart || end < snapshot.start ||
+            end > contentEnd || (snapshot.mode === "full" && snapshot.start !== contentStart)) return null;
+        if (text(document.Range(0, snapshot.start).Text) !== snapshot.prefixText ||
+            text(document.Range(snapshot.start, end).Text) !== snapshot.selectedText) return null;
+        return { start: snapshot.start, end: end, snapshot: snapshot };
+    }
+
+    function revisionCoordinateAtOffset(document, scope, offset, rightEdge) {
+        if (!Number.isInteger(offset) || offset < 0 || offset > scope.snapshot.selectedText.length) return null;
+        var low = scope.start;
+        var high = scope.end;
+        while (low < high) {
+            var middle = rightEdge ? Math.ceil((low + high) / 2) : Math.floor((low + high) / 2);
+            var length = text(document.Range(scope.start, middle).Text).length;
+            if (rightEdge ? length <= offset : length < offset) low = rightEdge ? middle : middle + 1;
+            else high = rightEdge ? middle - 1 : middle;
+        }
+        // Equal prefix lengths alone are insufficient: confirm the actual prefix.
+        return text(document.Range(scope.start, low).Text) === scope.snapshot.selectedText.slice(0, offset)
+            ? low : null;
+    }
+
+    function provenRevisionRange(document, expected, before, after, snapshot, relativeStart) {
+        if (!Number.isInteger(relativeStart) || relativeStart < 0 ||
+            snapshot.selectedText.slice(relativeStart, relativeStart + expected.length) !== expected) return null;
+        try {
+            var scope = revisionScopeProof(document, snapshot);
+            if (!scope) return null;
+            var start = revisionCoordinateAtOffset(document, scope, relativeStart, true);
+            var end = expected ? revisionCoordinateAtOffset(document, scope, relativeStart + expected.length, false) : start;
+            if (start === null || end === null || end < start ||
+                text(document.Range(start, end).Text) !== expected) return null;
+            var prefix = text(document.Range(0, start).Text);
+            var suffix = text(document.Range(end, scope.end).Text);
+            var trustedPrefix = snapshot.prefixText + snapshot.selectedText.slice(0, relativeStart);
+            var trustedSuffix = snapshot.selectedText.slice(relativeStart + expected.length);
+            if (prefix !== trustedPrefix || suffix !== trustedSuffix ||
+                (before && prefix.slice(-before.length) !== before) || suffix.slice(0, after.length) !== after ||
+                !revisionScopeProof(document, snapshot)) return null;
+            return { start: start, end: end };
+        } catch (error) { return null; }
+    }
+
+    function findAnchoredRevisionRange(document, expected, before, after, snapshotOverride, hint, allowMissingTail, relativeStart) {
+        var snapshot = snapshotOverride || currentSnapshot;
+        var bounds = revisionSearchBounds(document, snapshot, allowMissingTail);
         var query = before + expected + after;
         if (!bounds || !query) return null;
+        var trustedText = snapshot.prefixText.slice(-ANCHOR_CHARACTERS) + snapshot.selectedText;
+        var first = trustedText.indexOf(query);
+        if (first >= 0 && trustedText.indexOf(query, first + 1) >= 0) {
+            // A copy disappearing from the live document must not turn a formerly
+            // ambiguous target into the one remaining (but wrong) occurrence.
+            return provenRevisionRange(document, expected, before, after, snapshot, relativeStart);
+        }
         var context = uniqueRevisionTextRange(document, query, bounds.start, bounds.end, hint);
-        if (!context) return null;
+        // Repeated text and host Find limitations are resolved only from a fully
+        // verified scope and its logical offset, never from the nearest copy.
+        if (!context) return provenRevisionRange(document, expected, before, after, snapshot, relativeStart);
         var beforeRange = before
             ? firstRevisionTextRange(document, before, context.start, context.end) : null;
-        if (before && (!beforeRange || beforeRange.start !== context.start)) return null;
+        if (before && (!beforeRange || beforeRange.start !== context.start)) {
+            return provenRevisionRange(document, expected, before, after, snapshot, relativeStart);
+        }
         var innerStart = beforeRange ? beforeRange.end : context.start;
         var inner;
         if (expected) {
@@ -485,11 +640,15 @@
         } else if (before) {
             inner = { start: innerStart, end: innerStart };
         }
-        if (!inner || inner.start < context.start || inner.end > context.end) return null;
+        if (!inner || inner.start < context.start || inner.end > context.end) {
+            return provenRevisionRange(document, expected, before, after, snapshot, relativeStart);
+        }
         try {
             if (text(document.Range(context.start, inner.start).Text) !== before ||
                 text(document.Range(inner.start, inner.end).Text) !== expected ||
-                text(document.Range(inner.end, context.end).Text) !== after) return null;
+                text(document.Range(inner.end, context.end).Text) !== after) {
+                return provenRevisionRange(document, expected, before, after, snapshot, relativeStart);
+            }
             return inner;
         } catch (error) {
             return null;
@@ -545,9 +704,9 @@
             documentKey(document) !== currentSnapshot.documentKey) return null;
         var context = contextOverride || issueContext(issue, expected);
         if (!context) return null;
-        if (isTrackRevisionsEnabled(document) || Number.isInteger(issue.textOffset)) {
+        if (isTrackRevisionsEnabled(document) || currentSnapshot.revisionCoordinates || Number.isInteger(issue.textOffset)) {
             var anchored = findAnchoredRevisionRange(document, expected, context.before, context.after,
-                undefined, issue.start);
+                undefined, issue.start, false, context.relativeStart);
             return anchored ? document.Range(anchored.start, anchored.end) : null;
         }
         var contextRange = document.Range(context.start, context.end);
@@ -557,7 +716,7 @@
             ? contextRange : document.Range(issue.start, issue.end);
     }
 
-    function updateSnapshotAfterReplacement(start, end, replacement, relativeStart, expectedLength) {
+    function updateSnapshotAfterReplacement(start, end, replacement, relativeStart, expectedLength, nativeEnd) {
         if (!Number.isInteger(relativeStart)) relativeStart = start - currentSnapshot.start;
         var relativeEnd = relativeStart + (Number.isInteger(expectedLength)
             ? expectedLength : end - start);
@@ -565,7 +724,10 @@
             selectedText: currentSnapshot.selectedText.slice(0, relativeStart) +
                 replacement + currentSnapshot.selectedText.slice(relativeEnd),
             end: currentSnapshot.end + replacement.length - (Number.isInteger(expectedLength)
-                ? expectedLength : end - start)
+                ? expectedLength : end - start),
+            nativeEnd: Number.isInteger(nativeEnd) ? nativeEnd
+                : currentSnapshot.nativeEnd + replacement.length - (Number.isInteger(expectedLength)
+                    ? expectedLength : end - start)
         });
     }
 
@@ -704,6 +866,7 @@
     }
 
     function modelSummaryText() {
+        if (currentSettings().rulesOnly === true) return "当前校对：仅用本地规则 · 改写仍需模型";
         var options = modelOptions();
         var labels = { ollama: "Ollama", opencode: "OpenCode", openai: "兼容接口" };
         var parts = [labels[options.provider] || options.provider];
@@ -781,7 +944,7 @@
         syncDocumentSession();
         bindDocumentEvents();
         syncFromStore();
-        if (modelOptions().provider === "opencode" && canManageOpenCode()) {
+        if (currentSettings().rulesOnly !== true && modelOptions().provider === "opencode" && canManageOpenCode()) {
             // The native service is already running when this page is served.
             refreshProviderModels();
         }
@@ -967,32 +1130,6 @@
         return root.WpsProofreadingCore.requestModel(options, prompt);
     }
 
-    function requestOutcome(error) {
-        if (!error) return 0;
-        if (error.name === "AbortError" || error.code === "ABORTED") return 2;
-        return error.code === "MODEL_RATE_LIMITED" ? 3 : 1;
-    }
-
-    async function timedProofreadingRequest(options, prompt, fields) {
-        var timing = root.WpsProofreadingTiming;
-        var token = options.timingLogs && timing ? timing.start(Object.assign({ kind: 1 }, fields)) : null;
-        var metrics = token ? {} : null;
-        var started = token ? timing.clock() : 0;
-        var outcome = 0;
-        try {
-            return await requestProofreadingModel(Object.assign({}, options, { timing: metrics }), prompt);
-        } catch (error) {
-            outcome = requestOutcome(error);
-            throw error;
-        } finally {
-            if (token) {
-                if (options.provider !== "opencode") metrics.messageMs = timing.clock() - started;
-                metrics.outcome = outcome;
-                timing.finish(token, metrics);
-            }
-        }
-    }
-
     async function ensureOpenCodeConnection(options) {
         if (options.provider !== "opencode" || !canManageOpenCode() || options.apiKey ||
             options.endpoint.replace(/\/+$/, "") !== "http://127.0.0.1:4096") return;
@@ -1023,7 +1160,7 @@
 
     function ensureRunActive(run) {
         syncDocumentSession();
-        if (!isDocumentRunCurrent(run) || run.cancelled || run.failed ||
+        if (!isDocumentRunCurrent(run) || run.cancelled ||
             (run.controller && run.controller.signal.aborted) || documentKey(run.document) !== run.key) {
             var error = new Error("已取消校对。");
             error.name = "AbortError";
@@ -1037,6 +1174,7 @@
         var run = {
             key: activeDocumentKey, document: activeDocument(app()), controller: makeAbortController(),
             busy: true, cancelled: false, started: false, waiting: false,
+            firstPassComplete: false, issueStates: Object.create(null),
             snapshot: currentSnapshot, issues: currentIssues, runId: currentResultRunId,
             status: currentStatus, progress: null
         };
@@ -1071,6 +1209,13 @@
         return (batch || []).reduce(function (total, paragraph) {
             return total + text(paragraph && paragraph.text).length;
         }, 0);
+    }
+
+    function mergeRunIssues(run, collected) {
+        return mergeMappedIssues(collected, run.runId).map(function (issue) {
+            var status = run.issueStates[issue.id];
+            return status ? Object.assign({}, issue, { status: status }) : issue;
+        });
     }
 
     function issueOrigin(issue) {
@@ -1326,6 +1471,7 @@
             }
         }
         var run = createDocumentRun();
+        var perf = startRunPerf();
         var runController = run.controller;
         var currentSnapshot = run.snapshot;
         var currentIssues = run.issues;
@@ -1335,7 +1481,13 @@
             publishDocumentRun(run, kind);
         }
         function setStatus(message, tone) { run.status = { text: message, tone: tone || "idle" }; publish("status"); }
-        function viewIssues() { publish("issues"); }
+        function viewIssues() {
+            publish("issues");
+            if (perf && currentIssues.length && !perf.firstResult) {
+                perf.firstResult = true;
+                perf.report.firstResultMs = actionClock() - perf.started;
+            }
+        }
         function reportProgress(percent, label) { run.progress = { percent: percent, label: label }; publish("progress"); }
         function setBusy(value) { run.busy = value; publish("busy"); }
         function resultCountLabel() { return currentIssues.length ? "已发现 " + currentIssues.length + " 项" : "暂未发现问题"; }
@@ -1355,15 +1507,16 @@
                 (runController && runController.signal && runController.signal.aborted)) {
                 return { accepted: false, reason: "cancelled" };
             }
-            snapshot = captureSnapshot();
+            snapshot = runStage(perf, perf && perf.report, "snapshotCaptureMs", captureSnapshot);
             if (!snapshot.documentKey) throw new Error("无法确认当前文档身份，请重新打开文档后重试。");
-            var options = validateModelOptions(modelOptions());
+            var rulesOnly = currentSettings().rulesOnly === true;
+            var options = rulesOnly ? {} : validateModelOptions(modelOptions());
             options.signal = runController ? runController.signal : undefined;
             var runSettings = currentSettings();
             options.timingLogs = runSettings.timingLogs === true;
-            var concurrency = runSettings.concurrency || 2;
+            var concurrency = runSettings.concurrency;
             if (timing) timing.setEnabled(options.timingLogs);
-            var providerLabel = providerDisplayName(options.provider);
+            var providerLabel = rulesOnly ? "本地规则" : providerDisplayName(options.provider);
             var scopeLabel = snapshot.mode === "full" ? "全文" : "选区";
             if (snapshot.mode === "full") {
                 if (typeof root.requestFullDocumentConfirmation !== "function") {
@@ -1375,6 +1528,7 @@
                 setStatus("当前未选择文字，等待确认校对全文…", "warning");
                 var confirmed = await root.requestFullDocumentConfirmation({
                     characterCount: snapshot.selectedText.length,
+                    rulesOnly: rulesOnly,
                     providerLabel: providerLabel,
                     model: options.model || ""
                 });
@@ -1403,41 +1557,72 @@
             run.started = true;
             if (options.timingLogs && timing) runTiming = timing.start({ kind: 3, run: run.runId,
                 characters: snapshot.selectedText.length, concurrency: concurrency });
-            var deep = isDeepMode();
+            var deep = !rulesOnly && isDeepMode();
             if (typeof root.beginProofreadingRun === "function") {
                 root.beginProofreadingRun();
             } else {
                 viewIssues();
                 if (typeof root.clearProofreadingIssues === "function") root.clearProofreadingIssues();
             }
-            setStatus("正在通过 " + providerLabel + " 校对" + scopeLabel +
-                "（按段落分批发送，只发送待校对的文字）…", "working");
+            setStatus(rulesOnly ? "正在使用本地规则校对" + scopeLabel + "…"
+                : "正在通过 " + providerLabel + " 校对" + scopeLabel +
+                    "（按段落分批发送，只发送待校对的文字）…", "working");
             reportProgress(0, "已读取" + scopeLabel);
 
+            var localStarted = perf ? actionClock() : 0;
+            if (rulesOnly && (!root.WpsRulesCenter || typeof root.WpsRulesCenter.evaluate !== "function")) {
+                throw new Error("本地规则模块尚未加载，请重新打开插件后重试。");
+            }
             var localRuleIssues = root.WpsRulesCenter &&
                 typeof root.WpsRulesCenter.evaluate === "function"
                 ? root.WpsRulesCenter.evaluate(snapshot.selectedText, snapshot.start)
                 : [];
-            var aiReviewCandidates = root.WpsRulesCenter &&
+            var aiReviewCandidates = !rulesOnly && root.WpsRulesCenter &&
                 typeof root.WpsRulesCenter.collectAiReviewCandidates === "function"
                 ? root.WpsRulesCenter.collectAiReviewCandidates(snapshot.selectedText, snapshot.start)
                 : [];
+            if (perf) perf.report.localRulesMs = actionClock() - localStarted;
             collected = collected.concat(localRuleIssues);
             currentSnapshot = snapshot;
-            currentIssues = mergeMappedIssues(collected, run.runId);
+            currentIssues = mergeRunIssues(run, collected);
             viewIssues();
             setStatus("规则扫描完成 · 本地检查完成 · " + resultCountLabel() +
                 (aiReviewCandidates.length ? " · AI核查点 " + aiReviewCandidates.length + " 处" : ""), "working");
             reportProgress(0, "本地检查完成 · " + resultCountLabel());
+
+            if (rulesOnly) {
+                ensureRunActive(run);
+                if (!documentSnapshotMatches(run.document, snapshot)) {
+                    currentSnapshot = null;
+                    currentIssues = [];
+                    discarded = true;
+                    viewIssues();
+                    throw new Error("校对期间" + scopeLabel + "内容已变化，结果已丢弃。请重新校对。");
+                }
+                var rulesResult = currentIssues.length
+                    ? "校对完成 · 仅规则 · 共发现 " + currentIssues.length + " 项"
+                    : "校对完成 · 仅规则 · 未发现规则命中";
+                reportProgress(100, rulesResult);
+                setStatus(rulesResult + "。", "success");
+                runOutcome = 0;
+                return { accepted: true, issues: currentIssues.length, batches: 0,
+                    rulesOnly: true, consistencyAttempted: false, consistencyCompleted: false,
+                    consistencyWarning: "" };
+            }
 
             var paragraphs = root.WpsProofreadingCore.splitIntoParagraphs(snapshot.selectedText);
             if (!paragraphs.length) {
                 throw new Error(scopeLabel + "中没有可校对的正文文字。");
             }
             var batches = root.WpsProofreadingCore.batchParagraphs(
-                paragraphs, root.WpsProofreadingCore.defaultBatchCharacters);
+                paragraphs, root.WpsProofreadingCore.defaultBatchCharacters,
+                root.WpsProofreadingCore.firstBatchCharacters);
             var consistencyCandidates = root.WpsProofreadingCore.buildGlobalConsistencyCandidates(paragraphs);
             var consistencyBatches = root.WpsProofreadingCore.batchGlobalConsistencyCandidates(consistencyCandidates);
+            if (perf) {
+                perf.report.batchCount = batches.length;
+                perf.report.consistencyBatchCount = consistencyBatches.length;
+            }
             var runConsistencyPass = consistencyBatches.length > 0;
             var firstPassProgressCeiling = runConsistencyPass ? 85 : 100;
             var totalFirstPassCharacters = batches.reduce(function (total, batch) {
@@ -1456,6 +1641,9 @@
                 }
                 var batchOutcome = 0;
                 try {
+                    var batchPerf = { batchIndex: index, characters: batchCharacterCount(batches[index]),
+                        requestMs: 0, parseAndMapMs: 0, snapshotValidationMs: 0, publishRenderMs: 0 };
+                    if (perf) perf.report.batches.push(batchPerf);
                     ensureRunActive(run);
                     if (runController && runController.signal && runController.signal.aborted) {
                         var abortError = new Error("已取消校对。");
@@ -1469,24 +1657,34 @@
                         ruleContext: batchRuleContext(batches[index], localRuleIssues, snapshot.start),
                         aiReviewContext: currentAiReviewContext
                     });
-                    var response = await timedProofreadingRequest(options, prompt, fields);
+                    var response = await runRequest(perf, batchPerf, options, prompt, fields);
                     ensureRunActive(run);
-                    if (!documentSnapshotMatches(run.document, snapshot)) {
+                    if (!runStage(perf, batchPerf, "snapshotValidationMs", function () {
+                        return documentSnapshotMatches(run.document, snapshot);
+                    })) {
                         currentSnapshot = null;
                         currentIssues = [];
                         discarded = true;
                         viewIssues();
                         throw new Error("校对期间" + scopeLabel + "内容已变化，结果已丢弃。请重新校对。");
                     }
-                    var parsed = root.WpsProofreadingCore.parseIssues(response);
-                    var mappedFirstPass = root.WpsProofreadingCore.mapIssuesToRanges(
-                        batches[index], parsed, snapshot.start);
+                    var mappedFirstPass = runStage(perf, batchPerf, "parseAndMapMs", function () {
+                        return root.WpsProofreadingCore.mapIssuesToRanges(batches[index],
+                            root.WpsProofreadingCore.parseIssues(response), snapshot.start);
+                    });
                     bodyResults[index] = annotateAiReviewIssues(mappedFirstPass, aiReviewCandidates);
-                    collected = localRuleIssues.slice();
-                    bodyResults.forEach(function (results) { if (results) collected = collected.concat(results); });
-                    currentIssues = mergeMappedIssues(collected, run.runId);
-                    currentSnapshot = snapshot;
-                    viewIssues();
+                    runStage(perf, batchPerf, "publishRenderMs", function () {
+                        // Completion order never changes overlap arbitration or stable IDs.
+                        collected = localRuleIssues.slice();
+                        bodyResults.forEach(function (results) { if (results) collected = collected.concat(results); });
+                        currentIssues = mergeRunIssues(run, collected);
+                        currentSnapshot = snapshot;
+                        viewIssues();
+                        if (perf && !perf.firstResult) {
+                            perf.firstResult = true;
+                            perf.report.firstResultMs = actionClock() - perf.started;
+                        }
+                    });
                     completedFirstPassCharacters += batchCharacterCount(batches[index]);
                     var firstPassPercent = totalFirstPassCharacters > 0
                         ? Math.round((completedFirstPassCharacters / totalFirstPassCharacters) *
@@ -1501,10 +1699,10 @@
                     setStatus("AI 校对 " + firstPassPercent + "% · " + resultCountLabel(), "working");
                     reportProgress(firstPassPercent, "AI 校对 " + firstPassPercent + "% · " +
                         resultCountLabel() + " · " + batchLabel);
-                    return bodyResults[index];
-                } catch (error) {
-                    batchOutcome = requestOutcome(error);
-                    throw error;
+                } catch (batchError) {
+                    batchOutcome = requestOutcome(batchError);
+                    if (batchOutcome === 3) concurrency = 1;
+                    throw batchError;
                 } finally {
                     if (timing && !(batchOutcome === 3 && attempt === 1)) {
                         timing.finish(batchTimings[index], { outcome: batchOutcome, attempt: attempt, concurrency: limit });
@@ -1512,10 +1710,14 @@
                     }
                 }
             }, options.signal, function (error) {
-                if (requestOutcome(error) !== 2) run.failed = true;
+                if (!error || error.name !== "AbortError") run.failed = true;
                 if (runController) runController.abort();
             });
 
+            if (perf) perf.report.firstPassMs = actionClock() - perf.started;
+            run.firstPassComplete = true;
+            publish("busy");
+            var consistencyStarted = perf ? actionClock() : 0;
             if (runConsistencyPass) {
                 if (runController && runController.signal && runController.signal.aborted) {
                     var consistencyAbortError = new Error("已取消校对。");
@@ -1524,48 +1726,96 @@
                 }
                 setStatus("正在进行全文一致性复核 · " + resultCountLabel(), "working");
                 reportProgress(firstPassProgressCeiling, "全文一致性复核中 · " + resultCountLabel());
+                var consistencyController = makeAbortController();
+                var consistencyStopped = false;
+                var consistencyTimings = [], consistencyResults = [];
+                var firstPassCollected = collected.slice();
+                var completedConsistencyCharacters = 0;
+                var stopConsistencyTransport = function () {
+                    if (consistencyController) consistencyController.abort();
+                };
+                var consistencyOptions = Object.assign({}, options, {
+                    signal: consistencyController ? consistencyController.signal : options.signal
+                });
+                var ensureConsistencyActive = function () {
+                    ensureRunActive(run);
+                    if (consistencyStopped) {
+                        var error = new Error("已停止一致性复核。");
+                        error.name = "AbortError";
+                        throw error;
+                    }
+                };
+                if (options.signal && options.signal.addEventListener) {
+                    options.signal.addEventListener("abort", stopConsistencyTransport, { once: true });
+                    if (options.signal.aborted) stopConsistencyTransport();
+                }
                 try {
-                    for (var candidateBatchIndex = 0; candidateBatchIndex < consistencyBatches.length; candidateBatchIndex += 1) {
-                        ensureRunActive(run);
-                        var consistencyBatch = consistencyBatches[candidateBatchIndex];
-                        var consistencyPrompt = root.WpsProofreadingCore.buildConsistencyPrompt(consistencyBatch);
-                        var consistencyFields = { run: run.runId, stage: 2, batch: candidateBatchIndex + 1,
-                            attempt: 1, characters: consistencyPrompt.length, concurrency: 1 };
-                        var consistencyTiming = options.timingLogs && timing
-                            ? timing.start(Object.assign({ kind: 2 }, consistencyFields)) : null;
+                    var consistencyPrompts = consistencyBatches.map(function (batch) {
+                        return root.WpsProofreadingCore.buildConsistencyPrompt(batch);
+                    });
+                    var totalConsistencyCharacters = consistencyPrompts.reduce(function (sum, prompt) {
+                        return sum + prompt.length;
+                    }, 0);
+                    await root.WpsProofreadingCore.scheduleBatches(consistencyBatches, concurrency,
+                        async function (consistencyBatch, candidateBatchIndex, attempt, limit) {
+                        ensureConsistencyActive();
+                        var consistencyPrompt = consistencyPrompts[candidateBatchIndex];
+                        var fields = { run: run.runId, stage: 2, batch: candidateBatchIndex + 1,
+                            attempt: attempt, characters: consistencyPrompt.length, concurrency: limit };
+                        if (options.timingLogs && timing && !consistencyTimings[candidateBatchIndex]) {
+                            consistencyTimings[candidateBatchIndex] = timing.start(Object.assign({ kind: 2 }, fields));
+                        }
                         var consistencyOutcome = 0;
                         try {
-                            var consistencyResponse = await timedProofreadingRequest(options, consistencyPrompt, consistencyFields);
-                            ensureRunActive(run);
-                            if (!documentSnapshotMatches(run.document, snapshot)) {
+                            var consistencyPerf = { batchIndex: candidateBatchIndex,
+                                requestMs: 0, parseAndMapMs: 0, snapshotValidationMs: 0 };
+                            if (perf) perf.report.consistencyBatches.push(consistencyPerf);
+                            var consistencyResponse = await runRequest(perf, consistencyPerf, consistencyOptions, consistencyPrompt, fields);
+                            ensureConsistencyActive();
+                            if (!runStage(perf, consistencyPerf, "snapshotValidationMs", function () {
+                                return documentSnapshotMatches(run.document, snapshot);
+                            })) {
                                 currentSnapshot = null;
                                 currentIssues = [];
                                 discarded = true;
                                 viewIssues();
                                 throw new Error("一致性复核期间" + scopeLabel + "内容已变化，结果已丢弃。请重新校对。");
                             }
-                            var consistencyParsed = root.WpsProofreadingCore.filterConsistencyIssuesToCandidates(
-                                root.WpsProofreadingCore.parseConsistencyIssues(consistencyResponse), consistencyBatch);
-                            collected = collected.concat(
-                                root.WpsProofreadingCore.mapIssuesToRanges(
+                            var consistencyMapped = runStage(perf, consistencyPerf, "parseAndMapMs", function () {
+                                var consistencyParsed = root.WpsProofreadingCore.filterConsistencyIssuesToCandidates(
+                                    root.WpsProofreadingCore.parseConsistencyIssues(consistencyResponse), consistencyBatch);
+                                return root.WpsProofreadingCore.mapIssuesToRanges(
                                     paragraphs, consistencyParsed, snapshot.start).map(function (issue) {
                                         return Object.assign({ origin: "ai" }, issue);
-                                    }));
-                            currentIssues = mergeMappedIssues(collected, run.runId);
+                                    });
+                            });
+                            consistencyResults[candidateBatchIndex] = consistencyMapped;
+                            collected = firstPassCollected.slice();
+                            consistencyResults.forEach(function (results) { if (results) collected = collected.concat(results); });
+                            currentIssues = mergeRunIssues(run, collected);
                             currentSnapshot = snapshot;
                             viewIssues();
                             setStatus("正在进行全文一致性复核 · " + resultCountLabel(), "working");
+                            completedConsistencyCharacters += consistencyPrompt.length;
                             reportProgress(firstPassProgressCeiling + Math.round(
-                                ((candidateBatchIndex + 1) / consistencyBatches.length) * (100 - firstPassProgressCeiling)),
+                                (completedConsistencyCharacters / totalConsistencyCharacters) * (100 - firstPassProgressCeiling)),
                                 "全文一致性复核 · " + resultCountLabel() + " · 第 " +
                                 (candidateBatchIndex + 1) + "/" + consistencyBatches.length + " 批候选组");
-                        } catch (error) {
-                            consistencyOutcome = requestOutcome(error);
-                            throw error;
+                        } catch (consistencyBatchError) {
+                            consistencyOutcome = requestOutcome(consistencyBatchError);
+                            if (consistencyOutcome === 3) concurrency = 1;
+                            throw consistencyBatchError;
                         } finally {
-                            if (timing) timing.finish(consistencyTiming, { outcome: consistencyOutcome });
+                            if (timing && !(consistencyOutcome === 3 && attempt === 1)) {
+                                timing.finish(consistencyTimings[candidateBatchIndex], {
+                                    outcome: consistencyOutcome, attempt: attempt, concurrency: limit });
+                                consistencyTimings[candidateBatchIndex] = null;
+                            }
                         }
-                    }
+                    }, consistencyOptions.signal, function () {
+                        consistencyStopped = true;
+                        stopConsistencyTransport();
+                    });
                     consistencyCompleted = true;
                     reportProgress(100, "全文一致性复核完成");
                 } catch (consistencyError) {
@@ -1579,9 +1829,16 @@
                         ? consistencyError.message
                         : "一致性复核未完成。";
                     reportProgress(100, "正文校对完成 · 一致性复核未完成");
+                } finally {
+                    consistencyStopped = true;
+                    if (options.signal && options.signal.removeEventListener) {
+                        options.signal.removeEventListener("abort", stopConsistencyTransport);
+                    }
+                    if (timing) consistencyTimings.forEach(function (token) { timing.finish(token, { outcome: 2 }); });
                 }
             }
 
+            if (perf && runConsistencyPass) perf.report.consistencyMs = actionClock() - consistencyStarted;
             ensureRunActive(run);
             if (!documentSnapshotMatches(run.document, snapshot)) {
                 currentSnapshot = null;
@@ -1590,7 +1847,7 @@
                 viewIssues();
                 throw new Error("校对期间" + scopeLabel + "内容已变化，结果已丢弃。请重新校对。");
             }
-            currentIssues = mergeMappedIssues(collected, run.runId);
+            currentIssues = mergeRunIssues(run, collected);
             currentSnapshot = snapshot;
             reportProgress(100, currentIssues.length
                 ? "校对完成 · 共发现 " + currentIssues.length + " 项"
@@ -1617,8 +1874,8 @@
                 consistencyWarning: consistencyWarning
             };
         } catch (error) {
-            runOutcome = requestOutcome(error);
             syncDocumentSession();
+            runOutcome = requestOutcome(error);
             if (!isDocumentRunCurrent(run)) {
                 return { accepted: false, reason: "cancelled" };
             }
@@ -1632,7 +1889,7 @@
             var partial = collected.length > 0 && !discarded && snapshot &&
                 documentSnapshotMatches(run.document, snapshot);
             if (partial) {
-                currentIssues = mergeMappedIssues(collected, run.runId);
+                currentIssues = mergeRunIssues(run, collected);
                 currentSnapshot = snapshot;
                 viewIssues();
             }
@@ -1646,6 +1903,10 @@
                 : (error && error.message ? error.message : "校对失败，请重试。"), "error");
             return { accepted: false, reason: "error" };
         } finally {
+            if (perf && runConsistencyPass && consistencyStarted) {
+                perf.report.consistencyMs = actionClock() - consistencyStarted;
+            }
+            finishRunPerf(perf);
             if (timing) {
                 batchTimings.forEach(function (token) { timing.finish(token, { outcome: runOutcome }); });
                 timing.finish(runTiming, { outcome: runOutcome });
@@ -1712,7 +1973,8 @@
             setStatus("请切回原文档或在当前文档重新校对。", "warning");
             return true;
         }
-        if (!busy && !issueActionBusy) return false;
+        var run = documentRuns[activeDocumentKey];
+        if (!issueActionBusy && (!busy || (run && run.firstPassComplete))) return false;
         setStatus(issueActionBusy
             ? "上一条操作正在收尾，请稍候。"
             : "校对进行中，请等待完成或先取消。", "warning");
@@ -1726,6 +1988,8 @@
             });
             if (!range || typeof range.Select !== "function") throw new Error("range-unavailable");
             range.Select();
+            // Keep the expanded card in sync with the document cursor (click and auto-advance).
+            if (typeof root.setActiveProofreadingIssue === "function") root.setActiveProofreadingIssue(issue.id);
             return true;
         } catch (error) {
             issue.status = "stale";
@@ -1761,13 +2025,15 @@
 
     function ignoreProofreadingIssue(issueId) {
         if (!canUseProofreadingIssue(issueId)) return false;
-        if (issueActionUnavailable()) return false;
+        if (issueActionBusy) return false;
         var issue = findPendingIssue(issueId);
         if (!issue || issue.status !== "pending") {
             setStatus("这条建议已处理或已失效。", "warning");
             return false;
         }
         issue.status = "ignored";
+        var run = documentRuns[activeDocumentKey];
+        if (run && run.started && run.runId === currentResultRunId) run.issueStates[issue.id] = "ignored";
         recordAction("ignored", issue);
         viewIssues();
         setStatus("已忽略这条建议，文档没有修改。", "success");
@@ -1775,6 +2041,9 @@
     }
 
     function writeIssueReplacement(change, perf) {
+        var reviewRun = documentRuns[activeDocumentKey];
+        change.consistencyStopped = !!(reviewRun && reviewRun.busy && reviewRun.firstPassComplete);
+        if (!prepareConsistencyWrite()) return false;
         var issue = change.issue;
         var context;
         var range = actionStage(perf, "validation", function () {
@@ -1782,6 +2051,7 @@
                 var operationDocument = activeDocument(app());
                 change.trackRevisionsAtWrite = isTrackRevisionsEnabled(operationDocument);
                 change.revisionMode = change.trackRevisionsAtWrite ||
+                    currentSnapshot.revisionCoordinates ||
                     Number.isInteger(issue.textOffset) || currentIssues.some(function (candidate) {
                         return Number.isInteger(candidate.textOffset);
                     });
@@ -1816,11 +2086,44 @@
         change.end = Number(range.End);
         if (!Number.isInteger(change.start) || !Number.isInteger(change.end) ||
             change.end < change.start) return false;
+        if (change.revisionMode) {
+            change.prefixAtWrite = text(activeDocument(app()).Range(0, change.start).Text);
+        }
         change.attempted = true;
+        var operationDocument = activeDocument(app());
+        var nativeEndBefore = change.revisionMode ? Number(operationDocument.Content.End) : null;
         actionStage(perf, "write", function () { range.Text = change.replacement; });
         change.written = true;
+        if (change.revisionMode) {
+            var nativeEndAfter = Number(operationDocument.Content.End);
+            if (!Number.isInteger(nativeEndBefore) || !Number.isInteger(nativeEndAfter)) {
+                throw new Error("revision-boundary-unavailable");
+            }
+            change.revisedNativeEnd = currentSnapshot.nativeEnd + nativeEndAfter - nativeEndBefore;
+        }
         // No live WPS Range is carried into the next event-loop turn.
         return true;
+    }
+
+    function prepareConsistencyWrite() {
+        var run = documentRuns[activeDocumentKey];
+        if (!run || !run.busy) return true;
+        if (!run.firstPassComplete) return false;
+        // Strictly validate the complete captured scope before interrupting review.
+        var matches = documentSnapshotMatches(run.document, currentSnapshot);
+        cancelDocumentRun(run);
+        run.busy = false;
+        run.snapshot = currentSnapshot;
+        run.issues = currentIssues;
+        run.status = { text: "正文修改已停止全文一致性复核，旧复核结果将丢弃。", tone: "warning" };
+        publishDocumentRun(run, "busy");
+        publishDocumentRun(run, "status");
+        // Remove ownership before writing, including transports that ignore abort.
+        delete documentRuns[run.key];
+        if (!matches) {
+            markAllPendingStale("正文已变化，一致性复核已停止；未写入修改，请重新校对。");
+        }
+        return matches;
     }
 
     function completeIssueReplacement(change, perf) {
@@ -1831,7 +2134,7 @@
             }
             var revisedSnapshot = actionStage(perf, "snapshotUpdate", function () {
                 return updateSnapshotAfterReplacement(change.start, change.end,
-                    change.replacement, change.snapshotOffset, change.expected.length);
+                    change.replacement, change.snapshotOffset, change.expected.length, change.revisedNativeEnd);
             });
             var revisedIssues = actionStage(perf, "stateShift", function () {
                 return currentIssues.map(function (issue) {
@@ -1859,7 +2162,7 @@
                         try {
                             location = findAnchoredRevisionRange(
                                 document, expected, anchors.before, anchors.after,
-                                revisedSnapshot.selectedText, issue.start);
+                                revisedSnapshot, issue.start, false, relative);
                         } catch (error) { /* A failed WPS lookup leaves this issue stale. */ }
                     }
                     if (!location) {
@@ -1894,6 +2197,7 @@
     }
 
     function invalidateWrittenAction(change) {
+        if (change.documentKey && activeDocumentKey !== change.documentKey) return;
         currentSnapshot = null;
         currentIssues = currentIssues.map(function (issue) {
             if (change.postWriteVerified === true && change.written &&
@@ -1914,14 +2218,27 @@
                     documentKey(document) !== change.documentKey) return false;
                 if (isTrackRevisionsEnabled(document) !== change.trackRevisionsAtWrite) return false;
                 if (change.revisionMode) {
-                    var revisedText = updateSnapshotAfterReplacement(change.start, change.end,
-                        change.replacement, change.snapshotOffset, change.expected.length).selectedText;
+                    var revisedSnapshot = updateSnapshotAfterReplacement(change.start, change.end,
+                        change.replacement, change.snapshotOffset, change.expected.length, change.revisedNativeEnd);
                     var revised = findAnchoredRevisionRange(
                         document, change.replacement, change.before, change.after,
-                        revisedText, change.start, true);
-                    if (!revised || findAnchoredRevisionRange(
+                        revisedSnapshot, change.start, true, change.snapshotOffset);
+                    if (!revised) return false;
+                    var proved = provenRevisionRange(document, change.replacement,
+                        change.before, change.after, revisedSnapshot, change.snapshotOffset);
+                    // Another unchanged paragraph can still contain the old
+                    // context. A proved logical target distinguishes that copy
+                    // from native undo or an unconfirmed write at this target.
+                    if (!proved && findAnchoredRevisionRange(
                         document, change.expected, change.before, change.after,
-                        revisedText, change.start, true)) return false;
+                        revisedSnapshot, change.start, true, change.snapshotOffset)) return false;
+                    if (proved) revised = proved;
+                    // A unique paragraph elsewhere cannot confirm this write.
+                    // A local match must retain its actual native start, or its
+                    // complete logical prefix if revision positions moved.
+                    if (!proved && revised.start !== change.start &&
+                        (typeof change.prefixAtWrite !== "string" ||
+                            text(document.Range(0, revised.start).Text) !== change.prefixAtWrite)) return false;
                     change.verifiedStart = revised.start;
                     change.verifiedEnd = revised.end;
                     return true;
@@ -1945,19 +2262,26 @@
 
     function applyOneIssue(issue, deferRender) {
         var change = { issue: issue, expected: issue.original, replacement: issue.suggestion, action: "applied" };
-        if (!writeIssueReplacement(change)) {
+        var committed = false;
+        try {
+            if (!writeIssueReplacement(change)) {
+                if (!deferRender) viewIssues();
+                return { ok: false, reason: "changed" };
+            }
+            if (change.revisionMode && !verifyWrittenChange(change)) {
+                invalidateWrittenAction(change);
+                if (!deferRender) viewIssues();
+                return { ok: false, reason: "changed" };
+            }
+            completeIssueReplacement(change);
+            committed = true;
+            recordAction("applied", issue);
             if (!deferRender) viewIssues();
-            return { ok: false, reason: "changed" };
+            return { ok: true };
+        } catch (error) {
+            if (change.attempted && !committed) invalidateWrittenAction(change);
+            return { ok: false, reason: "error", committed: committed };
         }
-        if (change.revisionMode && !verifyWrittenChange(change)) {
-            invalidateWrittenAction(change);
-            if (!deferRender) viewIssues();
-            return { ok: false, reason: "changed" };
-        }
-        completeIssueReplacement(change);
-        recordAction("applied", issue);
-        if (!deferRender) viewIssues();
-        return { ok: true };
     }
 
     function locateNextPendingIssue(afterId, perf) {
@@ -2055,13 +2379,15 @@
             var hasStale = currentIssues.some(function (candidate) {
                 return candidate.status === "stale";
             });
-            setStatus(warning
+            setStatus((warning
                 ? "正文修改已完成，但部分记录或界面收尾失败。请检查正文后重新校对。"
                 : undo ? "已撤销这条修改，建议恢复为待确认。"
                     : !autoAdvance && navigation.hadPending ? "已应用一条建议，其余建议待确认。"
                     : navigation.located ? "已应用一条建议，并定位到下一条待处理问题。"
                         : navigation.hadPending || hasStale ? "已应用一条建议；其他原文已变化，请重新校对。"
-                            : "本轮待处理问题已经处理完成。", warning ? "warning" : "success");
+                            : "本轮待处理问题已经处理完成。") +
+                (change.consistencyStopped ? " 全文一致性复核已停止，旧结果已丢弃。" : ""),
+                warning ? "warning" : "success");
             return true;
         } catch (error) {
             if (change && change.attempted) {
@@ -2105,6 +2431,140 @@
             Number(issue.confidence) >= 0.9;
     }
 
+    function buildTrackedBatchPlan(document, pendingIds) {
+        if (!document || !currentSnapshot || !isTrackRevisionsEnabled(document)) return null;
+        var plan = [];
+        for (var index = 0; index < pendingIds.length; index += 1) {
+            var issue = findPendingIssue(pendingIds[index]);
+            if (!issue || !isAutoFixableIssue(issue)) return null;
+            var context = issueContext(issue, issue.original);
+            if (!context) return null;
+            var anchored = findAnchoredRevisionRange(
+                document, issue.original, context.before, context.after,
+                undefined, issue.start, false, context.relativeStart);
+            if (!anchored) return null;
+            plan.push({
+                id: issue.id,
+                expected: issue.original,
+                replacement: issue.suggestion,
+                start: anchored.start,
+                end: anchored.end,
+                relativeStart: context.relativeStart
+            });
+        }
+        plan.sort(function (left, right) {
+            return right.start - left.start || right.end - left.end;
+        });
+        for (var planIndex = 1; planIndex < plan.length; planIndex += 1) {
+            if (plan[planIndex].end > plan[planIndex - 1].start) return null;
+        }
+        return plan;
+    }
+
+    function completeTrackedBatchReplacement(entry, issue) {
+        var previousSnapshot = currentSnapshot;
+        var expectedLength = entry.expected.length;
+        var delta = entry.replacement.length - expectedLength;
+        var revisedSnapshot = updateSnapshotAfterReplacement(
+            entry.start, entry.end, entry.replacement, entry.relativeStart, expectedLength, entry.revisedNativeEnd);
+        currentIssues = currentIssues.map(function (candidate) {
+            var updated = Object.assign({}, candidate);
+            var relative = Number.isInteger(candidate.textOffset)
+                ? candidate.textOffset
+                : candidate.start - previousSnapshot.start;
+            if (candidate.id === issue.id) {
+                updated.status = "accepted";
+                updated.textOffset = entry.relativeStart;
+                updated.start = entry.start;
+                updated.end = entry.start + entry.replacement.length;
+                return updated;
+            }
+            if (candidate.status !== "pending" && candidate.status !== "accepted") return updated;
+            var candidateExpected = candidate.status === "accepted"
+                ? candidate.suggestion : candidate.original;
+            if (relative >= entry.relativeStart + expectedLength) {
+                updated.textOffset = relative + delta;
+            } else if (relative + candidateExpected.length > entry.relativeStart) {
+                updated.status = "stale";
+            } else {
+                updated.textOffset = relative;
+            }
+            return updated;
+        });
+        currentSnapshot = revisedSnapshot;
+    }
+
+    function applyTrackedBatchEntry(entry, document) {
+        var issue = findPendingIssue(entry.id);
+        if (!issue || !isAutoFixableIssue(issue)) return { ok: false, reason: "changed" };
+        var change = null;
+        var committed = false;
+        try {
+            if (!document || documentKey(document) !== currentSnapshot.documentKey ||
+                !isTrackRevisionsEnabled(document)) return { ok: false, reason: "changed" };
+            // All tracked targets are preflighted before the first write and then
+            // applied from the end of the document backwards. Later tracked edits
+            // therefore cannot shift the coordinates of an earlier target.
+            var range = document.Range(entry.start, entry.end);
+            if (text(range.Text) !== entry.expected) {
+                issue.status = "stale";
+                return { ok: false, reason: "changed" };
+            }
+            var context = issueContext(issue, entry.expected);
+            if (!context) return { ok: false, reason: "changed" };
+            var checked = checkedIssueRange(issue, entry.expected, null, document, context);
+            if (!checked || Number(checked.Start) !== entry.start || Number(checked.End) !== entry.end) {
+                return { ok: false, reason: "changed" };
+            }
+            var nativeEndBefore = Number(document.Content.End);
+            change = { issue: issue, expected: entry.expected, replacement: entry.replacement,
+                action: "applied", documentKey: currentSnapshot.documentKey,
+                before: context.before, after: context.after, start: entry.start, end: entry.end,
+                snapshotOffset: entry.relativeStart, trackRevisionsAtWrite: true,
+                revisionMode: true, prefixAtWrite: text(document.Range(0, entry.start).Text), attempted: true };
+            range.Text = entry.replacement;
+            change.written = true;
+            var nativeEndAfter = Number(document.Content.End);
+            if (!Number.isInteger(nativeEndBefore) || !Number.isInteger(nativeEndAfter)) {
+                throw new Error("revision-boundary-unavailable");
+            }
+            entry.revisedNativeEnd = currentSnapshot.nativeEnd + nativeEndAfter - nativeEndBefore;
+            change.revisedNativeEnd = entry.revisedNativeEnd;
+            // Verify active text synchronously before publishing success.
+            // Deleted revisions may still occupy physical coordinates.
+            if (!verifyWrittenChange(change)) {
+                invalidateWrittenAction(change);
+                return { ok: false, reason: "changed" };
+            }
+            change.postWriteVerified = true;
+            completeTrackedBatchReplacement(entry, issue);
+            committed = true;
+            recordAction("applied", issue);
+            return { ok: true };
+        } catch (error) {
+            if (change && change.attempted && !committed) invalidateWrittenAction(change);
+            return { ok: false, reason: "error", committed: committed };
+        }
+    }
+
+    function beginBatchUndoRecord() {
+        try {
+            var application = app();
+            var undoRecord = application && application.UndoRecord;
+            var start = undoRecord && undoRecord.StartCustomRecord;
+            var end = undoRecord && undoRecord.EndCustomRecord;
+            if (typeof start !== "function" || typeof end !== "function") return null;
+            undoRecord.StartCustomRecord("一键修正");
+            return function () {
+                try { undoRecord.EndCustomRecord(); }
+                catch (error) { /* Host cleanup errors must not change completed issue state or counts. */ }
+            };
+        } catch (error) {
+            // Older hosts may expose unavailable properties or methods that throw.
+            return null;
+        }
+    }
+
     function applyAllProofreadingIssues() {
         if (issueActionUnavailable()) {
             return { applied: 0, failed: 0, skipped: currentIssues.length };
@@ -2112,6 +2572,8 @@
         var pending = currentIssues.filter(function (candidate) {
             return candidate.status === "pending";
         });
+        var reviewRun = documentRuns[activeDocumentKey];
+        var consistencyStopped = !!(reviewRun && reviewRun.busy && reviewRun.firstPassComplete);
         var pendingIds = pending.filter(isAutoFixableIssue).map(function (candidate) {
             return candidate.id;
         });
@@ -2126,7 +2588,8 @@
             return { applied: 0, failed: 0, skipped: skipped };
         }
         var document = activeDocument(app());
-        var uncertainCoordinates = isTrackRevisionsEnabled(document) || currentIssues.some(function (issue) {
+        var trackRevisions = isTrackRevisionsEnabled(document);
+        var uncertainCoordinates = trackRevisions || currentSnapshot.revisionCoordinates || currentIssues.some(function (issue) {
             return Number.isInteger(issue.textOffset);
         });
         if (!(uncertainCoordinates ? revisionSnapshotMatches(currentSnapshot)
@@ -2134,46 +2597,84 @@
             markAllPendingStale("选区内容已变化，未写入任何建议。请重新校对。");
             return { applied: 0, failed: pendingIds.length, skipped: skipped, stale: true };
         }
+        var trackedPlan = trackRevisions ? buildTrackedBatchPlan(document, pendingIds) : null;
+        if (trackRevisions && !trackedPlan) {
+            markAllPendingStale("修订模式下未能安全定位全部一键修正项，未写入任何建议。请重新校对。");
+            return { applied: 0, failed: pendingIds.length, skipped: skipped, stale: true };
+        }
 
         var applied = 0;
         var failed = 0;
-        for (var index = 0; index < pendingIds.length; index += 1) {
-            var issue = findPendingIssue(pendingIds[index]);
-            if (!issue || !isAutoFixableIssue(issue)) {
-                failed = pendingIds.length - applied;
-                markAllPendingStale("原文或上下文已变化，剩余建议未写入。已修正 " +
-                    applied + " 条，请重新校对。");
-                return { applied: applied, failed: failed, skipped: skipped, stale: true };
+        var endUndoRecord = null;
+        var batchDocumentKey = activeDocumentKey;
+        setIssueActionBusy(true);
+        try {
+            if (!prepareConsistencyWrite()) {
+                return { applied: 0, failed: pendingIds.length, skipped: skipped, stale: true };
             }
-            var result;
-            try {
-                result = applyOneIssue(issue, true);
-            } catch (error) {
-                result = { ok: false, reason: "error" };
-            }
-            if (result.ok) {
-                applied += 1;
-            } else {
-                failed += 1;
-                if (result.reason === "error") {
-                    viewIssues();
-                    setStatus("WPS 未能写入剩余建议，已停止批量修正；已修正 " + applied + " 条。", "error");
-                    return { applied: applied, failed: failed, skipped: skipped };
+            endUndoRecord = beginBatchUndoRecord();
+            var batchOrder = trackedPlan || pendingIds;
+            for (var index = 0; index < batchOrder.length; index += 1) {
+                if (activeDocumentKey !== batchDocumentKey) {
+                    return { applied: applied, failed: 0, skipped: skipped,
+                        unattempted: pendingIds.length - index, documentChanged: true };
                 }
-                failed = pendingIds.length - applied;
-                markAllPendingStale("原文已变化，剩余建议未写入。已修正 " + applied + " 条，请重新校对。");
-                return { applied: applied, failed: failed, skipped: skipped, stale: true };
+                var issue = trackedPlan
+                    ? findPendingIssue(batchOrder[index].id)
+                    : findPendingIssue(batchOrder[index]);
+                if (!issue || !isAutoFixableIssue(issue)) {
+                    failed = pendingIds.length - applied;
+                    markAllPendingStale("原文或上下文已变化，剩余建议未写入。已修正 " +
+                        applied + " 条，请重新校对。");
+                    return { applied: applied, failed: failed, skipped: skipped, stale: true };
+                }
+                var result;
+                try {
+                    result = trackedPlan
+                        ? applyTrackedBatchEntry(batchOrder[index], document)
+                        : applyOneIssue(issue, true);
+                } catch (error) {
+                    result = { ok: false, reason: "error" };
+                }
+                if (activeDocumentKey !== batchDocumentKey) {
+                    var confirmed = result.ok || result.committed;
+                    return { applied: applied + (confirmed ? 1 : 0),
+                        failed: confirmed ? 0 : 1, skipped: skipped,
+                        unattempted: pendingIds.length - index - 1, documentChanged: true };
+                }
+                if (result.ok) {
+                    applied += 1;
+                } else {
+                    if (result.committed) applied += 1;
+                    else failed += 1;
+                    if (result.reason === "error") {
+                        var unattempted = pendingIds.length - index - 1;
+                        viewIssues();
+                        setStatus((result.committed ? "正文已修改，但记录失败" : "WPS 未能确认本条写入") +
+                            "，已停止批量修正；已修正 " + applied + " 条" +
+                            (failed ? "，写入未确认 " + failed + " 条" : "") +
+                            (unattempted ? "，另有 " + unattempted + " 条尚未尝试" : "") + "。", "error");
+                        return { applied: applied, failed: failed, skipped: skipped, unattempted: unattempted };
+                    }
+                    failed = pendingIds.length - applied;
+                    markAllPendingStale("原文已变化，剩余建议未写入。已修正 " + applied + " 条，请重新校对。");
+                    return { applied: applied, failed: failed, skipped: skipped, stale: true };
+                }
             }
-        }
 
-        viewIssues();
-        var suffix = skipped
-            ? "；另有 " + skipped + " 条建议未自动修改，请逐条确认。"
-            : "。";
-        setStatus(applied
-            ? "已一键修正 " + applied + " 条安全格式建议，并在写入前逐条核对了原文" + suffix
-            : "没有可安全自动写入的建议。", applied ? "success" : "warning");
-        return { applied: applied, failed: failed, skipped: skipped };
+            viewIssues();
+            var suffix = skipped
+                ? "；另有 " + skipped + " 条建议未自动修改，请逐条确认。"
+                : "。";
+            if (consistencyStopped) suffix += " 全文一致性复核已停止，旧结果已丢弃。";
+            setStatus(applied
+                ? "已一键修正 " + applied + " 条安全格式建议，并在写入前逐条核对了原文" + suffix
+                : "没有可安全自动写入的建议。", applied ? "success" : "warning");
+            return { applied: applied, failed: failed, skipped: skipped };
+        } finally {
+            if (endUndoRecord) endUndoRecord();
+            setIssueActionBusy(false);
+        }
     }
 
     root.runProofreading = runProofreading;
@@ -2182,6 +2683,7 @@
     root.ensureOpenCodeConnection = ensureOpenCodeConnection;
     root.getModelConnectionState = modelConnectionState;
     root.invalidateModelConnection = invalidateModelConnection;
+    root.syncProofreadingSettings = syncFromStore;
     root.locateProofreadingIssue = locateProofreadingIssue;
     root.ignoreProofreadingIssue = ignoreProofreadingIssue;
     root.applyProofreadingIssue = applyProofreadingIssue;
@@ -2193,6 +2695,7 @@
             snapshot: currentSnapshot,
             issues: currentIssues.slice(),
             busy: busy,
+            firstPassComplete: !!(documentRuns[activeDocumentKey] && documentRuns[activeDocumentKey].firstPassComplete),
             actionBusy: issueActionBusy,
             provider: currentSettings().provider
         };

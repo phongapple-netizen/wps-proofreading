@@ -7,6 +7,41 @@ test("direct model HTTP 429 exposes the same recoverable code as OpenCode", asyn
         "private-body", async () => ({ ok: false, status: 429 })), { code: "MODEL_RATE_LIMITED" });
 });
 
+test("scheduler bounds concurrency and invalid values safely fall back to serial", async () => {
+    for (const concurrency of [undefined, 0, 1, 2, 3, 4, 5, "2"]) {
+        let active = 0, peak = 0;
+        const completed = [];
+        await core.scheduleBatches([0, 1, 2, 3], concurrency, async (_item, index) => {
+            active++; peak = Math.max(peak, active);
+            await new Promise(resolve => setImmediate(resolve));
+            completed.push(index); active--;
+        });
+        assert.equal(peak, Number.isInteger(concurrency) && concurrency >= 1 && concurrency <= 4 ? concurrency : 1);
+        assert.deepEqual(completed, [0, 1, 2, 3]);
+    }
+});
+
+test("fast first batch keeps regular segmentation and exact nonoverlapping coverage", () => {
+    const text = Array.from({ length: 16 }, (_, i) => String(i) + "甲".repeat(399)).join("\r\n") +
+        "\n" + "长段落。".repeat(900);
+    const paragraphs = core.splitIntoParagraphs(text);
+    const regular = core.batchParagraphs(paragraphs, core.defaultBatchCharacters).flat();
+    const batches = core.batchParagraphs(paragraphs, core.defaultBatchCharacters, core.firstBatchCharacters);
+    assert.deepEqual(batches.flat(), regular, "fast packing must not split normal paragraphs differently");
+    const sizes = batches.map(batch => batch.reduce((sum, paragraph) => sum + paragraph.text.length, 0));
+    assert.ok(sizes[0] <= 1000);
+    assert.ok(sizes[1] > sizes[0] * 2);
+    const covered = new Set();
+    for (const segment of batches.flat()) {
+        assert.equal(text.slice(segment.offset, segment.offset + segment.text.length), segment.text);
+        for (let offset = segment.offset; offset < segment.offset + segment.text.length; offset++) {
+            assert.equal(covered.has(offset), false);
+            covered.add(offset);
+        }
+    }
+    assert.equal(covered.size, paragraphs.reduce((sum, paragraph) => sum + paragraph.text.length, 0));
+});
+
 test("paragraph splitting preserves WPS offsets across CRLF and blank paragraphs", () => {
     const text = "前段。\r\n\r后段。";
     assert.deepEqual(core.splitIntoParagraphs(text), [

@@ -1,0 +1,226 @@
+[
+  {
+    "mockBackend": "independent",
+    "concurrency": 1,
+    "averageRequestMs": 54.238,
+    "snapshotCaptureMs": 0.03,
+    "localRulesMs": 0.02,
+    "firstResultMs": 41.99,
+    "firstPassMs": 276.32,
+    "consistencyMs": 0,
+    "totalMs": 276.47,
+    "batchCount": 5,
+    "consistencyBatchCount": 0,
+    "batches": [
+      {
+        "batchIndex": 0,
+        "characters": 800,
+        "requestMs": 38.5,
+        "parseAndMapMs": 0.09,
+        "snapshotValidationMs": 0.02,
+        "publishRenderMs": 0.1
+      },
+      {
+        "batchIndex": 1,
+        "characters": 2400,
+        "requestMs": 60.75,
+        "parseAndMapMs": 0.07,
+        "snapshotValidationMs": 0.02,
+        "publishRenderMs": 0.18
+      },
+      {
+        "batchIndex": 2,
+        "characters": 2404,
+        "requestMs": 61.31,
+        "parseAndMapMs": 0.08,
+        "snapshotValidationMs": 0.03,
+        "publishRenderMs": 0.12
+      },
+      {
+        "batchIndex": 3,
+        "characters": 2406,
+        "requestMs": 63.24,
+        "parseAndMapMs": 0.13,
+        "snapshotValidationMs": 0.04,
+        "publishRenderMs": 0.25
+      },
+      {
+        "batchIndex": 4,
+        "characters": 1604,
+        "requestMs": 47.39,
+        "parseAndMapMs": 0.09,
+        "snapshotValidationMs": 0.03,
+        "publishRenderMs": 0.15
+      }
+    ],
+    "consistencyBatches": []
+  },
+  {
+    "mockBackend": "independent",
+    "concurrency": 2,
+    "averageRequestMs": 50.708,
+    "snapshotCaptureMs": 0.04,
+    "localRulesMs": 0.02,
+    "firstResultMs": 44.87,
+    "firstPassMs": 154.43,
+    "consistencyMs": 0,
+    "totalMs": 156.15,
+    "batchCount": 5,
+    "consistencyBatchCount": 0,
+    "batches": [
+      {
+        "batchIndex": 0,
+        "characters": 800,
+        "requestMs": 40.81,
+        "parseAndMapMs": 0.11,
+        "snapshotValidationMs": 0.03,
+        "publishRenderMs": 0.14
+      },
+      {
+        "batchIndex": 1,
+        "characters": 2400,
+        "requestMs": 56,
+        "parseAndMapMs": 0.07,
+        "snapshotValidationMs": 0.02,
+        "publishRenderMs": 0.06
+      },
+      {
+        "batchIndex": 2,
+        "characters": 2404,
+        "requestMs": 63.41,
+        "parseAndMapMs": 0.45,
+        "snapshotValidationMs": 0.22,
+        "publishRenderMs": 0.29
+      },
+      {
+        "batchIndex": 3,
+        "characters": 2406,
+        "requestMs": 49.5,
+        "parseAndMapMs": 0.04,
+        "snapshotValidationMs": 0.01,
+        "publishRenderMs": 0.05
+      },
+      {
+        "batchIndex": 4,
+        "characters": 1604,
+        "requestMs": 43.82,
+        "parseAndMapMs": 0.07,
+        "snapshotValidationMs": 0.02,
+        "publishRenderMs": 0.43
+      }
+    ],
+    "consistencyBatches": []
+  },
+  {
+    "mockBackend": "queued",
+    "concurrency": 1,
+    "averageRequestMs": 54.029999999999994,
+    "snapshotCaptureMs": 0.03,
+    "localRulesMs": 0.01,
+    "firstResultMs": 41.82,
+    "firstPassMs": 274.55,
+    "consistencyMs": 0,
+    "totalMs": 274.64,
+    "batchCount": 5,
+    "consistencyBatchCount": 0,
+    "batches": [
+      {
+        "batchIndex": 0,
+        "characters": 800,
+        "requestMs": 38.61,
+        "parseAndMapMs": 0.09,
+        "snapshotValidationMs": 0.02,
+        "publishRenderMs": 0.11
+      },
+      {
+        "batchIndex": 1,
+        "characters": 2400,
+        "requestMs": 61.87,
+        "parseAndMapMs": 0.09,
+        "snapshotValidationMs": 0.03,
+        "publishRenderMs": 0.11
+      },
+      {
+        "batchIndex": 2,
+        "characters": 2404,
+        "requestMs": 62.03,
+        "parseAndMapMs": 0.09,
+        "snapshotValidationMs": 0.03,
+        "publishRenderMs": 0.07
+      },
+      {
+        "batchIndex": 3,
+        "characters": 2406,
+        "requestMs": 60.77,
+        "parseAndMapMs": 0.07,
+        "snapshotValidationMs": 0.03,
+        "publishRenderMs": 0.08
+      },
+      {
+        "batchIndex": 4,
+        "characters": 1604,
+        "requestMs": 46.87,
+        "parseAndMapMs": 0.07,
+        "snapshotValidationMs": 0.03,
+        "publishRenderMs": 0.09
+      }
+    ],
+    "consistencyBatches": []
+  },
+  {
+    "mockBackend": "queued",
+    "concurrency": 2,
+    "averageRequestMs": 101.558,
+    "snapshotCaptureMs": 0.02,
+    "localRulesMs": 0.02,
+    "firstResultMs": 46.64,
+    "firstPassMs": 281.13,
+    "consistencyMs": 0,
+    "totalMs": 281.25,
+    "batchCount": 5,
+    "consistencyBatchCount": 0,
+    "batches": [
+      {
+        "batchIndex": 0,
+        "characters": 800,
+        "requestMs": 43.39,
+        "parseAndMapMs": 0.12,
+        "snapshotValidationMs": 0.03,
+        "publishRenderMs": 0.14
+      },
+      {
+        "batchIndex": 1,
+        "characters": 2400,
+        "requestMs": 106.27,
+        "parseAndMapMs": 0.08,
+        "snapshotValidationMs": 0.03,
+        "publishRenderMs": 0.08
+      },
+      {
+        "batchIndex": 2,
+        "characters": 2404,
+        "requestMs": 126.64,
+        "parseAndMapMs": 0.06,
+        "snapshotValidationMs": 0.03,
+        "publishRenderMs": 0.06
+      },
+      {
+        "batchIndex": 3,
+        "characters": 2406,
+        "requestMs": 124.16,
+        "parseAndMapMs": 0.08,
+        "snapshotValidationMs": 0.03,
+        "publishRenderMs": 0.08
+      },
+      {
+        "batchIndex": 4,
+        "characters": 1604,
+        "requestMs": 107.33,
+        "parseAndMapMs": 0.07,
+        "snapshotValidationMs": 0.02,
+        "publishRenderMs": 0.09
+      }
+    ],
+    "consistencyBatches": []
+  }
+]

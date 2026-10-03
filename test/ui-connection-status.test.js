@@ -28,11 +28,13 @@ function harness(options = {}) {
     'proofreading-concurrency', 'proofreading-timing-enabled', 'proofreading-diagnostics',
     'proofreading-diagnostics-toggle', 'proofreading-diagnostics-content',
     'proofreading-timing-log', 'copy-proofreading-timing', 'clear-proofreading-timing',
-    'refresh-proofreading-timing', 'proofreading-timing-status']
+    'refresh-proofreading-timing', 'proofreading-timing-status',
+    'rules-only', 'deep-enhance-control', 'deep-enhance', 'proofreading-mode-hint']
     .forEach((id) => { elements[id] = field(); });
   elements['opencode-guide-content'].hidden = true;
   elements['proofreading-diagnostics-content'].hidden = true;
   const storage = new Map();
+  if (options.seed) storage.set('wps_text_proofreading_model_settings_v1', JSON.stringify(options.seed));
   const ready = [];
   const intervals = [];
   const win = {
@@ -61,6 +63,7 @@ test('performance settings and numeric logs are accessible and copyable for ever
   const h = harness();
   assert.equal(h.elements['proofreading-concurrency'].value, '2');
   assert.equal(h.elements['proofreading-timing-enabled'].checked, false);
+  assert.equal(h.win.WpsSettingsStore.defaultSettings().timingLogs, false);
   assert.equal(h.elements['proofreading-diagnostics-content'].hidden, true);
   h.elements['proofreading-diagnostics-toggle'].fire('click');
   assert.equal(h.elements['proofreading-diagnostics-content'].hidden, false);
@@ -94,6 +97,24 @@ test('performance settings and numeric logs are accessible and copyable for ever
   assert.equal(h.win.WpsProofreadingTiming.start({ kind: 1 }), null);
 });
 
+test('concurrency round-trips valid values and normalizes missing or invalid values', () => {
+  const h = harness();
+  assert.equal(h.win.WpsSettingsStore.defaultSettings().concurrency, 2);
+  for (const concurrency of [1, 2, 3, 4]) {
+    h.win.WpsSettingsStore.updateSettings({ concurrency });
+    assert.equal(h.win.WpsSettingsStore.loadSettings().concurrency, concurrency);
+    assert.equal(h.win.WpsSettingsStore.saveSettings({ concurrency }), true);
+    assert.equal(h.win.WpsSettingsStore.loadSettings().concurrency, concurrency);
+  }
+  for (const concurrency of [0, 5, -1, 1.5, '3', null]) {
+    h.win.WpsSettingsStore.updateSettings({ concurrency });
+    assert.equal(h.win.WpsSettingsStore.loadSettings().concurrency, 2);
+  }
+  const legacy = harness({ seed: { provider: 'opencode', deep: true } });
+  assert.equal(legacy.win.WpsSettingsStore.loadSettings().concurrency, 2);
+  assert.equal(legacy.win.WpsSettingsStore.loadSettings().rulesOnly, false);
+});
+
 test('log copying falls back to selection and an actionable message on older clipboard hosts', async () => {
   const h = harness();
   let selected = 0;
@@ -112,6 +133,50 @@ test('log copying falls back to selection and an actionable message on older cli
 function nativeResponse(state, version = '') {
   return { ok: true, async json() { return { state, found: state !== 'missing', version, managed: state === 'ready' }; } };
 }
+
+test('rules-only setting persists, preserves models and deep mode, and updates the panel', () => {
+  const h = harness();
+  assert.equal(h.win.WpsSettingsStore.defaultSettings().rulesOnly, false);
+  h.win.WpsSettingsStore.updateSettings({ deep: true, profile: { model: 'saved/model' } });
+  h.win.syncSettingsForm();
+  h.elements['rules-only'].checked = true;
+  h.elements['rules-only'].fire('change');
+  const settings = h.win.WpsSettingsStore.loadSettings();
+  assert.equal(settings.rulesOnly, true);
+  assert.equal(settings.deep, true);
+  assert.equal(settings.profiles.opencode.model, 'saved/model');
+  assert.equal(h.elements['deep-enhance-control'].hidden, true);
+  assert.match(h.elements['proofreading-mode-hint'].textContent, /仅规则/);
+  assert.match(h.elements['connection-status'].textContent, /无需连接模型/);
+  h.win.setModelConnectionStatus('late detection failed', 'error');
+  assert.match(h.elements['connection-status'].textContent, /无需连接模型/);
+  h.elements['rules-only'].checked = false;
+  h.elements['rules-only'].fire('change');
+  assert.equal(h.win.WpsSettingsStore.loadSettings().rulesOnly, false);
+  assert.equal(h.elements['deep-enhance-control'].hidden, false);
+  assert.equal(h.elements['deep-enhance'].checked, true);
+  assert.match(h.elements['proofreading-mode-hint'].textContent, /模型/);
+  const reloaded = harness({ seed: settings });
+  assert.equal(reloaded.elements['rules-only'].checked, true);
+  assert.equal(reloaded.elements['deep-enhance-control'].hidden, true);
+});
+
+test('rules-only startup never starts or detects OpenCode', async () => {
+  const calls = [];
+  const h = harness({ seed: { provider: 'opencode', rulesOnly: true }, nativeFetch: async (url) => {
+    calls.push(url);
+    return nativeResponse('stopped');
+  } });
+  await new Promise(setImmediate);
+  h.tick();
+  assert.deepEqual(calls, []);
+  assert.match(h.elements['connection-status'].textContent, /仅规则校对已就绪/);
+  assert.match(h.elements['model-summary'].textContent, /仅用本地规则/);
+  h.win.setAppMode('rewrite');
+  assert.doesNotMatch(h.elements['connection-status'].textContent, /无需连接模型/);
+  h.win.setAppMode('proofread');
+  assert.match(h.elements['connection-status'].textContent, /无需连接模型/);
+});
 
 test('OpenCode selection starts a stopped service and then enumerates models', async () => {
   const calls = [];
@@ -291,7 +356,9 @@ test('cached catalogs never assert a live connection on reload or mismatch; non-
   assert.doesNotMatch(h.elements['connection-status'].className, /success/);
   assert.doesNotMatch(h.elements['connection-status'].textContent, /旧连接/);
   await h.win.refreshProviderModels();
-  h.win.WpsSettingsStore.updateSettings({ deep: true, autoAdvance: false });
+  h.win.WpsSettingsStore.updateSettings({ deep: true, autoAdvance: false, concurrency: 3, timingLogs: true });
+  h.tick();
+  assert.equal(h.win.getModelConnectionState().detected, true);
   h.tick();
   assert.equal(h.win.getModelConnectionState().detected, true);
   h.win.WpsSettingsStore.savePassword('programmatic-test', 'opencode');
@@ -371,7 +438,7 @@ test('document session swaps preserve shared provider, model, password, settings
   h.tick();
   h.change('model-provider', 'openai');
   h.change('model-api-key', 'document-switch-session-secret');
-  h.win.WpsSettingsStore.updateSettings({ deep: true, autoAdvance: false });
+  h.win.WpsSettingsStore.updateSettings({ deep: true, autoAdvance: false, concurrency: 4, timingLogs: true });
   await h.win.refreshProviderModels();
   const settings = JSON.stringify(h.win.WpsSettingsStore.loadSettings());
   const connection = JSON.stringify(h.win.getModelConnectionState());
@@ -385,6 +452,6 @@ test('document session swaps preserve shared provider, model, password, settings
     assert.equal(JSON.stringify(h.win.getModelConnectionState()), connection);
     assert.equal(h.elements['connection-status'].textContent, connectionText);
     assert.equal(h.win.WpsSettingsStore.loadPassword('openai'), key);
-  }
+}
   assert.equal(JSON.stringify([...h.storage.values()]).includes('/private/A.docx'), false);
 });
