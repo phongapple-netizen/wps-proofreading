@@ -1,4 +1,4 @@
-name: Publish v0.3.1 release
+name: Promote v0.3.1 to stable
 
 on:
   push:
@@ -6,66 +6,52 @@ on:
       - release/tag-v0.3.1
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  validate:
+  promote:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: 6c4602627e8ea1ef4a8f6ec54e241371ed12e946
           fetch-depth: 0
-      - name: Verify release tag and version
-        shell: bash
-        run: |
-          set -euo pipefail
-          git fetch origin --tags
-          test "$(git rev-parse 'refs/tags/v0.3.1^{commit}')" = "6c4602627e8ea1ef4a8f6ec54e241371ed12e946"
-          test "$(node -p "require('./package.json').version")" = "0.3.1"
-          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
-          git merge-base --is-ancestor "6c4602627e8ea1ef4a8f6ec54e241371ed12e946" refs/remotes/origin/main
-
-  windows:
-    needs: validate
-    uses: ./.github/workflows/release-windows.yml
-    with:
-      release_ref: 6c4602627e8ea1ef4a8f6ec54e241371ed12e946
-
-  macos:
-    needs: validate
-    uses: ./.github/workflows/release-macos.yml
-    with:
-      release_ref: 6c4602627e8ea1ef4a8f6ec54e241371ed12e946
-
-  publish:
-    needs: [validate, windows, macos]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      actions: read
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: 6c4602627e8ea1ef4a8f6ec54e241371ed12e946
-          fetch-depth: 0
-      - uses: actions/download-artifact@v4
-        with:
-          name: windows-installer
-          path: dist/release
-      - uses: actions/download-artifact@v4
-        with:
-          name: macos-installer
-          path: dist/release
-      - name: Publish v0.3.1 prerelease
+      - name: Verify release before promotion
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          version="$(node -p "require('./package.json').version")"
-          test "$version" = "0.3.1"
-          test -f "dist/release/WPS-Proofreading-0.3.1-Windows-x64-Setup.exe"
-          test -f "dist/release/WPS-Proofreading-0.3.1-macOS.dmg"
-          node scripts/release-notes.js
-          gh release create "v0.3.1"             "dist/release/WPS-Proofreading-0.3.1-Windows-x64-Setup.exe"             "dist/release/WPS-Proofreading-0.3.1-macOS.dmg"             --title "WPS 文本校改 v0.3.1 · 测试版"             --notes-file release-notes.md             --prerelease             --verify-tag
+          git fetch origin --tags
+          test "$(git rev-parse 'refs/tags/v0.3.1^{commit}')" = "6c4602627e8ea1ef4a8f6ec54e241371ed12e946"
+          test "$(node -p "require('./package.json').version")" = "0.3.1"
+          gh release view v0.3.1 --json isPrerelease,assets --jq '
+            (.isPrerelease == true) and
+            ([.assets[].name] | sort == ["WPS-Proofreading-0.3.1-Windows-x64-Setup.exe","WPS-Proofreading-0.3.1-macOS.dmg"] | sort)
+          ' | grep -qx true
+      - name: Promote existing v0.3.1 prerelease to stable
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cat > release-notes.md <<'EOF'
+          WPS 文本校改 v0.3.1 正式版。
+
+          本版本包含：
+          - 可配置 1～4 路校对并发，默认 2 路；
+          - 正文校对与全文一致性复核均支持有限并发；
+          - 遇到 HTTP 429 / 模型限流时，本次运行自动降为串行并安全重试；
+          - 保留首批快速返回与增量展示；
+          - 保留修订模式下一键修正、撤销及迟到响应隔离保护；
+          - 增加可选的本地内存性能日志，便于比较不同并发档位；
+          - Windows 安装、服务注册/卸载与 macOS 安装包均已通过自动化验证。
+
+          Windows 10/11 x64：运行 Windows-x64-Setup.exe，为当前用户安装，随后重启 WPS。
+          macOS 11 及以上：打开 macOS.dmg，将应用拖入“应用程序”，打开应用并点击“安装并启动”，随后重启 WPS。
+
+          安装包包含 WPS 加载项与本机网页服务，不包含 OpenCode、其他模型服务或 AI 模型。使用 OpenCode 时需先单独安装 OpenCode。
+
+          当前安装包未做商业代码签名，Windows SmartScreen 或 macOS“隐私与安全性”仍可能提示未知开发者。
+          EOF
+          gh release edit v0.3.1             --title "WPS 文本校改 v0.3.1"             --notes-file release-notes.md             --prerelease=false             --latest
