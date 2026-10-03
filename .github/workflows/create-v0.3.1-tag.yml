@@ -25,10 +25,10 @@ jobs:
           git fetch origin --tags
           test "$(git rev-parse 'refs/tags/v0.3.1^{commit}')" = "6c4602627e8ea1ef4a8f6ec54e241371ed12e946"
           test "$(node -p "require('./package.json').version")" = "0.3.1"
-          gh release view v0.3.1 --json isPrerelease,assets --jq '
-            (.isPrerelease == true) and
-            ([.assets[].name] | sort == ["WPS-Proofreading-0.3.1-Windows-x64-Setup.exe","WPS-Proofreading-0.3.1-macOS.dmg"] | sort)
-          ' | grep -qx true
+          gh release view v0.3.1 --json isPrerelease --jq '.isPrerelease' | grep -qx true
+          actual_assets="$(gh release view v0.3.1 --json assets --jq '.assets[].name' | sort)"
+          expected_assets="$(printf '%s\n'             'WPS-Proofreading-0.3.1-Windows-x64-Setup.exe'             'WPS-Proofreading-0.3.1-macOS.dmg' | sort)"
+          test "$actual_assets" = "$expected_assets"
       - name: Promote existing v0.3.1 prerelease to stable
         shell: bash
         env:
