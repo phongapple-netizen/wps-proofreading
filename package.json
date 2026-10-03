@@ -1,6 +1,6 @@
 {
   "name": "wps-text-proofreading",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "WPS 文字原生智能文本校改加载项",
   "addonType": "wps",

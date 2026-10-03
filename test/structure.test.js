@@ -181,22 +181,21 @@ function issueActionButtons(card) {
 }
 
 test('settings displays the package version and keeps package metadata aligned', async () => {
+  const packageInfo = JSON.parse(read('package.json'));
   const calls = [];
   const { elements } = createResultHarness({
     fetch: async (url, options) => {
       calls.push([url, options]);
-      return { ok: true, json: async () => ({ version: '0.3.0' }) };
+      return { ok: true, json: async () => ({ version: packageInfo.version }) };
     }
   });
   await new Promise(setImmediate);
   assert.equal(calls.length, 1);
   assert.equal(calls[0][0], '../package.json');
   assert.equal(calls[0][1].cache, 'no-store');
-  assert.equal(elements['app-version'].textContent, 'WPS 文本校改 · v0.3.0');
+  assert.equal(elements['app-version'].textContent, 'WPS 文本校改 · v' + packageInfo.version);
 
-  const packageInfo = JSON.parse(read('package.json'));
   const packageLock = JSON.parse(read('package-lock.json'));
-  assert.equal(packageInfo.version, '0.3.0');
   assert.equal(packageLock.version, packageInfo.version);
   assert.equal(packageLock.packages[''].version, packageInfo.version);
   assert.match(read('ui/taskpane.html'), /id="app-version"/);
