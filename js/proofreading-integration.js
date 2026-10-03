@@ -2491,6 +2491,9 @@
         var batchDocumentKey = activeDocumentKey;
         setIssueActionBusy(true);
         try {
+            if (!prepareConsistencyWrite()) {
+                return { applied: 0, failed: pendingIds.length, skipped: skipped, stale: true };
+            }
             endUndoRecord = beginBatchUndoRecord();
             var batchOrder = trackedPlan || pendingIds;
             for (var index = 0; index < batchOrder.length; index += 1) {

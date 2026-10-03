@@ -2098,6 +2098,51 @@ test("first-pass completion unlocks writes and detaches late consistency results
     }
 });
 
+test("bulk correction stops consistency review before tracked and untracked writes", async () => {
+    for (const trackRevisions of [false, true]) {
+        for (const abortAvailable of [false, true]) {
+            let release, signal;
+            const harness = createHarness({
+                trackRevisions,
+                selectedText: "甲市综协办有错字,负责协调。\n甲市综合协调办公室负责协调。",
+                rules: [basicRule("basic-ascii-comma-between-hanzi")],
+                beforeWrite() {
+                    assert.equal(harness.busy, false, "review must stop before the first write");
+                    if (signal) assert.equal(signal.aborted, true);
+                }
+            });
+            if (abortAvailable) harness.window.AbortController = AbortController;
+            harness.window.WpsProofreadingCore.requestModel = (options, prompt) => {
+                if (prompt.includes("第二遍跨段落一致性复核")) {
+                    signal = options.signal;
+                    return new Promise(resolve => { release = resolve; });
+                }
+                return Promise.resolve('{"issues":[]}');
+            };
+            const operation = harness.window.runProofreading();
+            await until(() => release);
+            assert.equal(harness.busy, true);
+            assert.equal(harness.window.getWpsProofreadingState().firstPassComplete, true);
+            const id = harness.renderedIssues[0].id;
+            const result = harness.window.applyAllProofreadingIssues();
+            assert.equal(result.applied, 1);
+            assert.equal(result.failed, 0);
+            assert.equal(harness.readDocument(), harness.prefix + harness.selectedText.replace(",", "，") + harness.suffix);
+            const snapshot = harness.window.getWpsProofreadingState().snapshot;
+            const status = harness.status.text;
+            assert.ok(snapshot);
+            release('{"issues":[]}'); // Simulate a transport that ignores cancellation.
+            assert.equal((await operation).reason, "cancelled");
+            assert.equal(harness.window.getWpsProofreadingState().snapshot, snapshot);
+            assert.equal(harness.renderedIssues.length, 1);
+            assert.equal(harness.renderedIssues[0].status, "accepted");
+            assert.equal(harness.status.text, status);
+            assert.equal(await harness.window.undoProofreadingIssue(id), true);
+            assert.equal(harness.readDocument(), harness.prefix + harness.selectedText + harness.suffix);
+        }
+    }
+});
+
 test("ignoring a finding records history without touching the document", async () => {
     const harness = createHarness();
     await harness.window.runProofreading();
