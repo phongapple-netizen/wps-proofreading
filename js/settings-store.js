@@ -242,6 +242,7 @@
         var value = endpointForRuntime(endpoint);
         if (!id || !value) return false;
         sessionRuntimeEndpoints[id] = value;
+        updateSettings({ provider: id, profile: { endpoint: value } });
         return true;
     }
 
