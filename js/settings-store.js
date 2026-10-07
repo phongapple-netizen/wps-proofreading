@@ -12,9 +12,8 @@
         opencode: { endpoint: "http://127.0.0.1:4096", model: "opencode/mimo-v2.6-flash-free" },
         openai: { endpoint: "", model: "" }
     };
-    // Runtime-only values must never cross providers or survive a task-pane reload.
-    // Keep them out of PluginStorage/localStorage so credentials and external
-    // endpoints cannot be reused accidentally after switching model providers.
+    // Runtime maps keep the current pane responsive, while durable settings are
+    // mirrored to localStorage so provider/model/endpoint/credentials survive WPS restarts.
     var sessionRuntimeEndpoints = Object.create(null);
     var sessionPasswords = Object.create(null);
 
@@ -22,47 +21,61 @@
         return String(value == null ? "" : value);
     }
 
-    function getStorage() {
+    function storages() {
+        var result = [];
         try {
-            var api = root.WpsNativeDocument;
-            var pluginStorage = api && api.getPluginStorage ? api.getPluginStorage() : null;
-            if (pluginStorage && typeof pluginStorage.getItem === "function" &&
-                typeof pluginStorage.setItem === "function") {
-                return pluginStorage;
-            }
-        } catch (error) {
-            // 继续尝试页面本地存储。
-        }
-        try {
-            if (root.localStorage && typeof root.localStorage.getItem === "function") {
-                return root.localStorage;
+            if (root.localStorage && typeof root.localStorage.getItem === "function" &&
+                typeof root.localStorage.setItem === "function") {
+                result.push(root.localStorage);
             }
         } catch (error) {
             // 部分 WPS WebView 会禁用页面本地存储。
         }
-        return null;
+        try {
+            var api = root.WpsNativeDocument;
+            var pluginStorage = api && api.getPluginStorage ? api.getPluginStorage() : null;
+            if (pluginStorage && typeof pluginStorage.getItem === "function" &&
+                typeof pluginStorage.setItem === "function" &&
+                result.indexOf(pluginStorage) < 0) {
+                result.push(pluginStorage);
+            }
+        } catch (error) {
+            // PluginStorage 仅作为会话同步/旧数据迁移的后备。
+        }
+        return result;
     }
 
     function readJson(key) {
-        var storage = getStorage();
-        if (!storage) return null;
-        try {
-            var parsed = JSON.parse(storage.getItem(key) || "null");
-            return parsed && typeof parsed === "object" ? parsed : null;
-        } catch (error) {
-            return null;
+        var targets = storages();
+        for (var i = 0; i < targets.length; i++) {
+            try {
+                var parsed = JSON.parse(targets[i].getItem(key) || "null");
+                if (!parsed || typeof parsed !== "object") continue;
+                // 如果只在旧的 PluginStorage 找到值，立即迁移到持久化 localStorage。
+                if (i > 0 && targets[0]) {
+                    try { targets[0].setItem(key, JSON.stringify(parsed)); } catch (error) { /* best effort */ }
+                }
+                return parsed;
+            } catch (error) {
+                // 继续尝试下一个存储后端。
+            }
         }
+        return null;
     }
 
     function writeJson(key, value) {
-        var storage = getStorage();
-        if (!storage) return false;
-        try {
-            storage.setItem(key, JSON.stringify(value));
-            return true;
-        } catch (error) {
-            return false;
-        }
+        var targets = storages();
+        var payload = JSON.stringify(value);
+        var wrote = false;
+        targets.forEach(function (storage) {
+            try {
+                storage.setItem(key, payload);
+                wrote = true;
+            } catch (error) {
+                // 只要至少一个持久化后端写入成功即可。
+            }
+        });
+        return wrote;
     }
 
     function hasCredential(url) {
@@ -97,7 +110,7 @@
 
     function endpointForStorage(value) {
         var raw = text(value).trim();
-        if (!raw || hasCredential(raw) || !isLoopback(raw)) return "";
+        if (!raw || hasCredential(raw)) return "";
         try {
             return new URL(raw).toString().replace(/\/$/, "");
         } catch (error) {
@@ -268,50 +281,62 @@
         });
     }
 
+    function storedPasswords() {
+        var parsed = readJson(PASSWORD_KEY);
+        return parsed && typeof parsed === "object" ? parsed : {};
+    }
+
     function loadPassword(provider) {
         var id = normalizeProvider(provider);
         if (id !== "opencode" && id !== "openai") return "";
-        return typeof sessionPasswords[id] === "string" ? sessionPasswords[id] : "";
+        if (typeof sessionPasswords[id] === "string") return sessionPasswords[id];
+        var saved = storedPasswords();
+        return typeof saved[id] === "string" ? saved[id] : "";
     }
 
     function savePassword(value, provider) {
         var id = normalizeProvider(provider);
         if (id !== "opencode" && id !== "openai") return false;
         var raw = text(value);
+        if (raw.length > 2048) return false;
+        var saved = storedPasswords();
         if (!raw) {
             delete sessionPasswords[id];
-            return true;
+            delete saved[id];
+        } else {
+            sessionPasswords[id] = raw;
+            saved[id] = raw;
         }
-        if (raw.length > 512) return false;
-        sessionPasswords[id] = raw;
-        return true;
+        return writeJson(PASSWORD_KEY, saved);
     }
 
     function clearPassword(provider) {
         var id = normalizeProvider(provider);
+        var saved = storedPasswords();
         if (id === "opencode" || id === "openai") {
             delete sessionPasswords[id];
-            return true;
+            delete saved[id];
+        } else {
+            sessionPasswords = Object.create(null);
+            saved = {};
         }
-        sessionPasswords = Object.create(null);
-        return true;
+        return writeJson(PASSWORD_KEY, saved);
     }
 
     function clearLegacyStoredValue(key) {
-        var storage = getStorage();
-        if (!storage) return;
-        try {
-            if (typeof storage.removeItem === "function") storage.removeItem(key);
-            else storage.setItem(key, "null");
-        } catch (error) {
-            // Best-effort migration cleanup only.
-        }
+        var targets = storages();
+        targets.forEach(function (storage) {
+            try {
+                if (typeof storage.removeItem === "function") storage.removeItem(key);
+                else storage.setItem(key, "null");
+            } catch (error) {
+                // Best-effort migration cleanup only.
+            }
+        });
     }
 
-    // Older builds temporarily stored runtime endpoints/passwords in the shared
-    // storage adapter. Clear those values once when this module loads.
+    // Runtime endpoint key is obsolete. Passwords now intentionally persist.
     clearLegacyStoredValue(RUNTIME_ENDPOINT_KEY);
-    clearLegacyStoredValue(PASSWORD_KEY);
 
     var api = {
         SETTINGS_KEY: SETTINGS_KEY,
