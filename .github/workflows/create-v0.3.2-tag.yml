@@ -1,0 +1,34 @@
+name: Create v0.3.2 release tag
+
+on:
+  push:
+    branches:
+      - release/tag-v0.3.2
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Create release tag on validated main commit
+        shell: bash
+        env:
+          TARGET_COMMIT: d41b10df0f8d8a381c01d25a6af1cc1219297d80
+          RELEASE_TAG: v0.3.2
+        run: |
+          set -euo pipefail
+          git fetch origin main --tags
+          test "$(git rev-parse origin/main)" = "$TARGET_COMMIT"
+          version="$(git show "$TARGET_COMMIT:package.json" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>process.stdout.write(JSON.parse(s).version))")"
+          test "$version" = "0.3.2"
+          if git rev-parse -q --verify "refs/tags/$RELEASE_TAG" >/dev/null; then
+            echo "Tag already exists: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          git tag "$RELEASE_TAG" "$TARGET_COMMIT"
+          git push origin "refs/tags/$RELEASE_TAG"
