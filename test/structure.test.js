@@ -1300,7 +1300,7 @@ test('action busy locks issue controls without rebuilding cards and catches reje
   assert.equal(win.getProofreadingStatus().text.includes('正文内容不应出现在错误提示中'), false);
 });
 
-test('settings form persists safe settings while provider secrets stay memory-only', () => {
+test('settings form persists provider settings and credentials locally', () => {
   function makeField(value) {
     return {
       value: value == null ? '' : value,
@@ -1387,8 +1387,8 @@ test('settings form persists safe settings while provider secrets stay memory-on
   assert.equal(win.WpsSettingsStore.loadPassword('opencode'), 'session-secret');
 
   const storedText = Array.from(storage.values()).join('\n');
-  assert.equal(storedText.includes('session-secret'), false);
-  assert.equal(storedText.includes('openai-secret'), false);
+  assert.equal(storedText.includes('session-secret'), true);
+  assert.equal(storedText.includes('openai-secret'), true);
   storage.set('wps_text_proofreading_model_settings_v1', JSON.stringify({ provider: 'ollama' }));
   assert.equal(win.WpsSettingsStore.loadSettings().autoAdvance, true);
   win.WpsSettingsStore.saveSettings({ provider: 'ollama', autoAdvance: false });

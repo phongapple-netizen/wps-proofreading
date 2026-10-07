@@ -3099,7 +3099,7 @@ test("first-pass progress is weighted by processed characters rather than batch 
     assert.match(secondBatch.label, /已处理 3000\/3000 字/);
 });
 
-test("runtime secrets and external endpoints are provider-scoped and memory-only", () => {
+test("credentials and external endpoints are provider-scoped and persist locally", () => {
     const harness = createHarness();
     const store = harness.window.WpsSettingsStore;
 
@@ -3113,9 +3113,9 @@ test("runtime secrets and external endpoints are provider-scoped and memory-only
     assert.equal(store.loadRuntimeEndpoint("openai").endpoint, "https://models.example/v1/chat/completions");
     assert.equal(store.loadRuntimeEndpoint("opencode"), null);
 
-    assert.equal(harness.storageDump.includes("opencode-secret"), false);
-    assert.equal(harness.storageDump.includes("openai-secret"), false);
-    assert.equal(harness.storageDump.includes("models.example"), false);
+    assert.equal(harness.storageDump.includes("opencode-secret"), true);
+    assert.equal(harness.storageDump.includes("openai-secret"), true);
+    assert.equal(harness.storageDump.includes("models.example"), true);
 
     store.clearPassword("opencode");
     assert.equal(store.loadPassword("opencode"), "");
