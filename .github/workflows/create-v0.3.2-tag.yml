@@ -1,4 +1,4 @@
-name: Publish v0.3.2 release
+name: Promote v0.3.2 to stable
 
 on:
   push:
@@ -6,66 +6,60 @@ on:
       - release/tag-v0.3.2
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  validate:
+  promote:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: d41b10df0f8d8a381c01d25a6af1cc1219297d80
           fetch-depth: 0
-      - name: Verify release tag and version
-        shell: bash
-        run: |
-          set -euo pipefail
-          git fetch origin --tags
-          test "$(git rev-parse 'refs/tags/v0.3.2^{commit}')" = "d41b10df0f8d8a381c01d25a6af1cc1219297d80"
-          test "$(node -p "require('./package.json').version")" = "0.3.2"
-          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
-          git merge-base --is-ancestor "d41b10df0f8d8a381c01d25a6af1cc1219297d80" refs/remotes/origin/main
-
-  windows:
-    needs: validate
-    uses: ./.github/workflows/release-windows.yml
-    with:
-      release_ref: d41b10df0f8d8a381c01d25a6af1cc1219297d80
-
-  macos:
-    needs: validate
-    uses: ./.github/workflows/release-macos.yml
-    with:
-      release_ref: d41b10df0f8d8a381c01d25a6af1cc1219297d80
-
-  publish:
-    needs: [validate, windows, macos]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      actions: read
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: d41b10df0f8d8a381c01d25a6af1cc1219297d80
-          fetch-depth: 0
-      - uses: actions/download-artifact@v4
-        with:
-          name: windows-installer
-          path: dist/release
-      - uses: actions/download-artifact@v4
-        with:
-          name: macos-installer
-          path: dist/release
-      - name: Publish v0.3.2 prerelease
+      - name: Verify release before promotion
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          version="$(node -p "require('./package.json').version")"
-          test "$version" = "0.3.2"
-          test -f "dist/release/WPS-Proofreading-0.3.2-Windows-x64-Setup.exe"
-          test -f "dist/release/WPS-Proofreading-0.3.2-macOS.dmg"
-          node scripts/release-notes.js
-          gh release create "v0.3.2"             "dist/release/WPS-Proofreading-0.3.2-Windows-x64-Setup.exe"             "dist/release/WPS-Proofreading-0.3.2-macOS.dmg"             --title "WPS 文本校改 v0.3.2 · 测试版"             --notes-file release-notes.md             --prerelease             --verify-tag
+          git fetch origin --tags
+          test "$(git rev-parse 'refs/tags/v0.3.2^{commit}')" = "d41b10df0f8d8a381c01d25a6af1cc1219297d80"
+          test "$(node -p "require('./package.json').version")" = "0.3.2"
+          gh release view v0.3.2 --json isPrerelease --jq '.isPrerelease' | grep -qx true
+          actual_assets="$(gh release view v0.3.2 --json assets --jq '.assets[].name' | sort)"
+          expected_assets="$(printf '%s\n' \
+            'WPS-Proofreading-0.3.2-Windows-x64-Setup.exe' \
+            'WPS-Proofreading-0.3.2-macOS.dmg' | sort)"
+          test "$actual_assets" = "$expected_assets"
+      - name: Promote existing v0.3.2 prerelease to stable
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cat > release-notes.md <<'EOF'
+          WPS 文本校改 v0.3.2 正式版。
+
+          本版本重点修复模型配置持久化：
+          - OpenCode / Ollama / OpenAI 兼容服务类型在 WPS 重启后保持；
+          - 最后选择的模型、手动填写的模型名会自动保存；
+          - 自定义 OpenAI 兼容接口地址会自动保存；
+          - API Key 与 OpenCode 服务密码按用户设置保存在本机；
+          - 持久化 localStorage 优先，PluginStorage 作为会话同步与旧数据迁移后备；
+          - 已补充跨重启、旧数据迁移和存储优先级回归测试；
+          - Windows 安装、服务注册/卸载与 macOS 安装包均通过自动化验证。
+
+          Windows 10/11 x64：运行 Windows-x64-Setup.exe，为当前用户安装，随后重启 WPS。
+          macOS 11 及以上：打开 macOS.dmg，将应用拖入“应用程序”，打开应用并点击“安装并启动”，随后重启 WPS。
+
+          安装包包含 WPS 加载项与本机网页服务，不包含 OpenCode、其他模型服务或 AI 模型。使用 OpenCode 时需先单独安装 OpenCode。
+
+          API Key 和服务密码保存在本机插件存储中，密码输入框仅做遮挡显示，并非加密存储。
+
+          当前安装包未做商业代码签名，Windows SmartScreen 或 macOS“隐私与安全性”仍可能提示未知开发者。
+          EOF
+          gh release edit v0.3.2 \
+            --title "WPS 文本校改 v0.3.2" \
+            --notes-file release-notes.md \
+            --prerelease=false \
+            --latest
