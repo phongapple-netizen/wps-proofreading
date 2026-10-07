@@ -1422,7 +1422,7 @@
             if (modelLabel) modelLabel.textContent = "OpenCode 模型";
             if (model) model.placeholder = "检测服务后选择 provider/model";
             if (keyLabel) keyLabel.textContent = "OpenCode 服务密码（可选）";
-            if (key) key.placeholder = "仅在服务启用密码时填写；不会保存";
+            if (key) key.placeholder = "仅在服务启用密码时填写；保存在本机";
             if (help) help.textContent = "选择 OpenCode 后会自动检测、启动服务并读取模型。";
         } else {
             if (endpointLabel) endpointLabel.textContent = "Chat Completions API 地址";
@@ -1430,7 +1430,7 @@
             if (modelLabel) modelLabel.textContent = "模型名称";
             if (model) model.placeholder = "例如 gpt-4.1-mini";
             if (keyLabel) keyLabel.textContent = "API 密钥（可选）";
-            if (key) key.placeholder = "仅在本次面板会话中使用";
+            if (key) key.placeholder = "保存在本机，下次打开继续使用";
             if (help) help.textContent = "兼容接口需要支持 /v1/models 和 Chat Completions。";
         }
     }
