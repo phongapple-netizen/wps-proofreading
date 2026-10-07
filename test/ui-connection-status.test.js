@@ -292,7 +292,7 @@ test('OpenCode troubleshooting stays folded until requested and other providers 
   assert.deepEqual(calls, ['GET']);
 });
 
-test('session-only OpenCode password keeps the existing authenticated model detection path', async () => {
+test('persisted OpenCode password keeps the existing authenticated model detection path', async () => {
   const calls = [];
   const h = harness({ nativeFetch: async (url, init) => {
     calls.push(init.method);
@@ -303,7 +303,7 @@ test('session-only OpenCode password keeps the existing authenticated model dete
   await h.win.refreshProviderModels();
   assert.deepEqual(calls, ['GET']);
   assert.equal(h.win.getModelConnectionState().detected, true);
-  assert.equal(JSON.stringify([...h.storage.values()]).includes('session-only'), false);
+  assert.equal(JSON.stringify([...h.storage.values()]).includes('session-only'), true);
 });
 
 function assertRequiresDetection(h) {
@@ -342,7 +342,7 @@ test('provider, endpoint and password edits remain unverified across polling unt
   h.change('model-api-key', 'test-only-password');
   assertRequiresDetection(h);
   assert.equal(h.win.WpsSettingsStore.loadPassword('opencode'), 'test-only-password');
-  assert.equal(JSON.stringify([...h.storage.values()]).includes('test-only-password'), false);
+  assert.equal(JSON.stringify([...h.storage.values()]).includes('test-only-password'), true);
   assert.equal(JSON.stringify(h.win.getModelConnectionState()).includes('test-only-password'), false);
   await h.win.refreshProviderModels();
   assert.equal(h.win.getModelConnectionState().detected, true);
